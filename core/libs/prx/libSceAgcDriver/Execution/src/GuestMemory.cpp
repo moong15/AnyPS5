@@ -1030,7 +1030,6 @@ bool sharedCollectMemo() {
     return shared;
 }
 
-#ifndef _WIN32
 struct StampRuns {
     WriteTracker& tracker;
     StampKind kind;
@@ -1046,59 +1045,44 @@ void stampWrittenRun(void* context, std::uintptr_t begin, std::uintptr_t end) {
     const auto generation = tracker.generation.load(std::memory_order_relaxed);
     if (kind != StampKind::Driver) tracker.noteCpuStore(begin, end, generation);
     for (auto block = tracker.blockOf(begin); block <= tracker.blockOf(end - 1); ++block) tracker.stamp(block, generation, kind);
+#ifndef _WIN32
     collectDirtyRuns.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+#ifdef _WIN32
+bool collectWindowsWrites(StampRuns& runs, std::uint64_t first, std::uint64_t stop, bool armedOnly) {
+    auto& tracker = runs.tracker;
+    const bool fresh = runs.kind == StampKind::Fresh;
+    const auto collect = fresh ? &GuestArena::GuestArenaCollectFreshWrites_nid_postfix : armedOnly ? &GuestArena::GuestArenaCollectArmedWrites_nid_postfix : &GuestArena::GuestArenaCollectWrites_nid_postfix;
+    static const bool singlePass = std::getenv("APS5_NO_SINGLE_PASS_COLLECT") == nullptr;
+    const auto walk = [&](bool clear) {
+        auto cursor = first;
+        while (cursor < stop) {
+            std::size_t count = tracker.pages.size();
+            if (!collect(cursor, static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, clear)) return false;
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto page = reinterpret_cast<std::uintptr_t>(tracker.pages[i]);
+                stampWrittenRun(&runs, page, page + WritePageBytes);
+            }
+            if (count < tracker.pages.size()) break;
+            cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + WritePageBytes;
+        }
+        return true;
+    };
+    if (!walk(singlePass || fresh)) return false;
+    if (runs.stamped != 0) collectDirty.fetch_add(1, std::memory_order_relaxed);
+    return fresh || singlePass || runs.stamped == 0 || walk(true);
 }
 #endif
 
 bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, StampKind kind, bool armedOnly = false) {
     ++tracker.generation;
+    StampRuns runs{tracker, kind};
 #ifdef _WIN32
-    static_cast<void>(armedOnly);
-    constexpr std::uint64_t page = 4096;
-    // One resetting walk: the kernel reports and clears a page's dirty bit together, a write landing
-    // after the walk passed a page is reported by the next walk, and a clean page is not touched by the
-    // reset, so a probe pass first (which doubled the walk of every dirty range) buys nothing.
-    // APS5_NO_SINGLE_PASS_COLLECT=1 restores the probe pass followed by a resetting pass when dirty.
-    static const bool singlePass = std::getenv("APS5_NO_SINGLE_PASS_COLLECT") == nullptr;
-    auto cursor = first;
-    bool dirty = false;
-    while (cursor < stop) {
-        std::size_t count = tracker.pages.size();
-        DWORD granularity = 4096;
-        if (!GuestArena::GuestArenaCollectWrites_nid_postfix(cursor, static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, singlePass)) {
-            // Uncommitted pages inside the range make the call fail; such ranges are compared instead.
-            return false;
-        }
-        if (count != 0) dirty = true;
-        for (ULONG_PTR i = 0; i < count; ++i) {
-            const auto page = reinterpret_cast<std::uintptr_t>(tracker.pages[i]);
-            tracker.stamp(tracker.blockOf(page), tracker.generation, kind);
-            if (kind != StampKind::Driver) tracker.noteCpuStore(page, page + WritePageBytes, tracker.generation);
-        }
-        if (count < tracker.pages.size()) break;
-        cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + (granularity != 0 ? granularity : page);
-    }
-    if (dirty) collectDirty.fetch_add(1, std::memory_order_relaxed);
-    if (dirty && !singlePass) {
-        // The resetting pass reports pages again, so a write racing the first pass is stamped too.
-        cursor = first;
-        while (cursor < stop) {
-            std::size_t count = tracker.pages.size();
-            DWORD granularity = 4096;
-            if (!GuestArena::GuestArenaCollectWrites_nid_postfix(cursor, static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, true)) return false;
-            for (ULONG_PTR i = 0; i < count; ++i) {
-                const auto page = reinterpret_cast<std::uintptr_t>(tracker.pages[i]);
-                tracker.stamp(tracker.blockOf(page), tracker.generation, kind);
-                if (kind != StampKind::Driver) tracker.noteCpuStore(page, page + WritePageBytes, tracker.generation);
-            }
-            if (count < tracker.pages.size()) break;
-            cursor = reinterpret_cast<std::uintptr_t>(tracker.pages[count - 1]) + (granularity != 0 ? granularity : page);
-        }
-    }
-    return true;
+    return collectWindowsWrites(runs, first, stop, armedOnly);
 #else
     const auto dirtyRuns = collectDirtyRuns.load(std::memory_order_relaxed);
-    StampRuns runs{tracker, kind};
     const auto collect = armedOnly ? &GuestWriteWatch::GuestWriteWatchCollectArmed_nid_postfix : &GuestWriteWatch::GuestWriteWatchCollect_nid_postfix;
     const bool complete = collect(static_cast<std::uintptr_t>(first), static_cast<std::size_t>(stop - first), &stampWrittenRun, &runs);
     if (collectDirtyRuns.load(std::memory_order_relaxed) != dirtyRuns) collectDirty.fetch_add(1, std::memory_order_relaxed);
@@ -1321,19 +1305,22 @@ std::uint64_t MarkWritten(std::uint64_t address, std::size_t bytes) {
         tracker.noteUnstampedStore(address, address + bytes);
         return 0;
     }
-#ifndef _WIN32
     {
         const auto blockFirst = address & ~(std::uint64_t{WriteBlockBytes} - 1);
         const auto blockStop = (address + bytes + WriteBlockBytes - 1) & ~(std::uint64_t{WriteBlockBytes} - 1);
         StampRuns runs{tracker, StampKind::Fresh};
-        if (!GuestWriteWatch::GuestWriteWatchCollectFresh_nid_postfix(static_cast<std::uintptr_t>(blockFirst), static_cast<std::size_t>(blockStop - blockFirst), &stampWrittenRun, &runs)) {
+#ifdef _WIN32
+        const bool complete = collectWindowsWrites(runs, blockFirst, blockStop, false);
+#else
+        const bool complete = GuestWriteWatch::GuestWriteWatchCollectFresh_nid_postfix(static_cast<std::uintptr_t>(blockFirst), static_cast<std::size_t>(blockStop - blockFirst), &stampWrittenRun, &runs);
+#endif
+        if (!complete) {
             unwatchLocked(tracker, blockFirst, static_cast<std::size_t>(blockStop - blockFirst));
             tracker.noteUnstampedStore(address, address + bytes);
             return 0;
         }
         if (runs.stamped != 0) ++tracker.generation;
     }
-#endif
     const auto first = tracker.blockOf(address);
     const auto last = tracker.blockOf(address + bytes - 1);
     for (auto block = first; block <= last; ++block) {

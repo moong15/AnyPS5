@@ -19,6 +19,8 @@ namespace GuestArena {
 
 class WindowsMappings {
 public:
+    enum class Collection { All, Armed, Fresh };
+
     static WindowsMappings& Get() {
         static WindowsMappings mappings;
         return mappings;
@@ -219,12 +221,19 @@ public:
         return true;
     }
 
-    bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear) {
+    bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear, Collection collection = Collection::All) {
         std::lock_guard lock(mutex);
         const auto capacity = *count;
         *count = 0;
         const auto end = address + bytes;
-        if (clear && !collectable(address, end)) return false;
+        if (collection == Collection::Fresh) {
+            for (auto it = views.lower_bound(address & ~(pageBytes - 1)); it != views.end() && it->first < end; ++it) {
+                if (it->second.protection != PAGE_NOACCESS) continue;
+                for (auto at = std::max(address, it->first); at < std::min(end, it->first + pageBytes); at += 4096) {
+                    if ((it->second.collected & (1u << ((at - it->first) / 4096))) == 0) return false;
+                }
+            }
+        } else if (clear && !collectable(address, end)) return false;
         for (auto cursor = address; cursor < end;) {
             const auto nextClean = cleanRanges.upper_bound(cursor);
             if (nextClean != cleanRanges.begin()) {
@@ -238,16 +247,37 @@ public:
             const auto found = views.find(base);
             if (found != views.end()) {
                 auto& view = found->second;
-                const auto stop = std::min(std::min(end, base + pageBytes), nextClean == cleanRanges.end() ? end : nextClean->first);
+                auto stop = std::min(std::min(end, base + pageBytes), nextClean == cleanRanges.end() ? end : nextClean->first);
+                if (collection != Collection::All) {
+                    const auto selected = [&](std::uintptr_t at) {
+                        const bool collected = (view.collected & (1u << ((at - base) / 4096))) != 0;
+                        return collection == Collection::Armed ? collected : !collected;
+                    };
+                    while (cursor < stop && !selected(cursor)) cursor = std::min(stop, cursor + 4096);
+                    if (cursor == stop) continue;
+                    for (auto at = cursor + 4096; at < stop; at += 4096) {
+                        if (!selected(at)) {
+                            stop = at;
+                            break;
+                        }
+                    }
+                }
                 if (view.protection == PAGE_NOACCESS) return false;
                 const bool pinned = view.page->pins != 0;
-                if (pinned || view.seen != view.page->generation) {
+                if (collection == Collection::Fresh || pinned || view.seen != view.page->generation) {
                     const auto needed = (stop - cursor + 4095) / 4096;
                     if (needed > capacity - *count) {
-                        for (auto at = cursor; *count < capacity; at += 4096) pages[(*count)++] = reinterpret_cast<void*>(at);
-                        return true;
+                        if (collection != Collection::Fresh) {
+                            for (auto at = cursor; *count < capacity; at += 4096) pages[(*count)++] = reinterpret_cast<void*>(at);
+                            return true;
+                        }
+                        if (*count == capacity) return true;
+                        stop = cursor + (capacity - *count) * 4096;
                     }
                     for (auto at = cursor; at < stop; at += 4096) pages[(*count)++] = reinterpret_cast<void*>(at);
+                }
+                if (clear) {
+                    for (auto at = cursor; at < stop; at += 4096) view.collected |= static_cast<std::uint8_t>(1u << ((at - base) / 4096));
                 }
                 if (clear && !pinned) {
                     for (const auto alias : view.page->aliases) {
@@ -262,7 +292,13 @@ public:
                     rememberClean(cursor, stop);
                 }
                 cursor = stop;
+                if (*count == capacity) return true;
             } else {
+                if (collection == Collection::Fresh) {
+                    const auto next = views.lower_bound(cursor);
+                    cursor = next == views.end() ? end : std::min(end, next->first);
+                    continue;
+                }
                 const auto memory = query(cursor);
                 if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return false;
                 const auto stop = std::min(end, reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize);
@@ -315,6 +351,7 @@ private:
         std::shared_ptr<Section> section;
         std::uint64_t offset;
         std::uint32_t hostWrites;
+        std::uint8_t collected = 0;
     };
     void forgetClean(std::uintptr_t start, std::uintptr_t end) {
         auto it = cleanRanges.lower_bound(start);

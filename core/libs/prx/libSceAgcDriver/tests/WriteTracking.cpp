@@ -183,6 +183,65 @@ void CheckNewestStamp() {
 }
 
 #ifdef _WIN32
+void CheckDeferredSharedImports() {
+    constexpr std::size_t bytes = 4 * Block;
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, bytes, nullptr);
+    Require(section != nullptr, "cannot create shared import backing");
+    auto* memory = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, Block));
+    Require(memory != nullptr, "cannot allocate shared import address");
+    GuestArena::GuestArenaMap_nid_postfix(memory, bytes, section, 0, PAGE_READWRITE);
+    const auto base = reinterpret_cast<std::uintptr_t>(memory);
+    const auto protection = [&](std::size_t offset) {
+        MEMORY_BASIC_INFORMATION info{};
+        Require(VirtualQuery(memory + offset, &info, sizeof(info)) == sizeof(info), "cannot query shared import protection");
+        return info.Protect;
+    };
+    Require(ImportWatched(base, bytes, [] { return true; }), "fresh shared import failed");
+    Require(protection(0) == PAGE_READWRITE && protection(bytes - 1) == PAGE_READWRITE, "fresh import armed shared pages");
+    const auto gpu = MarkWritten(base + 4096, 4);
+    Require(gpu != 0 && protection(0) == PAGE_READONLY && protection(Block) == PAGE_READWRITE, "GPU write did not activate only its block");
+    CollectWritesUncached(base, Block);
+    Require(!WrittenSince(base + 4096, 4, gpu) && !StoredOver(base + 4096, 4, gpu), "first collect overwrote a GPU generation");
+    static_cast<volatile std::uint8_t*>(memory)[4096] = 0x44;
+    CollectWritesUncached(base, Block);
+    Require(WrittenSince(base + 4096, 4, gpu) && StoredOver(base + 4096, 4, gpu), "CPU store after GPU write was missed");
+
+    const auto second = base + Block;
+    const auto before = CollectWritesUncached(second, 4096);
+    Require(MarkWritten(second, 4) != 0, "GPU write next to fresh pages failed");
+    Require(UnchangedSinceCollected(second, 4, before), "fresh neighbors were stamped as new CPU writes over a collected page");
+    Require(StoredOver(second + 8 * 4096, 4096, before), "fresh neighbor history was lost");
+    const std::array<std::uint64_t, 1> generations{before};
+    std::array<std::uint8_t, 1> changed{};
+    std::array<std::uint8_t, 1> cpu{};
+    Require(ChangedBlocks(second, Block, generations, changed, cpu) && changed[0] == BlockWritten && cpu[0] == 0, "fresh collection set the block's CPU stamp");
+    const auto generation = TrackerGeneration();
+    Require(MarkWritten(second, 4) == generation + 1, "an already collected GPU block advanced twice");
+
+    const auto third = base + 2 * Block;
+    const auto cached = CollectWritesUncached(third, Block);
+    Require(ImportWatched(third, Block, [&] {
+        static_cast<volatile std::uint8_t*>(memory)[2 * Block] = 0x55;
+        return true;
+    }), "tracked import window failed");
+    Require(!UnchangedSince(third, Block, cached) && !WrittenSince(third, Block, cached), "import-window bookkeeping was lost");
+    const auto afterImport = CollectWritesUncached(third, Block);
+    static_cast<volatile std::uint8_t*>(memory)[2 * Block] = 0x66;
+    Require(ImportWatched(third, Block, [] { return true; }) && WrittenSince(third, Block, afterImport), "pre-import CPU store was not collected");
+
+    GuestArena::GuestArenaReset_nid_postfix(memory + 3 * Block, 16384);
+    const auto edge = base + 3 * Block + 16384;
+    Require(ImportWatched(edge, Block - 16384, [] { return true; }), "unaligned shared import failed");
+    const auto edgeGpu = MarkWritten(edge, 4);
+    Require(edgeGpu != 0, "fresh collection rejected an unmapped block neighbor");
+    CollectWritesUncached(edge, Block - 16384);
+    Require(!WrittenSince(edge, 4, edgeGpu), "edge block collection overwrote GPU results");
+    GuestArena::GuestArenaReset_nid_postfix(memory, bytes);
+    GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+    CloseHandle(section);
+}
+
+
 void CheckPrivateMappingReuse() {
     void* memory = AllocateWatched(3 * Block);
     const auto base = reinterpret_cast<std::uint64_t>(memory);
@@ -430,6 +489,7 @@ int main() {
         CheckUnwatch();
         CheckNewestStamp();
 #ifdef _WIN32
+        CheckDeferredSharedImports();
         CheckPrivateMappingReuse();
         CheckHostHoleInChild();
 #endif
