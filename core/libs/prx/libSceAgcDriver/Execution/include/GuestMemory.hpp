@@ -60,7 +60,7 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
 // UnchangedSince is always false, so callers fall back to comparing bytes.
 bool WriteWatched();
 void Unwatch(std::uint64_t address, std::size_t bytes);
-bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched = true);
+bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import);
 bool Watched(std::uint64_t address, std::size_t bytes);
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes);
 bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation);
@@ -116,6 +116,7 @@ bool UnchangedSinceCollected(std::uint64_t address, std::size_t bytes, std::uint
 // watched arena, or for a generation of 0, a block reads as changed.
 constexpr std::uint8_t BlockUnchanged = 0;
 constexpr std::uint8_t BlockWritten = 1;
+constexpr std::uint8_t BlockMaybeWritten = 2;
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu = {});
 
 // Serializes device work: draws, dispatches, presentation and the deferred write-backs below. The
