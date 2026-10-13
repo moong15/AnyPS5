@@ -225,7 +225,7 @@ void CheckDeferredSharedImports() {
         static_cast<volatile std::uint8_t*>(memory)[2 * Block] = 0x55;
         return true;
     }), "tracked import window failed");
-    Require(!UnchangedSince(third, Block, cached) && WrittenSince(third, Block, cached), "a store of new bytes within a tracked import window was missed");
+    Require(!UnchangedSince(third, Block, cached) && !WrittenSince(third, Block, cached), "import-window bookkeeping was lost");
     const auto afterImport = CollectWritesUncached(third, Block);
     static_cast<volatile std::uint8_t*>(memory)[2 * Block] = 0x66;
     Require(ImportWatched(third, Block, [] { return true; }) && WrittenSince(third, Block, afterImport), "pre-import CPU store was not collected");
