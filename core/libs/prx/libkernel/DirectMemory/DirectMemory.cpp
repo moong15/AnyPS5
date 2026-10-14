@@ -902,10 +902,11 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     return 0;
 }
 
-int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment) {
+int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment, bool exclusive) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
+    if (exclusive && mutation.Overlaps(*addr, len)) return SCE_KERNEL_ERROR_ENOMEM;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) {
@@ -1166,6 +1167,20 @@ bool GuestProtection(uintptr_t addr, int* prot) {
     if (addr >= containing->second.end) return false;
     *prot = containing->second.prot;
     return true;
+}
+
+void GuestPageTableUsage(std::uint64_t granularity, std::uint64_t* cpuEntries, std::uint64_t* gpuEntries) {
+    std::uint64_t cpu = 0;
+    std::uint64_t gpu = 0;
+    std::lock_guard lock(g_protectionLock);
+    for (const auto& [start, range] : g_protections) {
+        if (range.end <= start) continue;
+        const auto entries = (range.end - 1) / granularity - start / granularity + 1;
+        if (range.prot & 0x7) cpu += entries;
+        if (range.prot & GuestProtGpuReadWrite) gpu += entries;
+    }
+    *cpuEntries = cpu;
+    *gpuEntries = gpu;
 }
 
 bool QueryDirectMapping(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end, std::uint64_t* offset, int* memoryType) {

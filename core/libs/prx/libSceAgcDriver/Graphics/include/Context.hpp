@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -48,7 +49,23 @@ inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
 }
 
+inline std::function<void()>& DeviceLostHook() {
+    static std::function<void()> hook;
+    return hook;
+}
+
+inline const void*& DeviceLostOwner() {
+    static const void* owner = nullptr;
+    return owner;
+}
+
+inline void ReportDeviceLost() {
+    static std::atomic<bool> reported{false};
+    if (DeviceLostHook() && !reported.exchange(true)) DeviceLostHook()();
+}
+
 inline void Check(VkResult result, const char* operation) {
+    if (result == VK_ERROR_DEVICE_LOST) ReportDeviceLost();
     if (result != VK_SUCCESS) throw std::runtime_error(std::string("AGC graphics: ") + operation + ": Vulkan result " + std::to_string(result));
 }
 

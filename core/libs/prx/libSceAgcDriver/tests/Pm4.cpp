@@ -553,6 +553,21 @@ void testCopies() {
 #endif
 }
 
+void testTraceRegisterWrites() {
+    AgcDriver::QueueState state;
+    const auto repeated = makePacket(0x37, {0x06010000u, 0xc343u, 0u, 0x1234u, 0x5678u});
+    check(!AgcDriver::Pm4::DecodeLabelWrite(repeated), "trace register payload was decoded as a guest memory label");
+    execute(state, repeated);
+    check(state.userConfig.at(0x343u) == 0x5678u, "one-address trace write did not retain the last register value");
+    execute(state, makePacket(0x37, {0x06000000u, 0xc340u, 0u, 1u, 2u, 3u}));
+    check(state.userConfig.at(0x340u) == 1u && state.userConfig.at(0x341u) == 2u && state.userConfig.at(0x342u) == 3u, "sequential trace write did not advance the register address");
+    execute(state, makePacket(0x37, {0x06010000u, 0xc347u, 0u, 4u, 5u}));
+    check(state.userConfig.at(0x347u) == 5u, "one-address trace write crossed the register range");
+    for (const auto& invalid : {makePacket(0x37, {0x06000000u, 0xc347u, 0u, 1u, 2u}), makePacket(0x37, {0x06010000u, 0xc348u, 0u, 1u}), makePacket(0x37, {0x06010000u, 0xc343u, 1u, 1u})}) {
+        expectFailure([&] { execute(state, invalid); }, "register destination outside");
+    }
+}
+
 void testMemoryCopyDecode() {
     using AgcDriver::Pm4::DecodeMemoryCopy;
     constexpr std::uint64_t source = 0x1120000000ull, destination = 0x403d7b400ull;
@@ -1241,6 +1256,7 @@ int main(int argc, char** argv) {
         testIndirectDraw();
         testIndexAttributesIndirect();
         testMemory();
+        testTraceRegisterWrites();
         testCopies();
         testMemoryCopyDecode();
         testMemorySynchronization();

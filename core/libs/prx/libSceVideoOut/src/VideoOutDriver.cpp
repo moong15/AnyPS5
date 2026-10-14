@@ -1,6 +1,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <exception>
 #include <thread>
@@ -16,6 +17,7 @@
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libSceVideoOut/include/KeyboardInput.hpp"
+#include "prx/libSceVideoOut/include/ImeTextInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
@@ -27,6 +29,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -134,7 +137,10 @@ public:
         require(room, "flip queue stayed full for 60 s: the presenter is not completing flips");
     }
 
-    std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
+    std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override { return Reserve(info, false); }
+    std::shared_ptr<AgcDriver::IFlipRequest> TryReserve(const AgcDriver::FlipInfo& info) override { return Reserve(info, true); }
+
+    std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info, bool limited) {
         // All flip modes are presented at the next vsync.
         require(info.mode >= VIDEO_OUT_FLIP_MODE_VSYNC && info.mode <= 6, "unsupported flip mode");
         require(info.index >= VIDEO_OUT_BUFFER_INDEX_BLACK && info.index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid flip index");
@@ -148,11 +154,15 @@ public:
         std::lock_guard queueLock(queue->mutex);
         if (queue->failure) std::rethrow_exception(queue->failure);
         if (queue->stopping || cfg->shutdownToken.stop_requested()) throw ProcessShutdown{};
+        if (limited && queue->reservations.load() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) return {};
         std::lock_guard lock(cfg->mutex);
         checkConfig(*cfg);
         request->generation = cfg->generation;
         request->flipRate = cfg->flipRate;
-        if (info.index >= 0) request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
+        if (info.index >= 0) {
+            if (limited) require(cfg->buffers[info.index].Occupied(), "EOP flip buffer is not registered");
+            request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
+        }
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
         if (info.index >= 0) ++cfg->bufferPending[info.index];
@@ -455,6 +465,24 @@ int VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flip
     return 0;
 }
 
+int VideoOutDriver::SubmitEopFlip(int handle, int index, int flipMode, int64_t flipArg, std::uint32_t* token) {
+    std::lock_guard lock(mutex);
+    if (handle <= 0 || handle >= VIDEO_OUT_NUM_MAX || !outputs[handle]) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+    if (flipMode < VIDEO_OUT_FLIP_MODE_VSYNC || flipMode > 6) return VIDEO_OUT_ERROR_INVALID_VALUE;
+    if (index < VIDEO_OUT_BUFFER_INDEX_BLACK || index >= VIDEO_OUT_BUFFER_NUM_MAX) return VIDEO_OUT_ERROR_INVALID_INDEX;
+    const auto cfg = contexts[handle];
+    {
+        std::lock_guard cfgLock(cfg->mutex);
+        checkConfig(*cfg);
+        if (index >= 0 && !cfg->buffers[index].Occupied()) return VIDEO_OUT_ERROR_INVALID_INDEX;
+    }
+    const AgcDriver::FlipInfo info{static_cast<std::uint32_t>(handle), index, static_cast<std::uint32_t>(flipMode), flipArg};
+    const auto reserved = AgcDriverReserveEopFlip_nid_postfix(info);
+    if (reserved == 0) return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+    std::memcpy(token, &reserved, sizeof(reserved));
+    return 0;
+}
+
 void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData) {
     std::vector<EventRegistration>* events = nullptr;
     if (eventKind == VIDEO_OUT_EVENT_FLIP) events = &cfg.flipEvents;
@@ -582,6 +610,11 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     req.cfg->flipStatus.processTime = sceKernelGetProcessTime();
     req.cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
     req.cfg->flipStatus.flipArg = req.flipArg;
+    const auto previous = req.cfg->flipStatus.currentBuffer;
+    if (previous >= 0) {
+        auto& label = req.cfg->bufferLabels[previous];
+        AgcDriverStoreGuestLabel_nid_postfix(&label, 0);
+    }
     req.cfg->flipStatus.currentBuffer = req.index;
     req.cfg->width = req.width;
     req.cfg->height = req.height;
@@ -766,6 +799,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
         MouseInput mouseInput;
         KeyboardInput keyboardInput;
         ScriptedKeys scriptedKeys;
+        ImeTextInput imeTextInput;
         while (!token.stop_requested()) {
             {
                 std::unique_lock lock(flipQueue->mutex);
@@ -788,6 +822,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 if (window.Handle() != nullptr) {
                     mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                     keyboardInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
+                    imeTextInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                 }
             }
             padInput.Update();

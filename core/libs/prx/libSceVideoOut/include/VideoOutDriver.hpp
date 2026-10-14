@@ -140,6 +140,7 @@ struct VideoOutConfig {
     VideoOutVblankStatus preVblankStatus{};
 
     std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> buffers{};
+    alignas(std::atomic_ref<std::uint64_t>::required_alignment) std::array<std::uint64_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferLabels{};
     std::array<uint32_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferPending{};
     std::array<BufferReuseTracker, VIDEO_OUT_BUFFER_NUM_MAX> bufferReuse;
     std::array<BufferAttributeGroup, VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX> groups{};
@@ -220,6 +221,7 @@ public:
 
     // 0, or VIDEO_OUT_ERROR_FLIP_QUEUE_FULL when the title has VIDEO_OUT_FLIP_QUEUE_CAPACITY flips pending.
     int SubmitFlip(int handle, int index, int flipMode, int64_t flipArg);
+    int SubmitEopFlip(int handle, int index, int flipMode, int64_t flipArg, std::uint32_t* token);
 
 private:
     bool close(int handle);

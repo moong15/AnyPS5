@@ -501,6 +501,75 @@ void verifyNullSwappc() {
 
 }
 
+void VerifyUserDataTail() {
+    const RdnaInstructionDecoder decoder;
+    const std::vector<std::uint32_t> code{0x7e000280u, 0xbe802008u, 0xbf9f0000u};
+    const auto decoded = decoder.Decode(code);
+    const auto tail = FindUserDataTail(decoded, 8u, 2u);
+    require(tail && tail->programCounter == 4u && tail->userDataRegister == 8u, "unchanged user-data tail was not recognized");
+    require(!FindUserDataTail(decoded, 9u, 2u) && !FindUserDataTail(decoded, 8u, 1u), "tail outside user data was accepted");
+    const std::vector<std::vector<std::uint32_t>> refused{
+        {0xbe880380u, 0xbe802008u, 0xbf9f0000u},
+        {0xbe890300u, 0xbe802008u, 0xbf9f0000u},
+        {0xbe880480u, 0xbe802008u, 0xbf9f0000u},
+        {0xf4080200u, 0xfa000000u, 0xbe802008u, 0xbf9f0000u},
+        {0xbf820000u, 0xbe802008u, 0xbf9f0000u},
+        {0xbe802009u, 0xbf9f0000u},
+        {0xbe802008u, 0xbf810000u},
+        {0xbe802008u, 0xbf800000u, 0xbf9f0000u},
+    };
+    for (const auto& rejected : refused) require(!FindUserDataTail(decoder.Decode(rejected), 8u, 4u), "a modified, branching or malformed tail was accepted");
+    const std::vector<std::uint32_t> continuation{0xbf820001u, 0x7e000281u, 0xbf810000u};
+    const auto linked = LinkUserDataTail(decoded, *tail, decoder.Decode(continuation));
+    require(linked == std::vector<std::uint32_t>({0x7e000280u, 0xbf820000u, 0xbf820001u, 0x7e000281u, 0xbf810000u}), "linking did not preserve relative branches and register operations");
+    static_cast<void>(GraphBuilder{}.Build(decoder.Decode(linked)));
+    const std::vector<std::uint32_t> readsPc{0xbe8c1f00u, 0xbf810000u};
+    bool refusedPc = false;
+    try {
+        static_cast<void>(LinkUserDataTail(decoded, *tail, decoder.Decode(readsPc)));
+    } catch (const std::invalid_argument& error) {
+        refusedPc = std::string_view(error.what()).find("reads its program counter") != std::string_view::npos;
+    }
+    require(refusedPc, "a continuation reading its relocated PC was accepted");
+}
+
+void VerifyConstantHighTail() {
+    const RdnaInstructionDecoder decoder;
+    const std::vector<std::vector<std::uint32_t>> accepted{
+        {0xbe850382u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe8503ffu, 0x12345678u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe850380u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe850300u, 0xbe850382u, 0xbe802004u, 0xbf9f0000u},
+    };
+    const std::array<std::uint32_t, 4> values{2u, 0x12345678u, 0u, 2u};
+    const std::vector<std::uint32_t> end{0xbf810000u};
+    for (std::size_t index = 0; index < accepted.size(); ++index) {
+        const auto program = decoder.Decode(accepted[index]);
+        const auto tail = FindUserDataTail(program, 0u, 5u);
+        require(tail && tail->userDataRegister == 4u && tail->constantHigh == values[index], "constant high half was not resolved without a sixth user SGPR");
+        const auto linked = LinkUserDataTail(program, *tail, decoder.Decode(end));
+        require(std::equal(accepted[index].begin(), accepted[index].end() - 2u, linked.begin()), "constant high tail changed preceding scalar operations");
+        auto mismatched = *tail;
+        mismatched.constantHigh = values[index] ^ 1u;
+        bool rejected = false;
+        try {
+            static_cast<void>(LinkUserDataTail(program, mismatched, decoder.Decode(end)));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "linker accepted a stale high-half proof");
+    }
+    const std::vector<std::vector<std::uint32_t>> refused{
+        {0xbe850382u, 0xbe850300u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe850382u, 0x80058105u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe850382u, 0xbe840380u, 0xbe802004u, 0xbf9f0000u},
+        {0xbe850382u, 0xf4000140u, 0xfa000000u, 0xbe802004u, 0xbf9f0000u},
+        {0xbf840001u, 0xbe850382u, 0xbe802004u, 0xbf9f0000u},
+    };
+    for (const auto& code : refused) require(!FindUserDataTail(decoder.Decode(code), 0u, 6u), "unknown, overwritten or conditional tail address was accepted");
+    require(!FindUserDataTail(decoder.Decode(accepted.front()), 0u, 4u), "tail low half outside user data was accepted");
+}
+
 int main(int argc, char** argv) {
     try {
         verifyLoopMergeDoesNotEnterNestedSelection();
@@ -1300,6 +1369,8 @@ done:
     }
     try {
         verifyNullSwappc();
+        VerifyUserDataTail();
+        VerifyConstantHighTail();
         verifyLargeLoopExitFallback();
         verifyNestedExitForwarders();
         verifyIrreducibleLoopEntry();

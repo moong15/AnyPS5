@@ -2,6 +2,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/File/include/SharedMemory.hpp"
 #include <limits>
 #include <cerrno>
@@ -10,6 +11,7 @@
 #include <system_error>
 #if defined(__linux__)
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -30,6 +32,7 @@ constexpr int GuestShared = 0x1;
 constexpr int GuestPrivate = 0x2;
 constexpr int GuestAnonymous = 0x1000;
 constexpr int GuestMapFixed = 0x10;
+constexpr int GuestMapExclusive = 0x4000;
 constexpr int GuestMapNoOverwrite = 0x80;
 constexpr int GuestMapNoCoalesce = 0x400000;
 constexpr int GuestSyncAsync = 0x1;
@@ -59,6 +62,11 @@ private:
     int descriptor = -1;
     int error = 0;
 };
+
+bool RegularFile(int descriptor) {
+    struct stat status{};
+    return ::fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode);
+}
 #endif
 
 bool RoundLength(std::size_t length, std::size_t& rounded) {
@@ -90,14 +98,26 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
     std::size_t rounded;
     if (!RoundLength(length, rounded) || (protection & ~7) != 0)
         return failed(GuestInvalid);
+    if ((flags & (GuestMapExclusive | GuestMapFixed)) == GuestMapExclusive) return failed(GuestInvalid);
     const int mappingFlags = flags & ~GuestAlignedSuper;
-    if (mappingFlags == (GuestPrivate | GuestAnonymous)) {
+    const bool fixedAnonymous = (mappingFlags & ~(GuestMapFixed | GuestMapExclusive)) == (GuestPrivate | GuestAnonymous)
+                                && (mappingFlags & GuestMapFixed) != 0;
+    if (mappingFlags == (GuestPrivate | GuestAnonymous) || fixedAnonymous) {
         if (descriptor != -1 || offset != 0) return failed(GuestInvalid);
-        void* mapped = nullptr;
+        const auto start = reinterpret_cast<std::uintptr_t>(address);
+        if (fixedAnonymous && ((start & (PS5_PAGE_SIZE - 1)) != 0 ||
+            rounded > std::numeric_limits<std::uintptr_t>::max() - start ||
+            !GuestArena::GuestArenaContains_nid_postfix(address, rounded))) return failed(GuestInvalid);
+        const bool exclusive = fixedAnonymous && (mappingFlags & GuestMapExclusive) != 0;
+        const int placement = fixedAnonymous ? GuestMapFixed | (exclusive ? GuestMapNoOverwrite : 0) : 0;
+        void* mapped = fixedAnonymous ? address : nullptr;
+        const auto alignment = !fixedAnonymous && (flags & GuestAlignedSuper) != 0 ? SuperpageSize : PS5_PAGE_SIZE;
         try {
-            const auto result = DoMapAnon(&mapped, rounded, protection, 0, (flags & GuestAlignedSuper) != 0 ? SuperpageSize : PS5_PAGE_SIZE);
+            const auto result = DoMapAnon(&mapped, rounded, protection, placement, alignment, exclusive);
             if (result != 0) return failed(GuestNoMemory);
             return mapped;
+        } catch (const std::invalid_argument&) {
+            return failed(fixedAnonymous ? GuestInvalid : GuestNoMemory);
         } catch (const std::bad_alloc&) {
             return failed(GuestNoMemory);
         } catch (const std::exception&) {
@@ -124,7 +144,7 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
     const int accessMode = descriptorFlags & O_ACCMODE;
     if ((protection & 1) != 0 && accessMode == O_WRONLY) return failed(GuestAccess);
     if (kind == GuestShared && (protection & 2) != 0 && accessMode == O_RDONLY) return failed(GuestAccess);
-    if (!File::IsSharedMemoryDescriptor_nid_no_patch(mappingDescriptor)) return failed(GuestNotSupported);
+    if (!File::IsSharedMemoryDescriptor_nid_no_patch(mappingDescriptor) && !RegularFile(mappingDescriptor)) return failed(GuestNotSupported);
 #else
     const int mappingDescriptor = descriptor;
     if (!File::IsSharedMemoryDescriptor_nid_no_patch(mappingDescriptor)) return failed(GuestNotSupported);

@@ -69,11 +69,19 @@ std::optional<DwordPatternFill> MatchDwordPatternFill(std::span<const std::uint3
     return fill;
 }
 
-std::optional<DwordPatternFill> MatchZeroDwordFill(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
+std::optional<DwordPatternFill> MatchConstantDwordFill(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
     static const bool enabled = std::getenv("APS5_NO_FILL_HLE") == nullptr;
     if (!enabled || userData.size() != 4 || packet.size() < 5 || !compute.groupIdEnable[0] || compute.numThreads[0] != 64 || compute.numThreads[1] != 1 || compute.numThreads[2] != 1) return std::nullopt;
-    static constexpr std::array<std::uint32_t, 6> kernel{0xd7460000u, 0x04010c04u, 0x7e020280u, 0xe0102000u, 0x80000100u, 0xbf810000u};
-    if (code.size() < kernel.size() || !std::equal(kernel.begin(), kernel.end(), code.begin())) return std::nullopt;
+    static constexpr std::array<std::uint32_t, 6> kernel{0xd7460000u, 0x04010c04u, 0x7e020200u, 0xe0102000u, 0x80000100u, 0xbf810000u};
+    if (code.size() < kernel.size()) return std::nullopt;
+    for (std::size_t word = 0; word < kernel.size(); ++word) {
+        if ((word == 2 ? code[word] & ~0x1ffu : code[word]) != kernel[word]) return std::nullopt;
+    }
+    const auto source = code[2] & 0x1ffu;
+    std::uint32_t value;
+    if (source >= 0x80u && source <= 0xc0u) value = source - 0x80u;
+    else if (source >= 0xc1u && source <= 0xd0u) value = 0u - (source - 0xc0u);
+    else return std::nullopt;
     const auto stride = (userData[1] >> 16u) & 0x3fffu;
     const bool swizzled = ((userData[1] >> 31u) & 1u) != 0;
     const bool addTid = ((userData[3] >> 23u) & 1u) != 0;
@@ -84,7 +92,9 @@ std::optional<DwordPatternFill> MatchZeroDwordFill(std::span<const std::uint32_t
     const auto dwords = std::min<std::uint64_t>(static_cast<std::uint64_t>(packet[1]) * 64u, userData[2]);
     const auto base = userData[0] | (static_cast<std::uint64_t>(userData[1] & 0xffffu) << 32u);
     if (dwords == 0 || dwords % 4u != 0 || base % 16u != 0) return std::nullopt;
-    return DwordPatternFill{base, static_cast<std::size_t>(dwords * 4u), {}};
+    DwordPatternFill fill{base, static_cast<std::size_t>(dwords * 4u), {}};
+    fill.pattern.fill(value);
+    return fill;
 }
 
 std::optional<Graphics::MemoryValueFill> MatchMemoryValueBufferFill(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
@@ -179,7 +189,7 @@ void Driver::fillClearCount(const Graphics::StorageTexture::FillCoverage& covera
 
 bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, const std::shared_ptr<VulkanDevice>& localDevice) {
     auto dwordFill = MatchDwordPatternFill(packet, code, userData, compute);
-    if (!dwordFill) dwordFill = MatchZeroDwordFill(packet, code, userData, compute);
+    if (!dwordFill) dwordFill = MatchConstantDwordFill(packet, code, userData, compute);
     std::optional<Graphics::MemoryValueFill> memoryFill;
     if (!dwordFill) memoryFill = MatchMemoryValueBufferFill(packet, code, userData, compute);
     if (!dwordFill && !memoryFill && !matchesFillKernel(code, userData, compute)) return false;
