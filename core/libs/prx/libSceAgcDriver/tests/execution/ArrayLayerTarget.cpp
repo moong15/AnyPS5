@@ -23,6 +23,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <span>
 #include <string>
@@ -271,9 +272,17 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std::uint32_t sw
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
     const auto drawn = std::bit_cast<std::uint32_t>(Drawn);
     DrawSlice(device, surface, slice, swizzleMode, collapsed);
-    const auto pending = StorageTexture::FindPending(collapsed ? surface + slice * LayerBytes : surface, collapsed ? LayerBytes : SurfaceBytes);
-    if (collapsed) Require(pending != nullptr && pending->Descriptor().dimension == TextureDimension::k2D && pending->Descriptor().baseAddress == surface + slice * LayerBytes, "a collapsed slice did not render into its shifted surface");
-    else Require(pending != nullptr && pending->Descriptor().dimension == TextureDimension::k2DArray && pending->Descriptor().baseAddress == surface && pending->Descriptor().depthOrLastArray == Layers - 1u, "the draw into slice 1 did not render into the image of its array");
+    const auto imageAddress = collapsed ? surface + slice * LayerBytes : surface;
+    const auto imageBytes = collapsed ? LayerBytes : SurfaceBytes;
+    const auto pending = StorageTexture::FindPending(imageAddress, imageBytes);
+    const bool deferred = std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
+    if (!deferred) {
+        Require(pending == nullptr, "the eager draw left a pending image");
+    } else if (collapsed) {
+        Require(pending != nullptr && pending->Descriptor().dimension == TextureDimension::k2D && pending->Descriptor().baseAddress == imageAddress, "a collapsed slice did not render into its shifted surface");
+    } else {
+        Require(pending != nullptr && pending->Descriptor().dimension == TextureDimension::k2DArray && pending->Descriptor().baseAddress == surface && pending->Descriptor().depthOrLastArray == Layers - 1u, "the draw into slice " + std::to_string(slice) + " did not render into the image of its array");
+    }
     LoadLayer(device, surface, slice, swizzleMode);
     RequireOutput(drawn, Initial, "slice " + std::to_string(slice) + " read through the array after the draw");
     for (std::uint32_t other = 0; other < Layers; ++other) {
@@ -299,9 +308,13 @@ void SampleSliceZero(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std:
     AgcDriver::GuestMemory::BumpCollectEpoch();
     DrawSlice(device, surface, 0, swizzleMode, false);
     const auto pending = StorageTexture::FindPending(surface, LayerBytes);
-    Require(pending != nullptr && pending->Descriptor().dimension == TextureDimension::k2DArray, "the draw into slice 0 did not render into the image of its array");
-    const auto plain = SurfaceDescriptor(surface, swizzleMode, Type2D, 0u);
-    Require(AgcDriver::Graphics::Texture::CanCopyFrom(*pending, AgcDriver::Graphics::DecodeTextureResource(plain)), "a 2D texture over slice 0 cannot view the array image's first layer");
+    const bool deferred = std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
+    Require(deferred ? pending != nullptr : pending == nullptr, "slice 0 has the wrong pending state");
+    if (pending != nullptr) {
+        Require(pending->Descriptor().dimension == TextureDimension::k2DArray, "the draw into slice 0 did not render into the image of its array");
+        const auto plain = SurfaceDescriptor(surface, swizzleMode, Type2D, 0u);
+        Require(AgcDriver::Graphics::Texture::CanCopyFrom(*pending, AgcDriver::Graphics::DecodeTextureResource(plain)), "a 2D texture over slice 0 cannot view the array image's first layer");
+    }
     Sample2D(device, surface, swizzleMode);
     RequireOutput(std::bit_cast<std::uint32_t>(Drawn), Initial, "slice 0 sampled as a 2D texture after the draw");
     StorageTexture::FlushPending(surface, SurfaceBytes, nullptr, "test");

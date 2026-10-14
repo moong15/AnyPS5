@@ -3030,7 +3030,7 @@ void StorageTexture::refreshGeneration() {
 
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
     CaptureTrace::Log("image-write image=%llx first=%u count=%u generation=%llu", static_cast<unsigned long long>(descriptor.baseAddress), first, count, static_cast<unsigned long long>(generation));
-    static const bool eager = std::getenv("APS5_EAGER_WRITEBACK") != nullptr || std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
+    static const bool eager = std::getenv("APS5_DEFERRED_WRITEBACK") == nullptr;
     std::vector<bool> unsaved(trackedLayers, false);
     bool anyUnsaved = false;
     for (std::uint32_t layer = first; layer < first + count; ++layer) {
@@ -3055,6 +3055,7 @@ void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count)
         if (superseded) source->reconcilePending();
     }
     if (eager) {
+        ++version;
         WriteBack();
         return;
     }

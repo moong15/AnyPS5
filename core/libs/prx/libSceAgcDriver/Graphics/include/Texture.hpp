@@ -181,7 +181,6 @@ public:
     void RecordAttachmentProxyLoad(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
     void RecordAttachmentProxyStore(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
     void WriteBack();
-    // Deferred write-back (APS5_EAGER_WRITEBACK=1 stores at once instead).
     void MarkDirty();
     void MarkSliceDirty(std::uint32_t slice);
     void Flush();
@@ -437,8 +436,6 @@ private:
     bool refreshProved();
     void takeRefreshProof(bool aliased);
     bool otherPendingOverlaps() const;
-    // Marks `count` tracked layers from `first` pending and registers the image (MarkDirty's
-    // registration; APS5_EAGER_WRITEBACK=1 stores at once instead).
     void markLayersPending(std::uint32_t first, std::uint32_t count);
     // Registers or unregisters the image as its pending layers say (after a write-back).
     void reconcilePending();

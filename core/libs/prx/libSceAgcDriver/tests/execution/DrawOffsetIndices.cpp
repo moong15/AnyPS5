@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
@@ -15,6 +17,14 @@
 #include <span>
 #include <string>
 #include <vector>
+
+namespace AgcDriver {
+
+struct VulkanDeviceTestAccess {
+    static Graphics::Context ContextOf(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+
+}
 
 namespace {
 
@@ -384,8 +394,56 @@ std::string Analysis(Fixture& fixture) {
     return failures;
 }
 
+
+std::string StorageIndexReuse(Fixture& fixture) {
+    constexpr std::uint32_t written = 0x12345678u;
+    alignas(256) static constexpr std::array<std::uint32_t, 7> storeCode{
+        0x7e040300, 0x7e060280, 0x7e0202ff, written, 0xf0200108, 0x00020102, 0xbf810000,
+    };
+    auto* memory = fixture.Records();
+    const auto address = reinterpret_cast<std::uintptr_t>(memory);
+    std::fill(memory, memory + 65536 / 4, Unwritten);
+    const std::array<std::uint32_t, 8> texture{
+        static_cast<std::uint32_t>(address >> 8u),
+        static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (20u << 20u) | (1u << 30u),
+        (65u >> 2u) | (65u << 14u),
+        0xfacu | (9u << 28u), 0u, 0u, 0u, 0u,
+    };
+    std::vector<std::uint32_t> data(16, 0u);
+    std::copy(texture.begin(), texture.end(), data.begin() + 8);
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{8, 1, 1}, 0u, {false, false, false}, false, 1};
+    const std::array<ShaderRecompiler::MemoryRegion, 1> regions{{{reinterpret_cast<std::uintptr_t>(storeCode.data()), std::as_bytes(std::span(storeCode))}}};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(storeCode.data()), storeCode, 0, {}},
+        {32, 0, data, compute, std::nullopt, std::nullopt, regions},
+        fixture.device->Target(), {0, 0, 0, 128}
+    };
+    request.useCache = false;
+    const auto program = ShaderRecompiler::Recompile(request);
+    fixture.device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(storeCode.data()));
+    fixture.device->WaitIdle();
+    Require(AgcDriver::Graphics::StorageTexture::FindPending(address, 65536) == nullptr, "the image results remained deferred before index reuse");
+    for (std::uint32_t lane = 0; lane < 8; ++lane) Require(memory[lane] == written, "the compute image store did not reach guest memory");
+    const std::array<std::uint32_t, 6> indices{2, 0, 1, 2, 0, 1};
+    std::copy(indices.begin(), indices.end(), memory);
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(*fixture.device);
+        if (context.hostImportAlignment != 0) Require(AgcDriver::Graphics::InPlaceDrawInput(context, address, sizeof(indices), 4) != nullptr, "the reused indices were not available through an in-place import");
+    }
+    const auto userData = fixture.UserData(0, 0);
+    const auto vertex = fixture.Vertex(VertexCode, userData);
+    const std::array<std::uint32_t, Vertices> raw{2, 0, 1};
+    fixture.Place(0, raw, 0);
+    fixture.Draw(vertex, {address, 6, 4, Instances, 0, true, 0, 0});
+    Require(std::equal(indices.begin(), indices.end(), memory), "image write-back overwrote the replacement indices");
+    Require(memory[6] == written && memory[7] == written && memory[8] == Unwritten, "index reuse changed untouched image results or padding");
+    return fixture.Check("compute image followed by CPU index reuse", raw, 0, 0, true);
+}
+
 std::string Run(Fixture& fixture) {
     std::string failures = Analysis(fixture);
+    failures += StorageIndexReuse(fixture);
     const std::array<std::uint32_t, Vertices> autoIndices{0, 1, 2};
     const std::array<std::uint32_t, Vertices> bufferIndices{Indices[0], Indices[1], Indices[2]};
     const auto indexAddress = reinterpret_cast<std::uintptr_t>(Indices.data());

@@ -7193,6 +7193,7 @@ int main(int argc, char** argv) {
                 std::cout << "skipped, host imports unavailable\n";
                 return 77;
             }
+            Require(_putenv_s("APS5_DEFERRED_WRITEBACK", "1") == 0, "cannot enable deferred write-back for the storage snapshot test");
             StorageCpuSnapshotTest::Run(device.GetContext());
             std::cout << "Storage CPU snapshot tests passed\n";
             return 0;

@@ -2235,3 +2235,15 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
+
+if(BUILD_TESTING)
+    set_property(TEST
+        agc_unchanged_cpu_stamps
+        agc_slice_dirty
+        agc_metadata_pass
+        agc_driver_vertex_target_range_copied
+        agc_driver_vertex_target_range_imported
+        agc_driver_bc_block_copy
+        agc_driver_store_over_untracked
+        APPEND PROPERTY ENVIRONMENT_MODIFICATION "APS5_DEFERRED_WRITEBACK=set:1")
+endif()
