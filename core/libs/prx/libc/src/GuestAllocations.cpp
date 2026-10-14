@@ -73,8 +73,13 @@ struct MutationState {
     std::vector<std::pair<std::uintptr_t, std::size_t>> gpuMapped;
 };
 
-void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
+void recordChange(void* mutation, const void* pointer, std::size_t bytes, const char* operation) {
     if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+    static const bool trace = std::getenv("APS5_TRACE_LOADING_MEMORY") != nullptr;
+    if (trace) {
+        const auto tick = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::fprintf(stderr, "[loading-memory] %s begin 0x%llx+0x%zx gen=%llu tick=%lld\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(pointer)), bytes, static_cast<unsigned long long>(generation.load(std::memory_order_acquire)), static_cast<long long>(tick));
+    }
 }
 
 #ifndef _WIN32
@@ -233,7 +238,7 @@ void GuestAllocationsUnregisterImage_nid_postfix(void* mutation, const void* ima
     if (found == state.registeredImages.end()) return;
     const auto [begin, end] = *found;
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, image, end - begin);
-    recordChange(mutation, image, end - begin);
+    recordChange(mutation, image, end - begin, "unregister-image");
     std::erase_if(state.ranges, [&](const auto& entry) { return !entry.second->releasable && entry.second->allocationAddress >= begin && entry.second->allocationAddress < end; });
     state.registeredImages.erase(found);
 }
@@ -285,7 +290,7 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
 #endif
 
 void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu) {
-    recordChange(mutation, pointer, bytes);
+    recordChange(mutation, pointer, bytes, "add");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     require(address != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid guest allocation range");
     require(!writable || readable, "writable guest allocation must be readable");
@@ -417,7 +422,7 @@ Range GuestAllocationsFind_nid_postfix(void*, const void* pointer) {
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer) {
     const auto range = GuestAllocationsFind_nid_postfix(mutation, pointer);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, range.bytes);
-    recordChange(mutation, pointer, range.bytes);
+    recordChange(mutation, pointer, range.bytes, "remove");
     auto& ranges = registry().ranges;
     const auto exact = ranges.find(range.address);
     if (exact != ranges.end() && exact->second->allocationBytes == exact->second->bytes) {
@@ -488,7 +493,7 @@ bool allocationRemains(const Range& range, const RangePatch& patch) {
 
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, bool gpu, const std::function<void()>& apply) {
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
-    recordChange(mutation, pointer, bytes);
+    recordChange(mutation, pointer, bytes, "protect");
     const auto patch = replaceRange(pointer, bytes, false, readable, writable, gpu);
     apply();
     applyPatch(patch);
@@ -496,7 +501,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
 
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, std::size_t, const void*, bool)>& apply) {
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
-    recordChange(mutation, pointer, bytes);
+    recordChange(mutation, pointer, bytes, "unmap");
     const auto end = reinterpret_cast<std::uintptr_t>(pointer) + bytes;
     auto cursor = reinterpret_cast<std::uintptr_t>(pointer);
     bool any = false;

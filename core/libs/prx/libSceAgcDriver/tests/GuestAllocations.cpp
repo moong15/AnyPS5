@@ -29,6 +29,43 @@ void reject(TAction action) {
     throw std::runtime_error("expected guest allocation ownership rejection");
 }
 
+void readableCoverageTests() {
+    using AgcDriver::Graphics::RegisteredReadableCovers;
+    std::array<std::byte, 128> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory.data(), 64, true, true, true);
+        mutation.Add(memory.data() + 64, 64, true, true, true);
+    }
+    Require(RegisteredReadableCovers(address, 128), "adjacent readable registrations do not cover an image");
+    Require(RegisteredReadableCovers(address + 32, 96), "coverage from inside a registration stops at its boundary");
+    Require(!RegisteredReadableCovers(address, 129), "coverage extends beyond the last registration");
+    Require(!RegisteredReadableCovers(address, 0), "empty image range is covered");
+    Require(!RegisteredReadableCovers(~std::uint64_t{0} - 1, 4), "overflowing image range is covered");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(memory.data() + 32, 32, true, false, true, [] {});
+    }
+    Require(RegisteredReadableCovers(address, 128), "readable protection fragments do not cover an image");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(memory.data() + 32, 32, false, false, true, [] {});
+    }
+    Require(!RegisteredReadableCovers(address, 128), "coverage skips an unreadable fragment");
+    Require(RegisteredReadableCovers(address + 64, 64), "unreadable earlier fragment prevents later coverage");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(memory.data() + 32, 32, [](const void*, std::size_t, const void*, bool) {});
+    }
+    Require(!RegisteredReadableCovers(address, 128), "coverage skips an unregistered hole");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(memory.data(), 32, [](const void*, std::size_t, const void*, bool) {});
+        mutation.Remove(memory.data() + 64);
+    }
+}
+
 void leaseSnapshotTests() {
     std::array<std::byte, 128> memory{};
     const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
@@ -108,6 +145,7 @@ void RunGuestLeaseWaitTests() {
 }
 
 void RunGuestAllocationTests() {
+    readableCoverageTests();
     leaseSnapshotTests();
     void* pointer = GuestHeap::GuestHeapAllocate_nid_postfix(32);
     Require(reinterpret_cast<std::uintptr_t>(pointer) % alignof(std::max_align_t) == 0, "guest malloc is not suitably aligned");
