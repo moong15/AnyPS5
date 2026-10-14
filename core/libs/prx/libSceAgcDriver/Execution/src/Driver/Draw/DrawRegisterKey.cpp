@@ -160,6 +160,7 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
     struct Previous {
         std::uint64_t shape = 0;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
+        std::vector<std::array<std::uint32_t, 3>> state;
         std::size_t reports = 0;
     };
     thread_local std::unordered_map<std::uint64_t, Previous> previous;
@@ -210,9 +211,50 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
     RegisterStateKey(queue, false, true, &shape);
     std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
     forEachKeyedUserWord(queue, false, [&](std::uint32_t offset, std::uint32_t value) { words.emplace_back(offset, value); });
+    std::vector<std::array<std::uint32_t, 3>> state;
+    const auto& masks = registerMasks();
+    const auto collect = [&](const Registers& registers, Graphics::RegisterBank bank, std::uint32_t tag) {
+        const auto& mask = *masks[static_cast<std::size_t>(bank)];
+        for (const auto& entry : registers) {
+            if (mask.Contains(entry.first)) state.push_back({tag, entry.first, entry.second});
+        }
+    };
+    collect(queue.context, Graphics::RegisterBank::Context, 'c');
+    collect(queue.shader, Graphics::RegisterBank::Shader, 's');
+    collect(queue.userConfig, Graphics::RegisterBank::UserConfig, 'u');
     std::string changed;
     if (!inserted) {
-        if (it->second.shape != shape) changed += " registers";
+        if (it->second.shape != shape) {
+            changed += " registers";
+            const auto& old = it->second.state;
+            std::size_t a = 0;
+            std::size_t b = 0;
+            std::size_t listed = 0;
+            char text[64];
+            const auto key = [](const std::array<std::uint32_t, 3>& entry) { return (static_cast<std::uint64_t>(entry[0]) << 32u) | entry[1]; };
+            while ((a < old.size() || b < state.size()) && listed < 10) {
+                if (b == state.size() || (a < old.size() && key(old[a]) < key(state[b]))) {
+                    std::snprintf(text, sizeof(text), " %c[%03x] %08x->gone", static_cast<char>(old[a][0]), old[a][1], old[a][2]);
+                    changed += text;
+                    ++listed;
+                    ++a;
+                } else if (a == old.size() || key(state[b]) < key(old[a])) {
+                    std::snprintf(text, sizeof(text), " %c[%03x] new %08x", static_cast<char>(state[b][0]), state[b][1], state[b][2]);
+                    changed += text;
+                    ++listed;
+                    ++b;
+                } else {
+                    if (old[a][2] != state[b][2]) {
+                        std::snprintf(text, sizeof(text), " %c[%03x] %08x->%08x", static_cast<char>(state[b][0]), state[b][1], old[a][2], state[b][2]);
+                        changed += text;
+                        ++listed;
+                    }
+                    ++a;
+                    ++b;
+                }
+            }
+            changed += " |";
+        }
         std::size_t a = 0;
         std::size_t b = 0;
         char text[64];
@@ -237,6 +279,7 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
         if (changed.empty()) changed = " nothing keyed (shaders or device)";
     }
     it->second.shape = shape;
+    it->second.state = std::move(state);
     it->second.words = std::move(words);
     if (inserted || it->second.reports >= 6) return;
     ++it->second.reports;
