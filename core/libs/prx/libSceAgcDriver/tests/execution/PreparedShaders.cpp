@@ -612,6 +612,63 @@ void RegisteredVertexWorkgroup(const ShaderRecompiler::SpirvTarget& target, bool
     std::cout << "registered NGG wave64 preparation passed; subgroup=" << target.subgroupSize << '\n';
 }
 
+void DeferredShaderPrewarmedOnSetShReg(AgcDriver::VulkanDevice& device) {
+    const auto testDevice = std::shared_ptr<AgcDriver::VulkanDevice>(&device, [](auto*) {});
+    alignas(256) std::array<std::uint32_t, 1> code{0xbf810000u};
+    const auto address = reinterpret_cast<std::uintptr_t>(code.data());
+    struct Header {
+        Shader shader{};
+        ShaderSpecialRegs specials{};
+    } header;
+    const auto headerAddress = reinterpret_cast<std::uintptr_t>(&header);
+    header.shader.file_header = 0x34333231u;
+    header.shader.version = 0x18;
+    header.shader.header_size = sizeof(header);
+    header.shader.shader_size = sizeof(code);
+    header.shader.code = code.data();
+    header.shader.type = 0;
+    header.shader.specials = &header.specials;
+    header.specials.dispatch_modifier = 0x8000;
+
+    auto snapshot = std::make_shared<AgcDriver::DriverDetail::ShaderSnapshot>(address, headerAddress, 0, std::vector<std::uint32_t>{code.begin(), code.end()}, std::vector<std::byte>{sizeof(header)});
+    std::memcpy(snapshot->header.data(), &header, sizeof(header));
+    snapshot->prepared->deferred = true;
+
+    auto registry = std::make_shared<AgcDriver::DriverDetail::ShaderRegistry>();
+    AgcDriver::DriverDetail::PublishRegisteredShader(registry, snapshot);
+
+    AgcDriver::QueueState queue{};
+    queue.shader[0x207] = 1;
+    queue.shader[0x208] = 1;
+    queue.shader[0x209] = 1;
+    queue.shader[0x212] = 0;
+    queue.shader[0x213] = 12;
+
+    Require(!AgcDriver::DriverDetail::TriggerDeferredShaderPreparation(*registry, testDevice, queue, 0x20cu, {0}), "deferred shader prepared without program address");
+    Require(snapshot->prepared->entries.empty(), "deferred shader has entries without program address");
+
+    queue.shader[0x20c] = static_cast<std::uint32_t>(address >> 8u);
+    queue.shader[0x20d] = static_cast<std::uint32_t>(address >> 40u);
+
+    queue.shader.erase(0x213);
+    Require(!AgcDriver::DriverDetail::TriggerDeferredShaderPreparation(*registry, testDevice, queue, 0x20cu, {0}), "deferred shader prepared without resource register");
+    Require(snapshot->prepared->entries.empty(), "deferred shader has entries without resource register");
+    queue.shader[0x213] = 12;
+
+    Require(AgcDriver::DriverDetail::TriggerDeferredShaderPreparation(*registry, testDevice, queue, 0x20cu, {0}), "deferred shader preparation was not triggered on SET_SH_REG");
+
+    {
+        std::unique_lock lock(snapshot->prepared->mutex);
+        const bool settled = snapshot->prepared->settled.wait_for(lock, std::chrono::seconds(3), [&] { return !snapshot->prepared->pending; });
+        Require(settled, "deferred shader preparation timed out");
+        if (snapshot->prepared->failure != nullptr) std::rethrow_exception(snapshot->prepared->failure);
+        Require(snapshot->prepared->entries.size() == 2, "deferred shader was not pre-warmed after SET_SH_REG trigger");
+        Require(snapshot->prepared->entries.front().handle != nullptr, "pre-warmed deferred shader has null handle");
+    }
+
+    Require(!AgcDriver::DriverDetail::TriggerDeferredShaderPreparation(*registry, testDevice, queue, 0x20cu, {0}), "already pre-warmed shader prepared again");
+}
+
 void DeferredRegistration() {
     alignas(256) std::array<std::uint32_t, 2> code{0xbe842104u, 0xbf810000u};
     struct Header {
@@ -681,7 +738,9 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--deferred") {
-            if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
+            const auto device = OpenVulkanTestDevice();
+            if (!device) return VulkanTestSkipped;
+            DeferredShaderPrewarmedOnSetShReg(*device);
             DeferredRegistration();
             std::cout << "deferred shader preparation tests passed\n";
             return 0;
@@ -696,6 +755,7 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         Run(*device);
         RegisteredVertexWorkgroup(device->Target());
+        DeferredShaderPrewarmedOnSetShReg(*device);
         FailureCapture(*device);
         PendingRegistrationPreparation(*device);
         AwaitedRegistrationPreparation();

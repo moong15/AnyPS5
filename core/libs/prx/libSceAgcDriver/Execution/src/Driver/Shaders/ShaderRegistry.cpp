@@ -942,6 +942,58 @@ void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapsho
     }, preparedKey);
 }
 
+bool CanPlanDeferredShader(const ShaderSnapshot& snapshot, const QueueState& state) noexcept {
+    try {
+        std::uint32_t programRegister;
+        std::uint32_t resourceRegister;
+        switch (snapshot.type) {
+        case 0:
+            programRegister = 0x20c;
+            resourceRegister = 0x213;
+            if (!state.shader.contains(programRegister) || !state.shader.contains(programRegister + 1u)) return false;
+            if (!state.shader.contains(resourceRegister)) return false;
+            if (!state.shader.contains(0x207u) || !state.shader.contains(0x208u) || !state.shader.contains(0x209u)) return false;
+            if ((state.shader.find(0x207u)->second & 0xffffu) == 0 ||
+                (state.shader.find(0x208u)->second & 0xffffu) == 0 ||
+                (state.shader.find(0x209u)->second & 0xffffu) == 0) return false;
+            return true;
+        case 1:
+            programRegister = 0x008;
+            resourceRegister = 0x00b;
+            if (!state.shader.contains(programRegister) || !state.shader.contains(programRegister + 1u)) return false;
+            if (!state.shader.contains(resourceRegister)) return false;
+            if (!state.context.contains(0x1b6u) || !state.context.contains(0x1b3u) || !state.context.contains(0x1b4u)) return false;
+            return true;
+        case 2:
+        case 4:
+            programRegister = 0x0c8;
+            resourceRegister = 0x08b;
+            if (!state.shader.contains(programRegister) || !state.shader.contains(programRegister + 1u)) return false;
+            if (!state.shader.contains(resourceRegister)) return false;
+            if (!state.context.contains(0x2d5u)) return false;
+            return true;
+        case 6:
+            programRegister = 0x088;
+            resourceRegister = 0x08b;
+            if (!state.shader.contains(programRegister) || !state.shader.contains(programRegister + 1u)) return false;
+            if (!state.shader.contains(resourceRegister)) return false;
+            if (!state.context.contains(0x2d5u)) return false;
+            return true;
+        case 7:
+            programRegister = 0x108;
+            resourceRegister = 0x10b;
+            if (!state.shader.contains(programRegister) || !state.shader.contains(programRegister + 1u)) return false;
+            if (!state.shader.contains(resourceRegister)) return false;
+            if (!state.context.contains(0x2d5u)) return false;
+            return true;
+        default:
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
 }
 
 void SubmitRegistrationPreparation(std::function<void()> task, const PreparedShaders* prepared) {
@@ -964,6 +1016,48 @@ void SubmitLibraryPrebuild(std::function<void()> task) {
 void CloseRegistrationPreparation() {
     RegistrationPreparePool::Instance().Close();
     if (auto* prebuild = RegistrationPreparePool::ExistingPrebuild()) prebuild->Close();
+}
+
+bool TriggerDeferredShaderPreparation(const ShaderRegistry& registry, const std::shared_ptr<VulkanDevice>& device, const QueueState& state, std::uint32_t programRegister, std::initializer_list<std::uint8_t> types) {
+    if (device == nullptr) return false;
+    const auto low = state.shader.find(programRegister);
+    const auto high = state.shader.find(programRegister + 1u);
+    if (low == state.shader.end() || high == state.shader.end()) return false;
+    if ((high->second & ~0xffu) != 0) return false;
+    const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second) << 40u);
+    if (address == 0) return false;
+    std::shared_ptr<const ShaderSnapshot> snapshot;
+    try {
+        snapshot = RegisteredProgram(registry, address, types);
+    } catch (...) {
+        return false;
+    }
+    if (snapshot == nullptr) return false;
+    {
+        std::lock_guard lock(snapshot->prepared->mutex);
+        if (!snapshot->prepared->deferred || snapshot->prepared->pending || !snapshot->prepared->entries.empty()) return false;
+        if (!CanPlanDeferredShader(*snapshot, state)) return false;
+        snapshot->prepared->pending = true;
+    }
+    std::shared_ptr<RegisteredPreparation> plan;
+    try {
+        plan = PlanRegistered(*snapshot, *device, state, false);
+    } catch (...) {
+        std::lock_guard lock(snapshot->prepared->mutex);
+        snapshot->prepared->pending = false;
+        snapshot->prepared->settled.notify_all();
+        return false;
+    }
+    if (plan == nullptr) {
+        std::lock_guard lock(snapshot->prepared->mutex);
+        snapshot->prepared->pending = false;
+        snapshot->prepared->settled.notify_all();
+        return false;
+    }
+    plan->prebuildDevice = device;
+    if (snapshot->type == 0 || snapshot->type == 1) BuildRegisteredAbiKey(state, *device, plan->abiKey);
+    PrepareRegisteredInBackground(snapshot, std::move(plan));
+    return true;
 }
 
 std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decoded, const ShaderRecompiler::SpirvTarget& target) {

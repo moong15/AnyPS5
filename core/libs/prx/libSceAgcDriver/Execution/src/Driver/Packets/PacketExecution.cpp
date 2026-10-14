@@ -8,12 +8,42 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include <cstdlib>
 #include <functional>
 #include <shared_mutex>
 
 namespace AgcDriver::DriverDetail {
+
+void checkDeferredShadersOnShRegWrite(std::uint32_t opcode, std::span<const std::uint32_t> packet, std::size_t cursor, const Submission& submission, const std::shared_ptr<VulkanDevice>& device, const QueueState& queue) {
+    if (submission.shaders == nullptr || device == nullptr) return;
+    if (opcode == 0x76) {
+        const auto regOffset = packet[1] & ~0x70000000u;
+        const auto regCount = static_cast<std::uint32_t>(packet.size() - 2);
+        if (regOffset <= 0x20du && regOffset + regCount > 0x20cu) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x20cu, {0});
+        if (regOffset <= 0x009u && regOffset + regCount > 0x008u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x008u, {1});
+        if (regOffset <= 0x0c9u && regOffset + regCount > 0x0c8u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x0c8u, {2, 4});
+        if (regOffset <= 0x089u && regOffset + regCount > 0x088u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x088u, {6});
+        if (regOffset <= 0x109u && regOffset + regCount > 0x108u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x108u, {7});
+    } else if (opcode == 0x63) {
+        const auto& pairs = submission.registerLists.at(cursor);
+        bool checkCompute = false, checkFragment = false, checkVertex = false, checkMesh = false, checkTess = false;
+        for (std::size_t i = 0; i < pairs.size(); i += 2) {
+            const auto reg = pairs[i] & ~0x70000000u;
+            if (reg == 0x20cu || reg == 0x20du) checkCompute = true;
+            else if (reg == 0x008u || reg == 0x009u) checkFragment = true;
+            else if (reg == 0x0c8u || reg == 0x0c9u) checkVertex = true;
+            else if (reg == 0x088u || reg == 0x089u) checkMesh = true;
+            else if (reg == 0x108u || reg == 0x109u) checkTess = true;
+        }
+        if (checkCompute) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x20cu, {0});
+        if (checkFragment) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x008u, {1});
+        if (checkVertex) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x0c8u, {2, 4});
+        if (checkMesh) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x088u, {6});
+        if (checkTess) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x108u, {7});
+    }
+}
 
 template <typename TWork>
 void Driver::timed(double WorkerProfile::*bucket, TWork&& work) {
@@ -351,6 +381,9 @@ void Driver::execute(const Submission& submission) {
                 else Pm4::Execute(packet, queue);
                 if (opcode == 0x49 || opcode == 0x37) {
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
+                }
+                if (opcode == 0x76 || opcode == 0x63) {
+                    checkDeferredShadersOnShRegWrite(opcode, packet, cursor, submission, device.Load(), queue);
                 }
             }
             if (endOfPipeInterrupt && !interruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
