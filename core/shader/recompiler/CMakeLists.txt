@@ -36,6 +36,7 @@ function(add_shader_recompiler target runtimeTarget)
     add_library(${target} STATIC EXCLUDE_FROM_ALL
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Recompiler.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderDiskCache.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCachePack.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/RectListShaders.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/BarycentricGeometryShader.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RdnaDecoder/src/RdnaOpcode.cpp
@@ -298,6 +299,9 @@ function(add_shader_recompiler target runtimeTarget)
             CXX_EXTENSIONS OFF
     )
 
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE shell32)
+    endif()
     target_link_libraries(${target} PRIVATE
             ${runtimeTarget}
             glslang

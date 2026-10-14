@@ -1,4 +1,5 @@
 #include "ShaderDiskCache.hpp"
+#include "ShaderCachePack.hpp"
 #include "CacheKey.hpp"
 #include "VertexInputSpecialization.hpp"
 #include "SpirvBackend/SpirvSpecialization.hpp"
@@ -1867,6 +1868,99 @@ void verifyPlanAcrossProcesses(const char* self) {
     run("--load-plan-switch");
 }
 
+int runPrebuiltLoadingProcess() {
+    const std::vector<std::byte> key{std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::vector<std::byte> planKey{std::byte{9}};
+    CompiledVariant loaded;
+    require(ShaderDiskCache::Load(key, loaded), "prebuilt variant did not load through DiskStore");
+    requireSameVariant(sampleVariant(), loaded, "DiskStore prebuilt variant");
+    IrResourcePlan plan;
+    require(ShaderDiskCache::LoadPlan(planKey, plan) && samePlan(handBuiltPlan(), plan), "prebuilt plan did not load through DiskStore");
+    auto writable = std::make_shared<CompiledVariant>(sampleVariant());
+    writable->artifact.spirv = std::vector<std::uint32_t>(1000, 0xbadbad);
+    ShaderDiskCache::Store(key, writable);
+    ShaderDiskCache::Flush();
+    require(ShaderDiskCache::Load(key, loaded), "prebuilt variant did not reload");
+    requireSameVariant(sampleVariant(), loaded, "prebuilt priority over writable variant");
+    const auto totals = ShaderDiskCache::Totals();
+    require(totals.hits == 2 && totals.planHits == 1 && totals.prebuiltHits == 3 && totals.prebuiltMisses == 0, "prebuilt variant/plan counters are incorrect");
+    return 0;
+}
+
+void verifyPrebuiltPack(const std::filesystem::path& directory, const char* self) {
+    std::filesystem::create_directories(directory);
+    const auto path = directory / "fixture.pack";
+    const std::vector<std::byte> key{std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::vector<std::byte> otherKey{std::byte{4}, std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
+    const std::vector<std::byte> planKey{std::byte{9}};
+    const auto variant = sampleVariant();
+    auto other = sampleVariant();
+    other.artifact.spirv = std::vector<std::uint32_t>(1000, 0xdeadbeefu);
+    const auto plan = handBuiltPlan();
+    const std::array entries{ShaderDiskCache::EncodeEntry(key, variant), ShaderDiskCache::EncodeEntry(otherKey, other), ShaderDiskCache::EncodePlanEntry(planKey, plan)};
+    const std::array keys{key, otherKey, planKey};
+    std::vector<ShaderDiskCache::PackRecord> records;
+    std::vector<std::byte> bytes(sizeof(ShaderDiskCache::PackHeader) + entries.size() * sizeof(ShaderDiskCache::PackRecord));
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        require(ShaderDiskCache::IsCurrentEntryHeader(entries[i], entries[i].size()), "aligned entry header was rejected");
+        require(std::ranges::equal(ShaderDiskCache::EntryKey(entries[i]), keys[i]), "aligned entry key was rejected");
+        bytes.resize((bytes.size() + 7) / 8 * 8);
+        records.push_back({ShaderDiskCache::PackKeyHash(keys[i]), bytes.size(), entries[i].size()});
+        bytes.insert(bytes.end(), entries[i].begin(), entries[i].end());
+    }
+    std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) { return a.hash < b.hash; });
+    const auto index = std::as_bytes(std::span(records));
+    const ShaderDiskCache::PackHeader header{ShaderDiskCache::PackMagic, ShaderDiskCache::SourceVersion(), bytes.size(), records.size(), HashBytes(index)};
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    std::memcpy(bytes.data() + sizeof(header), index.data(), index.size());
+    require(WriteFileAtomically(path, bytes), "cannot write pack fixture");
+    for (const auto* mapped : {"0", "1"}) {
+        setEnvironment("ANYPS5_PREBUILT_MAPPED_READ", mapped);
+        CompiledVariant first;
+        CompiledVariant second;
+        std::weak_ptr<const void> retained;
+        {
+            ShaderDiskCache::CachePack pack(path);
+            require(pack.Valid() && pack.Count() == 3, "pack fixture rejected");
+            ShaderDiskCache::PackLoadTimings timing;
+            require(pack.LoadEncoded(key, [&](auto entry, auto owner) {
+                require(owner != nullptr, "pack decoder received no backing owner");
+                retained = owner;
+                return ShaderDiskCache::DecodeEntry(entry, key, first, std::move(owner));
+            }, timing) == ShaderDiskCache::LoadStatus::Loaded, "first pack entry did not load");
+            require(pack.Load(otherKey, second, timing) == ShaderDiskCache::LoadStatus::Loaded, "second pack entry did not load");
+            requireSameVariant(variant, first, "pack entry after subsequent read");
+            IrResourcePlan decodedPlan;
+            require(pack.LoadEncoded(planKey, [&](auto entry, auto owner) {
+                require(owner != nullptr, "pack plan decoder received no backing owner");
+                return ShaderDiskCache::DecodePlanEntry(entry, planKey, decodedPlan);
+            }, timing) == ShaderDiskCache::LoadStatus::Loaded && samePlan(plan, decodedPlan), "resource plan in pack did not round trip");
+            const std::vector<std::byte> missing{std::byte{99}};
+            require(pack.Load(missing, second, timing) == ShaderDiskCache::LoadStatus::Absent, "missing pack key did not fall through");
+        }
+        require(!retained.expired(), "pack destruction released retained SPIR-V backing");
+        requireSameVariant(variant, first, "pack entry after pack destruction");
+        second.artifact.spirv = SharedSpirv{};
+        first.artifact.spirv = SharedSpirv{};
+        require(retained.expired(), "unused pack backing was retained");
+    }
+    const auto loose = directory / "loose";
+    std::filesystem::create_directories(loose);
+    for (std::size_t i = 0; i < entries.size(); ++i) require(WriteFileAtomically(loose / ShaderDiskCache::EntryName(keys[i]), entries[i]), "cannot write loose fixture");
+    for (const auto& source : {path, loose}) {
+        setEnvironment("ANYPS5_PREBUILT_SHADER_CACHE", source.string());
+        const auto command = "\"" + std::string(self) + "\" --load-prebuilt";
+        require(std::system(command.c_str()) == 0, "prebuilt DiskStore process failed");
+    }
+    setEnvironment("ANYPS5_PREBUILT_SHADER_CACHE", "");
+    setEnvironment("ANYPS5_PREBUILT_MAPPED_READ", "");
+    auto damaged = entries.front();
+    damaged[ShaderDiskCache::EntryHeaderBytes + key.size()] = std::byte{1};
+    require(ShaderDiskCache::EntryKey(damaged).empty(), "nonzero entry alignment padding accepted");
+    require(!ShaderDiskCache::IsCurrentEntryHeader(entries.front(), entries.front().size() - 1), "short entry header accepted");
+    std::filesystem::remove(path);
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -1882,6 +1976,11 @@ void verifyDefaultDirectory(const char* self) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--no-prebuilt-shaders") {
+            require(ShaderDiskCache::PrebuiltCachePaths("fixture-cache").empty(), "runtime flag did not disable prebuilt paths");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--load-prebuilt") return runPrebuiltLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--no-failure-memo") return runWithoutFailureMemo();
         if (argc == 2 && std::string_view(argv[1]).starts_with("--load-plan")) return runPlanLoadingProcess(argv[1]);
@@ -1893,6 +1992,13 @@ int main(int argc, char** argv) {
         verifyAtomicReplacement(directory);
         verifyResultRoundTrip();
         verifyEntryRoundTrip();
+        verifyPrebuiltPack(directory, argv[0]);
+        setEnvironment("ANYPS5_NO_PREBUILT_SHADERS", "1");
+        require(ShaderDiskCache::PrebuiltCachePaths(directory).empty(), "environment did not disable prebuilt paths");
+        setEnvironment("ANYPS5_NO_PREBUILT_SHADERS", "0");
+        require(!ShaderDiskCache::PrebuiltCachePaths(directory).empty(), "prebuilt paths stayed disabled");
+        const auto disabledCommand = "\"" + std::string(argv[0]) + "\" --no-prebuilt-shaders";
+        require(std::system(disabledCommand.c_str()) == 0, "prebuilt-disable process failed");
         verifyArtifactStorageIsolation();
         verifyKeySensitivity();
         verifyFloatModeSerialization();
