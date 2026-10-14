@@ -86,7 +86,7 @@ What was tried, and what happened:
 
 ### Depth plane copy geometry does not match its layers (`DepthSurface.cpp`, `DepthPlaneCopy`)
 
-Runs 14 and 16 hit it after starting a new game, at about 37.5k log lines. The cause: `DepthPlaneCopy` assumed tight linear slices (`width*height*bpp`), but `DescribeSurface` pads each row to whole tile blocks. The render size is 2564x1444, and those surfaces have a linear pitch of 2688 texels, so the size check could never pass at that resolution, and the detiler writes padded rows anyway. The fix: the copy takes `rowTexels` (from `mips.front().pitchBytes`) and `sliceStride` (`geometry.sliceLinearBytes`), uses `bufferRowLength = rowTexels` for every buffer/image region, and the caller rebuilds the copy object when the pitch or stride changes. Runs 21 and 23 passed that point without the error, and `[diag-depthcopy]` never fired. Candidate upstream PR.
+Runs 14 and 16 hit it after starting a new game, at about 37.5k log lines. The cause: `DepthPlaneCopy` assumed tight linear slices (`width*height*bpp`), but `DescribeSurface` pads each row to whole tile blocks. The render size is 2564x1444, and those surfaces have a linear pitch of 2688 texels, so the size check could never pass at that resolution, and the detiler writes padded rows anyway. The fix: the copy takes `rowTexels` (from `mips.front().pitchBytes`) and `sliceStride` (`geometry.sliceLinearBytes`), uses `bufferRowLength = rowTexels` for every buffer/image region, and the caller rebuilds the copy object when the pitch or stride changes. Runs 21 and 23 passed that point without the error, and `[diag-depthcopy]` never fired. **Already open upstream:** #4722 (alfalfa-star, 2026-10-12, padded detiled rows) and #4873 (GustavoGamarra95, 2026-10-13, padded linear slices) do the same thing, so we will not open a PR. #5054 touches the same check without handling the pitch.
 
 ### Storage store error after a copy or fill into another image over the same memory (`Texture.cpp`, `forgetOriginalOver`)
 
@@ -102,7 +102,7 @@ Runs 20 and 22. The fill-clear and buffer-copy-destination paths reset `layerOri
 AGC graphics: sampling the stencil plane of depth surface 0x205b310000 (2564x2048, vk format 130) as a 2564x2048 texture of guest format 1 (vk 9) ... is not implemented
 ```
 
-Run 23, at about 58k log lines, then SIGABRT. Vulkan cannot view a stencil aspect as UNORM. The fix copies the stencil aspect into its own R8_UNORM image (stencil to buffer to image) and refreshes it when the surface's `written` changes or it is the drawn depth surface (`Sampled` now takes `drawn`). Testing in run 24, on main 43349d433.
+Run 23, at about 58k log lines, then SIGABRT. Vulkan cannot view a stencil aspect as UNORM. The fix copies the stencil aspect into its own R8_UNORM image (stencil to buffer to image) and refreshes it when the surface's `written` changes or it is the drawn depth surface (`Sampled` now takes `drawn`). Testing in run 24, on main 43349d433. No open PR handles R8_UNORM stencil (checked 2026-10-14; #1368 and #1395 rewrite `Sampled` but keep R8_UINT only), so this is a candidate PR once run 24 confirms it.
 
 ## Open
 
