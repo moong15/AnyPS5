@@ -111,6 +111,12 @@ Run 23, at about 58k log lines, then SIGABRT. Vulkan cannot view a stencil aspec
 - **Run 19:** a guest access violation on `FAsyncLoadingThread` (read of `0xffffffffffffffff`) at about 1.4k lines. Seen once, and run 18 on the same build passed that point, so it is probably a race.
 - **Cold-cache hang:** not every run after a rebuild hangs (runs 20, 21 and 23 did not).
 
+## Next rebuild
+
+- Merge upstream PR #5560 (Kikoarl, stops the DCC register clear fallback in the color metadata pass, 16.7 MB GuestMemory::Write each time) into this branch after the rebase onto origin/main. It very likely removes our `keys` clear uploads (6.8 GB per 10 s, about 17.4 MB each). Measure with `APS5_PROFILE_DRAW=1 APS5_PROFILE_GPU=1` in the walking area against run 22.
+- Expect rebase conflicts in DepthSurface.cpp with merged #4683 (depth plane contents shared across stencil pairings).
+- Codex Sol is working on the `readTarget` page walks (no upstream PR) in E:\AnyPS5-unsaved, branch `perf/agc-draw-cpu`; findings in E:\AnyPS5-unsaved\PERF-FINDINGS.md.
+
 ## Performance (run 22, `APS5_PROFILE_DRAW=1 APS5_PROFILE_GPU=1`, walking area)
 
 The walking area runs at about 1-2 fps and is CPU bound. Per frame, the GPU is busy for about 109 ms and idle for about 388 ms. Queue 0 holds the GPU mutex for 7.9 s of every 10 s, and each of the roughly 700 draws per second costs about 0.7 ms (`Graphics::Draw` is 659 us per packet). The heaviest phases of the `[draws]` line, per 10 s:
