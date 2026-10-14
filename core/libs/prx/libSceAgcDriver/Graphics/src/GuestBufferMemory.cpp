@@ -2362,21 +2362,7 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 bool RegisteredReadableCovers(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
-    const auto end = address + bytes;
-    auto cursor = address;
-    auto found = std::upper_bound(lease.begin(), lease.end(), cursor, [](std::uint64_t value, const auto& range) { return value < range->address; });
-    if (found != lease.begin()) --found;
-    for (; found != lease.end() && cursor < end; ++found) {
-        const auto& range = **found;
-        const auto finish = range.address + range.bytes;
-        if (finish <= cursor) continue;
-        if (!range.readable || range.address > cursor) break;
-        cursor = std::min(end, finish);
-    }
-    if (cursor == end) return true;
-    static const bool trace = std::getenv("APS5_TRACE_LOADING_MEMORY") != nullptr;
-    if (trace) std::fprintf(stderr, "[loading-memory] coverage 0x%llx+0x%zx first gap=0x%llx gen=%llu\n", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(GuestAllocations::GuestAllocationsGeneration_nid_postfix()));
-    return false;
+    return containingRange(lease, address, address + bytes) != nullptr;
 }
 
 std::uint64_t RegisteredReadableEnd(std::uint64_t address) {
