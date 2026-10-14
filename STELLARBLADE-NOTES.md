@@ -94,11 +94,20 @@ Runs 14 and 16 hit it after starting a new game, at about 37.5k log lines. The c
 AGC graphics: storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented
 ```
 
-Runs 20 and 22. The fill-clear and buffer-copy-destination paths reset `layerOriginal` on every unit of every other image overlapping the written range, including units outside it. Confirmed in run 22 with `[diag-alias]`, twice: a copy covering units 0-1 of an 18-unit image threw on units 2-17, and a copy covering units 0-3 of a 36-unit image threw on units 4-35. The fix: `StorageTexture::forgetOriginalOver(address, bytes)` clears only the overlapping units of block-unit images (other images keep the whole-image behaviour). Units wholly inside the range were already dropped by `DiscardPendingInside`. Codex is writing a regression test on branch `fix/agc-forget-original-only-over-written-units` in `E:\AnyPS5-unsaved` (off main 66f894761). Candidate upstream PR.
+Runs 20 and 22. The fill-clear and buffer-copy-destination paths reset `layerOriginal` on every unit of every other image overlapping the written range, including units outside it. Confirmed in run 22 with `[diag-alias]`, twice: a copy covering units 0-1 of an 18-unit image threw on units 2-17, and a copy covering units 0-3 of a 36-unit image threw on units 4-35. The fix: `StorageTexture::forgetOriginalOver(address, bytes)` clears only the overlapping units of block-unit images (other images keep the whole-image behaviour). Units wholly inside the range were already dropped by `DiscardPendingInside`. **Upstream already has it:** boykopovar/AnyPS5#5707 by oneandonlydean (`forgetSavedOver`, the same change) was opened first. We commented with our Windows and Stellar Blade evidence and did not open a duplicate. Our branch `fix/agc-forget-original-only-over-written-units` in `E:\AnyPS5-unsaved` (392da1808, local, not pushed) has Codex's tests `agc_storage_untracked_alias_copy` and `agc_storage_untracked_alias_fill` (in `tests/Recorder.cpp`). Both fail without the fix and pass with it; the fill case is offered on #5707 as a follow-up. Drop our copy of the change from this branch once #5707 merges.
+
+### Stencil plane sampled as R8_UNORM (`DepthSurface.cpp`, `DepthSurface::unormStencil`)
+
+```
+AGC graphics: sampling the stencil plane of depth surface 0x205b310000 (2564x2048, vk format 130) as a 2564x2048 texture of guest format 1 (vk 9) ... is not implemented
+```
+
+Run 23, at about 58k log lines, then SIGABRT. Vulkan cannot view a stencil aspect as UNORM. The fix copies the stencil aspect into its own R8_UNORM image (stencil to buffer to image) and refreshes it when the surface's `written` changes or it is the drawn depth surface (`Sampled` now takes `drawn`). Testing in run 24, on main 43349d433.
 
 ## Open
 
 - **Vertex fetch exceeds descriptor record count** returned in run 18 (about 24k lines, an uncaught terminate). `[diag-vthrow]` in `Draw.cpp` now logs the failing attribute right before the throw; it has not fired since.
+- **Pre-existing test failure:** `guest_memory` (libkernel) fails on Windows at the working-set assertion in `GuestMemory.cpp:1237`. It is unrelated to our changes.
 - **Run 19:** a guest access violation on `FAsyncLoadingThread` (read of `0xffffffffffffffff`) at about 1.4k lines. Seen once, and run 18 on the same build passed that point, so it is probably a race.
 - **Cold-cache hang:** not every run after a rebuild hangs (runs 20, 21 and 23 did not).
 
@@ -141,4 +150,5 @@ The walking area runs at about 1-2 fps and is CPU bound. Per frame, the GPU is b
 | 20 | Past 37.5k (no depth error); storage store error after a copy into a smaller image over the same memory, freeze |
 | 21 | Walking area, about 1 fps, no errors |
 | 22 | Profile run; `[diag-alias]` confirmed the copy cause; store error, freeze |
-| 23 | With the `forgetOriginalOver` fix |
+| 23 | With the `forgetOriginalOver` fix: no store or depth error; about 58k lines, then the stencil R8_UNORM sampling error (SIGABRT) |
+| 24 | Stencil UNORM copy, rebased onto main 43349d433 |
