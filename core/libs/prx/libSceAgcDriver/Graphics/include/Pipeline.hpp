@@ -72,7 +72,8 @@ private:
         std::shared_ptr<Framebuffer> framebuffer;
     };
     void release() noexcept;
-    void setLibraryState(VkCommandBuffer commands, const State& state) const;
+    void setLibraryState(VkCommandBuffer commands, const State& state, bool known) const;
+    void apply(VkCommandBuffer commands, const State& state, bool known) const;
     Context context;
     std::vector<VkShaderModule> _modules;
     VkPipelineLayout layout = VK_NULL_HANDLE;

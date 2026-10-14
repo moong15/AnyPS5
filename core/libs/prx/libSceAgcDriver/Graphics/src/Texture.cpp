@@ -3398,8 +3398,9 @@ bool StorageTexture::AnyPendingOverlaps(std::span<const std::pair<std::uint64_t,
         }
         return false;
     };
-    for (const auto* texture : pending.textures) {
-        if (overlapsAny(texture)) return true;
+    const bool indexed = std::any_of(ranges.begin(), ranges.end(), [&](const std::pair<std::uint64_t, std::uint64_t>& range) { return range.second > range.first && pending.textures.MayOverlap(range.first, static_cast<std::size_t>(range.second - range.first)); });
+    for (auto it = indexed ? pending.textures.begin() : pending.textures.end(); it != pending.textures.end(); ++it) {
+        if (overlapsAny(*it)) return true;
     }
     for (const auto* texture : pending.flushing) {
         if (overlapsAny(texture)) return true;
