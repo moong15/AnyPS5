@@ -1211,6 +1211,22 @@ void Driver::ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::
     transaction.Commit();
 }
 
+void Driver::SettleShaderPreparations(std::span<const Shader* const> stages) {
+    std::vector<std::shared_ptr<const ShaderSnapshot>> snapshots;
+    {
+        std::lock_guard lock(mutex);
+        if (shaders == nullptr) return;
+        for (const auto* shader : stages) {
+            if (shader == nullptr) continue;
+            if (auto snapshot = RegisteredHeader(*shaders, shader)) snapshots.push_back(std::move(snapshot));
+        }
+    }
+    for (const auto& snapshot : snapshots) {
+        std::unique_lock lock(snapshot->prepared->mutex);
+        AwaitRegisteredPreparation(*snapshot->prepared, lock);
+    }
+}
+
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target) {
     ShaderPreparationTransaction transaction;
     require(fragment.get() != &front, "rectangle stages refer to the same shader");
@@ -1381,7 +1397,8 @@ void Driver::RegisterShader(const Shader* shader) {
 
 }
 
-extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix() {
+extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix(const Shader* const* shaders, std::size_t count) {
+    AgcDriver::DriverDetail::Driver::Get().SettleShaderPreparations({shaders, count});
     return new AgcDriver::DriverDetail::ShaderPreparationTransaction();
 }
 
