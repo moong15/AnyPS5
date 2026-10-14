@@ -164,6 +164,45 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
     };
     thread_local std::unordered_map<std::uint64_t, Previous> previous;
     thread_local std::size_t reports = 0;
+    struct Programs {
+        std::uint64_t snapshots = 0;
+        std::uint64_t resources = 0;
+    };
+    thread_local std::unordered_map<std::uint64_t, Programs> programs;
+    thread_local std::array<std::uint64_t, 5> counts{};
+    std::uint64_t addresses = 0xcbf29ce484222325ull;
+    std::uint64_t snapshots = 0xcbf29ce484222325ull;
+    std::uint64_t resources = 0xcbf29ce484222325ull;
+    const auto mixInto = [](std::uint64_t& key, std::uint64_t value) {
+        key ^= value;
+        key *= 0x100000001b3ull;
+    };
+    for (const auto base : {0x008u, 0x088u, 0x0c8u, 0x108u, 0x148u}) {
+        const auto low = queue.shader.find(base);
+        const auto high = queue.shader.find(base + 1);
+        if (low == queue.shader.end() || high == queue.shader.end()) {
+            mixInto(addresses, 0);
+            continue;
+        }
+        mixInto(addresses, low->second);
+        mixInto(addresses, high->second);
+        const auto rsrc = queue.shader.find(base + 3);
+        mixInto(resources, rsrc != queue.shader.end() ? rsrc->second : 0);
+        const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
+        auto found = registry.upper_bound(address);
+        if (found == registry.begin()) continue;
+        --found;
+        for (const auto& snapshot : found->second) mixInto(snapshots, reinterpret_cast<std::uintptr_t>(snapshot.get()));
+    }
+    if (programs.size() >= 65536) programs.clear();
+    auto [program, firstProgram] = programs.try_emplace(addresses, Programs{snapshots, resources});
+    if (firstProgram) ++counts[0];
+    else if (program->second.snapshots != snapshots) ++counts[1];
+    else if (program->second.resources != resources) ++counts[2];
+    else ++counts[3];
+    program->second = {snapshots, resources};
+    if (++counts[4] % 5000 == 0) std::fprintf(stderr, "[draw-key-miss] %llu misses: %llu new programs, %llu same programs with replaced snapshots, %llu same programs with other RSRC2, %llu same identity; %zu programs held
+", static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), programs.size());
     if (reports >= 400) return;
     const auto identity = drawIdentityKey(queue, registry);
     if (previous.size() >= 4096 && previous.find(identity) == previous.end()) previous.clear();
