@@ -2,8 +2,12 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawRegisterKey.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace AgcDriver::DriverDetail {
 
@@ -150,6 +154,57 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
     }
     if (aliased && readable) *alias = other == 0 ? 1 : other;
     return key;
+}
+
+void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& registry) {
+    struct Previous {
+        std::uint64_t shape = 0;
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
+        std::size_t reports = 0;
+    };
+    thread_local std::unordered_map<std::uint64_t, Previous> previous;
+    thread_local std::size_t reports = 0;
+    if (reports >= 400) return;
+    const auto identity = drawIdentityKey(queue, registry);
+    if (previous.size() >= 4096 && previous.find(identity) == previous.end()) previous.clear();
+    auto [it, inserted] = previous.try_emplace(identity);
+    std::uint64_t shape = 0;
+    RegisterStateKey(queue, false, true, &shape);
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
+    forEachKeyedUserWord(queue, false, [&](std::uint32_t offset, std::uint32_t value) { words.emplace_back(offset, value); });
+    std::string changed;
+    if (!inserted) {
+        if (it->second.shape != shape) changed += " registers";
+        std::size_t a = 0;
+        std::size_t b = 0;
+        char text[64];
+        while (a < it->second.words.size() || b < words.size()) {
+            if (b == words.size() || (a < it->second.words.size() && it->second.words[a].first < words[b].first)) {
+                std::snprintf(text, sizeof(text), " sh[%03x] %08x->gone", it->second.words[a].first, it->second.words[a].second);
+                changed += text;
+                ++a;
+            } else if (a == it->second.words.size() || words[b].first < it->second.words[a].first) {
+                std::snprintf(text, sizeof(text), " sh[%03x] new %08x", words[b].first, words[b].second);
+                changed += text;
+                ++b;
+            } else {
+                if (it->second.words[a].second != words[b].second) {
+                    std::snprintf(text, sizeof(text), " sh[%03x] %08x->%08x", words[b].first, it->second.words[a].second, words[b].second);
+                    changed += text;
+                }
+                ++a;
+                ++b;
+            }
+        }
+        if (changed.empty()) changed = " nothing keyed (shaders or device)";
+    }
+    it->second.shape = shape;
+    it->second.words = std::move(words);
+    if (inserted || it->second.reports >= 6) return;
+    ++it->second.reports;
+    ++reports;
+    std::fprintf(stderr, "[draw-key-miss] %016llx changed:%s
+", static_cast<unsigned long long>(identity), changed.c_str());
 }
 
 bool Driver::sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, const ShaderRecompiler::ShaderVertexStageInfo& b) {

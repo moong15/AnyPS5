@@ -129,6 +129,7 @@ private:
     void reportDrawCache(DrawEntryCounters& counters);
     static std::uint64_t drawRegisterKey(const QueueState& queue, const ShaderRegistry& registry, std::uint64_t deviceSerial, const DrawRelocation* relocation = nullptr, std::uint64_t* alias = nullptr);
     static std::uint64_t drawIdentityKey(const QueueState& queue, const ShaderRegistry& registry);
+    static void traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& registry);
     static bool drawRelocationEnabled();
     static std::uint64_t relocatedContentKey(const RelocatableUserWord& word, std::uint32_t value, bool& readable);
     static void tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords);

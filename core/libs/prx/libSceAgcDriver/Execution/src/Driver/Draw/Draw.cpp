@@ -113,6 +113,8 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
                     trial.lookups = trial.hits = 0;
                 }
             }
+            static const bool traceKeyMisses = std::getenv("APS5_TRACE_DRAW_KEY_MISSES") != nullptr;
+            if (traceKeyMisses && decode == nullptr) traceDrawKeyMiss(queue, *submission.shaders);
         }
     }
     if (decode != nullptr && !DecodeProgramsCurrent(*decode, *submission.shaders)) {
