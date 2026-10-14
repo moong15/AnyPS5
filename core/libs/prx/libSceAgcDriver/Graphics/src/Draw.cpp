@@ -1168,6 +1168,19 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         if (args == nullptr && ((attribute.resource.fields[1] >> 16u) & 0x3fffu) != 0 && VertexBufferOutOfBoundsSelect(attribute) > 1u && (attribute.fetchIndex == 0 ? static_cast<std::uint64_t>(inputs.maxIndex) : static_cast<std::uint64_t>(draw.firstInstance) + draw.instanceCount - 1u) >= attribute.resource.fields[2]) {
             const auto& f = attribute.resource.fields;
             std::fprintf(stderr, "[diag-vthrow] attr %zu/%zu V# %08x %08x %08x %08x fetchIndex=%u maxIndex=%u firstVertex=%u indexed=%d indexCount=%u instances=%u firstInstance=%u\n", i, attributes.size(), f[0], f[1], f[2], f[3], static_cast<unsigned>(attribute.fetchIndex), inputs.maxIndex, draw.firstVertex, draw.indexed ? 1 : 0, draw.indexCount, draw.instanceCount, draw.firstInstance);
+            if (draw.indexed) {
+                std::string now;
+                const auto count = std::min<std::uint32_t>(draw.indexCount, 12u);
+                const bool readable = RegisteredReadableCovers(draw.indexAddress, static_cast<std::size_t>(count) * draw.indexSize);
+                for (std::uint32_t k = 0; readable && k < count; ++k) {
+                    std::uint32_t value = 0;
+                    std::memcpy(&value, reinterpret_cast<const std::byte*>(draw.indexAddress) + static_cast<std::size_t>(k) * draw.indexSize, draw.indexSize);
+                    char text[16];
+                    std::snprintf(text, sizeof(text), " %x", value);
+                    now += text;
+                }
+                std::fprintf(stderr, "[diag-vthrow] index buffer 0x%llx size %u imported=%d readable=%d indices now:%s\n", static_cast<unsigned long long>(draw.indexAddress), static_cast<unsigned>(draw.indexSize), inputs.indexHandle != VK_NULL_HANDLE && inputs.indices == nullptr ? 1 : 0, readable ? 1 : 0, now.c_str());
+            }
         }
         // An indirect draw's counts are unknown here: the descriptor's whole range is copied.
         const auto bytes = args != nullptr ? VertexBufferExtent(attribute) : VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance);
