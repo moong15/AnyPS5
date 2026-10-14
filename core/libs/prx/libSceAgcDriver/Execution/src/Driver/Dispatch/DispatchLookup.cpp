@@ -4,7 +4,7 @@
 
 namespace AgcDriver::DriverDetail {
 
-void Driver::lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering) {
+void Driver::lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, std::uint64_t identity, std::span<const std::uint32_t> userData, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering) {
     if (!noDispatchCache) {
 
         static const bool validateUnlocked = std::getenv("APS5_NO_UNLOCKED_VALIDATE") == nullptr;
@@ -179,6 +179,18 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
             }
             phaseTiming.Phase(PhaseRelock);
         }
+    }
+    if (!noDispatchCache && !cached && missedEntry == nullptr && dispatchRelocationEnabled()) {
+        cached = relocateDispatch(identity, userData, address, submission, memory, keepVariant, captured);
+        if (cached) {
+            compiledResult = keepVariant->compiled;
+            validated = true;
+        }
+        phaseTiming.Phase(PhaseValidate);
+    }
+    if (!noDispatchCache && profile) {
+        std::lock_guard cacheLock(dispatchCacheMutex);
+        if (std::chrono::steady_clock::now() - entryCounters.lastReport > std::chrono::seconds(10)) reportDispatchCache(entryCounters);
     }
 }
 

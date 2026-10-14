@@ -1373,6 +1373,7 @@ IrResourcePlan handBuiltPlan() {
     plan.srtGuardOffset = 6u;
     plan.cleanFlatSlots = {0u, 1u};
     plan.pureFlatSlots = {1u, 0u};
+    plan.userDataValues = 0x123456789abcdef0ull;
     plan.requiresSpecializationMemory = true;
     plan.srtPlanComplete = true;
     plan.resourceTrackingComplete = true;
@@ -1456,7 +1457,7 @@ bool samePlan(const IrResourcePlan& left, const IrResourcePlan& right) {
     for (std::size_t index = 0; index < left.uniformFill.values.size(); ++index) {
         if (!sameValue(left.uniformFill.values[index], right.uniformFill.values[index])) return false;
     }
-    return left.materializationSources == right.materializationSources && left.guardedSrtSlots == right.guardedSrtSlots && left.srtGuardOffset == right.srtGuardOffset && left.cleanFlatSlots == right.cleanFlatSlots && left.pureFlatSlots == right.pureFlatSlots &&
+    return left.userDataValues == right.userDataValues && left.materializationSources == right.materializationSources && left.guardedSrtSlots == right.guardedSrtSlots && left.srtGuardOffset == right.srtGuardOffset && left.cleanFlatSlots == right.cleanFlatSlots && left.pureFlatSlots == right.pureFlatSlots &&
            left.requiresSpecializationMemory == right.requiresSpecializationMemory && left.srtPlanComplete == right.srtPlanComplete && left.resourceTrackingComplete == right.resourceTrackingComplete && left.info == right.info && left.uniformFill.fill == right.uniformFill.fill;
 }
 
