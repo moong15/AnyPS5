@@ -1082,6 +1082,32 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.nothing = true;
             return inputs;
         }
+        if (!state.stages.mesh) {
+            static int diagCount = 0;
+            for (const auto& attribute : shaders.front().program->vertexAttributes) {
+                const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+                if (NullVertexDescriptor(attribute) || attribute.fetchIndex != 0 || stride == 0) continue;
+                if (VertexBufferOutOfBoundsSelect(attribute) <= 1u || static_cast<std::uint64_t>(*highest) + draw.firstVertex < attribute.resource.fields[2] || diagCount >= 8) continue;
+                ++diagCount;
+                std::fprintf(stderr, "[diag-vfetch] V# %08x %08x %08x %08x stride=%u records=%u select=%u highest=%u firstVertex=%u indexCount=%u indexSize=%u restart=%d skipRestart=%d list=%d\n", attribute.resource.fields[0], attribute.resource.fields[1], attribute.resource.fields[2], attribute.resource.fields[3], stride, attribute.resource.fields[2], VertexBufferOutOfBoundsSelect(attribute), *highest, draw.firstVertex, static_cast<unsigned>(indexBytes / draw.indexSize), draw.indexSize, state.primitiveRestart ? 1 : 0, skipRestart ? 1 : 0, listTopology ? 1 : 0);
+                std::vector<std::byte> raw(static_cast<std::size_t>(indexBytes));
+                GuestMemory::Read(draw.indexAddress, raw, draw.indexSize);
+                std::uint64_t past = 0;
+                std::uint32_t below = 0;
+                std::map<std::uint32_t, std::uint64_t> farValues;
+                for (std::size_t o = 0; o + draw.indexSize <= raw.size(); o += draw.indexSize) {
+                    std::uint32_t v = 0;
+                    std::memcpy(&v, raw.data() + o, draw.indexSize);
+                    if (v >= attribute.resource.fields[2]) { ++past; if (farValues.size() < 6 || farValues.count(v)) ++farValues[v]; }
+                    else below = std::max(below, v);
+                }
+                std::fprintf(stderr, "[diag-vfetch]   indices past records=%llu highest below records=%u far:", static_cast<unsigned long long>(past), below);
+                for (const auto& [v, n] : farValues) std::fprintf(stderr, " %08x x%llu", v, static_cast<unsigned long long>(n));
+                std::fprintf(stderr, "\n");
+                std::fflush(stderr);
+                break;
+            }
+        }
         constexpr std::uint32_t ZeroFetchSlack = 0x10000u;
         if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().program->vertexAttributes)) {
             const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
