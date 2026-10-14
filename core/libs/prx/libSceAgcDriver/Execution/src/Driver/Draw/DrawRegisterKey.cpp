@@ -201,8 +201,7 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
     else if (program->second.resources != resources) ++counts[2];
     else ++counts[3];
     program->second = {snapshots, resources};
-    if (++counts[4] % 5000 == 0) std::fprintf(stderr, "[draw-key-miss] %llu misses: %llu new programs, %llu same programs with replaced snapshots, %llu same programs with other RSRC2, %llu same identity; %zu programs held
-", static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), programs.size());
+    if (++counts[4] % 5000 == 0) std::fprintf(stderr, "[draw-key-miss] %llu misses: %llu new programs, %llu same programs with replaced snapshots, %llu same programs with other RSRC2, %llu same identity; %zu programs held\n", static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), programs.size());
     if (reports >= 400) return;
     const auto identity = drawIdentityKey(queue, registry);
     if (previous.size() >= 4096 && previous.find(identity) == previous.end()) previous.clear();
@@ -242,8 +241,7 @@ void Driver::traceDrawKeyMiss(const QueueState& queue, const ShaderRegistry& reg
     if (inserted || it->second.reports >= 6) return;
     ++it->second.reports;
     ++reports;
-    std::fprintf(stderr, "[draw-key-miss] %016llx changed:%s
-", static_cast<unsigned long long>(identity), changed.c_str());
+    std::fprintf(stderr, "[draw-key-miss] %016llx changed:%s\n", static_cast<unsigned long long>(identity), changed.c_str());
 }
 
 bool Driver::sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, const ShaderRecompiler::ShaderVertexStageInfo& b) {
