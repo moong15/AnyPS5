@@ -33,21 +33,12 @@ const auto& registerMasks() {
 
 }
 
-std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords, bool incremental) {
-    const auto& masks = registerMasks();
-    const auto fingerprint = [&](const Registers& registers, Graphics::RegisterBank bank) {
-        const auto& mask = masks[static_cast<std::size_t>(bank)];
-        return incremental ? registers.Fingerprint(mask) : registers.RecomputeFingerprint(*mask);
-    };
-    auto shape = (0xcbf29ce484222325ull ^ fingerprint(queue.context, Graphics::RegisterBank::Context)) * 0x100000001b3ull;
-    shape = (shape ^ fingerprint(queue.shader, Graphics::RegisterBank::Shader)) * 0x100000001b3ull;
-    shape = (shape ^ fingerprint(queue.userConfig, Graphics::RegisterBank::UserConfig)) * 0x100000001b3ull;
-    auto exact = shape;
+namespace {
+
+template <typename TVisit>
+void forEachKeyedUserWord(const QueueState& queue, bool allUserWords, TVisit&& visit) {
     const auto words = [&](std::uint32_t base, std::uint32_t count) {
-        for (auto it = queue.shader.lower_bound(base); it != queue.shader.end() && it->first < base + count; ++it) {
-            exact = (exact ^ it->first) * 0x100000001b3ull;
-            exact = (exact ^ it->second) * 0x100000001b3ull;
-        }
+        for (auto it = queue.shader.lower_bound(base); it != queue.shader.end() && it->first < base + count; ++it) visit(it->first, it->second);
     };
     for (const auto base : {0x00cu, 0x08cu, 0x10cu}) {
         const auto resources = queue.shader.find(base - 1);
@@ -56,15 +47,81 @@ std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords, bool 
     }
     words(0x082u, 2);
     words(0x102u, 2);
+}
+
+}
+
+std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords, bool incremental, std::uint64_t* shapeKey) {
+    const auto& masks = registerMasks();
+    const auto fingerprint = [&](const Registers& registers, Graphics::RegisterBank bank) {
+        const auto& mask = masks[static_cast<std::size_t>(bank)];
+        return incremental ? registers.Fingerprint(mask) : registers.RecomputeFingerprint(*mask);
+    };
+    auto shape = (0xcbf29ce484222325ull ^ fingerprint(queue.context, Graphics::RegisterBank::Context)) * 0x100000001b3ull;
+    shape = (shape ^ fingerprint(queue.shader, Graphics::RegisterBank::Shader)) * 0x100000001b3ull;
+    shape = (shape ^ fingerprint(queue.userConfig, Graphics::RegisterBank::UserConfig)) * 0x100000001b3ull;
+    if (shapeKey != nullptr) *shapeKey = shape;
+    auto exact = shape;
+    forEachKeyedUserWord(queue, allUserWords, [&](std::uint32_t offset, std::uint32_t value) {
+        exact = (exact ^ offset) * 0x100000001b3ull;
+        exact = (exact ^ value) * 0x100000001b3ull;
+    });
     return exact;
 }
 
 
-std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegistry& registry, std::uint64_t deviceSerial) {
+std::uint64_t Driver::drawIdentityKey(const QueueState& queue, const ShaderRegistry& registry) {
+    std::uint64_t key = 0x84222325cbf29ce4ull;
+    const auto mix = [&](std::uint64_t value) {
+        key ^= value;
+        key *= 0x100000001b3ull;
+    };
+    for (const auto base : {0x008u, 0x088u, 0x0c8u, 0x108u, 0x148u}) {
+        const auto low = queue.shader.find(base);
+        const auto high = queue.shader.find(base + 1);
+        if (low == queue.shader.end() || high == queue.shader.end()) {
+            mix(0);
+            continue;
+        }
+        mix(low->second);
+        mix(high->second);
+        const auto resources = queue.shader.find(base + 3);
+        mix(resources != queue.shader.end() ? resources->second : 0);
+        const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
+        auto it = registry.upper_bound(address);
+        if (it == registry.begin()) {
+            mix(1);
+            continue;
+        }
+        --it;
+        for (const auto& snapshot : it->second) mix(reinterpret_cast<std::uintptr_t>(snapshot.get()));
+        mix(address - it->first);
+    }
+    return key == 0 ? 1 : key;
+}
+
+std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegistry& registry, std::uint64_t deviceSerial, const DrawRelocation* relocation, std::uint64_t* alias) {
+    const bool aliased = alias != nullptr && relocation != nullptr && !relocation->words.empty();
+    bool readable = true;
+    std::uint64_t other = 0x6c62272e07bb0142ull;
+    const auto mixOther = [&](std::uint64_t value) {
+        other ^= value;
+        other *= 0x100000001b3ull;
+    };
     static const bool allUserWords = std::getenv("APS5_DRAW_KEY_ALL_USER_WORDS") != nullptr;
     static const bool verify = std::getenv("APS5_VERIFY_REGISTER_KEYS") != nullptr;
-    auto key = RegisterStateKey(queue, allUserWords);
+    std::uint64_t shape = 0;
+    auto key = RegisterStateKey(queue, allUserWords, true, aliased ? &shape : nullptr);
     if (verify && key != RegisterStateKey(queue, allUserWords, false)) throw std::runtime_error("incremental register fingerprint disagrees with full state");
+    if (aliased) {
+        mixOther(shape);
+        forEachKeyedUserWord(queue, allUserWords, [&](std::uint32_t offset, std::uint32_t value) {
+            mixOther(offset);
+            const auto word = std::find_if(relocation->words.begin(), relocation->words.end(), [&](const RelocatableUserWord& candidate) { return candidate.reg == offset; });
+            mixOther(word != relocation->words.end() ? relocatedContentKey(*word, value, readable) : value);
+        });
+        mixOther(deviceSerial);
+    }
     const auto mix = [&](std::uint64_t value) {
         key ^= value;
         key *= 0x100000001b3ull;
@@ -86,7 +143,12 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
         --it;
         for (const auto& snapshot : it->second) mix(reinterpret_cast<std::uintptr_t>(snapshot.get()));
         mix(address - it->first);
+        if (aliased) {
+            for (const auto& snapshot : it->second) mixOther(reinterpret_cast<std::uintptr_t>(snapshot.get()));
+            mixOther(address - it->first);
+        }
     }
+    if (aliased && readable) *alias = other == 0 ? 1 : other;
     return key;
 }
 
