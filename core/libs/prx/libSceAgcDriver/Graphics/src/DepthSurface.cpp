@@ -292,7 +292,7 @@ private:
         }
         if (drawn || !stencilCopy.filled || stencilCopy.written != written) {
             copyStencil();
-            stencilCopy.written = written;
+            stencilCopy.written = drawn ? 0 : written;
         }
         auto& texture = stencilCopy.textures[key];
         if (texture == nullptr) {

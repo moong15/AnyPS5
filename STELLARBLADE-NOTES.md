@@ -158,3 +158,10 @@ The walking area runs at about 1-2 fps and is CPU bound. Per frame, the GPU is b
 | 22 | Profile run; `[diag-alias]` confirmed the copy cause; store error, freeze |
 | 23 | With the `forgetOriginalOver` fix: no store or depth error; about 58k lines, then the stencil R8_UNORM sampling error (SIGABRT) |
 | 24 | Stencil UNORM copy, rebased onto main 43349d433 |
+
+## 2026-10-14 status
+- Stencil R8_UNORM fix opened upstream as #5781 (branch fix/agc-sample-stencil-as-unorm, worktree E:\AnyPS5-stencil with its own build/). Its test found a stale-copy bug (copy taken while bound reused after unbind); fixed there and here (`stencilCopy.written = drawn ? 0 : written`).
+- #5707 (upstream alias fix) merged: drop our forgetOriginalOver change at the next rebase.
+- Sol's readTarget change: uncommitted in E:\AnyPS5-unsaved, branch perf/agc-draw-cpu, PERF-FINDINGS.md. Check its guest_mlock failure (passed on main here).
+- Run 24 saved as E:\StellarBlade\run24-stencil-fixed.log (reached the attack prompt, no driver failures).
+- Known failing on main on this machine: 4 AMD arithmetic tests (division/f64), agc_driver_layered_volume_vertex_no_gpl.
