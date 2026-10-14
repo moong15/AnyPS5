@@ -25,8 +25,8 @@ alignas(256) constexpr std::array<std::uint32_t, 6> VertexCode{0xe0382000u, 0x80
 alignas(256) constexpr std::array<std::uint32_t, 8> PixelCode{0xf4000100u, 0xfa000000u, 0x7e000204u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 6> InlinePixelCode{0x7e000200u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u, 0xbf810000u};
 bool InlineData = false;
-alignas(4096) std::array<std::array<std::byte, 65536>, 2> ColorMemory{};
-alignas(4096) std::array<std::array<std::byte, 65536>, 2> DepthMemory{};
+alignas(4096) std::array<std::array<std::byte, 65536>, 12> ColorMemory{};
+alignas(4096) std::array<std::array<std::byte, 65536>, 12> DepthMemory{};
 alignas(16) constexpr std::array<std::array<float, 4>, 3> Vertices{{{-3, -1, 0.5f, 1}, {1, -1, 0.5f, 1}, {1, 3, 0.5f, 1}}};
 
 struct Header {
@@ -108,6 +108,50 @@ std::vector<std::uint32_t> DrawFrom(std::size_t target, std::uint32_t left, cons
     return commands;
 }
 
+void FreshKeysHitTheCache() {
+    Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
+    Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
+    const bool disabled = std::getenv("APS5_NO_DRAW_ALIAS_ADMISSION") != nullptr;
+    static std::array<std::array<float, 4>, 12> sources{};
+    for (auto& source : sources) source = {1, 0, 0, 0};
+    AgcDriver::DriverDetail::DrawEntryCounters counters{};
+    for (std::size_t i = 0; i < 8; ++i) {
+        auto commands = DrawFrom(i, static_cast<std::uint32_t>(i), sources[i].data());
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "fresh-key submission failed");
+        AgcDriverWaitIdle_nid_postfix();
+        counters = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
+        const auto expected = disabled ? (i >= 4 ? i - 3 : 0) : (i >= 2 ? i - 1 : 0);
+        Require(counters.hits == expected, "fresh-key admission timing differs at draw " + std::to_string(i));
+        std::vector<std::byte> pixels(64 * 64 * 4);
+        AgcDriver::GuestMemory::Read(reinterpret_cast<std::uintptr_t>(ColorMemory[i].data()), pixels);
+        for (std::size_t y = 0; y < 64; ++y) {
+            for (std::size_t x = 0; x < 64; ++x) {
+                const bool red = y < 4 && x >= i && x < 32;
+                const auto at = (y * 64 + x) * 4;
+                Require(std::to_integer<unsigned>(pixels[at]) == (red ? 255u : 0u) && pixels[at + 1] == std::byte{0} && pixels[at + 2] == std::byte{0} && std::to_integer<unsigned>(pixels[at + 3]) == (red ? 255u : 0u), "fresh-key pixels differ at draw " + std::to_string(i) + " x=" + std::to_string(x) + " y=" + std::to_string(y) + " RGBA=" + std::to_string(std::to_integer<unsigned>(pixels[at])) + "," + std::to_string(std::to_integer<unsigned>(pixels[at + 1])) + "," + std::to_string(std::to_integer<unsigned>(pixels[at + 2])) + "," + std::to_string(std::to_integer<unsigned>(pixels[at + 3])));
+            }
+        }
+    }
+    Require(counters.aliasShapeAdmissions == (disabled ? 0u : 1u), "shape admissions were not counted");
+    Require(counters.inserts == (disabled ? 2u : 1u), "unexpected fresh-key donor insertion count");
+    Require(counters.aliasDonorHits == counters.hits && counters.aliasDonorsInserted != 0, "donor counters differ");
+    const auto before = counters;
+    for (std::size_t i = 8; i < 12; ++i) {
+        auto commands = DrawFrom(i, 0, sources[i].data());
+        Append(commands, 0x69, {0x3b0, (static_cast<std::uint32_t>(i + 31) << 14u) | 3u});
+        Append(commands, 0x2d, {3, 2});
+        const auto originalDraw = std::find(commands.begin(), commands.end(), 0xc0012d00u);
+        Require(originalDraw != commands.end(), "original draw packet missing");
+        commands.erase(originalDraw, originalDraw + 3);
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "unique-shape submission failed");
+        AgcDriverWaitIdle_nid_postfix();
+    }
+    counters = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
+    Require(counters.hits == before.hits && counters.inserts == before.inserts, "single-use shapes entered the cache");
+}
+
 void MovedDataHitsTheCache(bool libraries) {
     static_cast<void>(libraries);
     Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
@@ -158,7 +202,8 @@ int main(int argc, char** argv) {
             libraries = device->GraphicsPipelineLibraries();
         }
         if (!libraries && std::getenv("APS5_NO_GPL") == nullptr) return VulkanTestSkipped;
-        MovedDataHitsTheCache(libraries);
+        if (argc > 1 && std::string(argv[1]) == "admission") FreshKeysHitTheCache();
+        else MovedDataHitsTheCache(libraries);
         AgcDriverShutdown_nid_postfix();
         std::cout << "A draw whose data moved reused the cached draw " << (libraries ? "with" : "without") << " graphics pipeline libraries\n";
         return 0;

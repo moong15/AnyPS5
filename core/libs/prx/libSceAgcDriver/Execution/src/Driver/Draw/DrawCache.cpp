@@ -81,6 +81,11 @@ bool DrawKeySightings::SeenBefore(std::uint64_t key) {
     return false;
 }
 
+bool Driver::drawAliasAdmissionEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_DRAW_ALIAS_ADMISSION") == nullptr;
+    return enabled;
+}
+
 bool Driver::admitDrawKey(std::uint64_t key) {
     std::lock_guard cacheLock(drawCacheMutex);
     if (drawCache.contains(key)) return true;
@@ -88,6 +93,17 @@ bool Driver::admitDrawKey(std::uint64_t key) {
     bool seen = drawKeySightings->SeenBefore(key);
     const auto& pending = drawRelocationPending;
     if (pending.key != key || pending.identity == 0) return seen;
+    if (drawAliasAdmissionEnabled()) {
+        auto shape = pending.aliases.structure;
+        if (shape != 0) {
+            for (const auto content : pending.aliases.content) shape = (shape ^ content) * 0x100000001b3ull;
+        } else if (!drawRelocations.contains(pending.identity)) {
+            shape = pending.admissionShape;
+        }
+        const bool aliasSeen = shape != 0 && drawKeySightings->SeenBefore(shape ^ 0xd6e8feb86659fd93ull);
+        if (!seen && aliasSeen) ++drawEntryCounters.aliasShapeAdmissions;
+        return seen || aliasSeen;
+    }
     if (pending.aliases.structure != 0) {
         if (DrawTargetRelocationEnabled() && drawKeySightings->SeenBefore(pending.aliases.structure ^ 0x165667b19e3779f9ull)) seen = true;
         for (std::size_t stage = 0; stage < pending.aliases.content.size(); ++stage) {

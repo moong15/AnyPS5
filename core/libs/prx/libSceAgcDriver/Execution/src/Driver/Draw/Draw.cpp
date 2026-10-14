@@ -106,7 +106,14 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
                 drawRegisterKey(queue, *submission.shaders, localDevice->Serial(), relocation.get(), &drawAliases);
                 cacheLock.lock();
             }
-            if (drawIdentity != 0) drawRelocationPending = {drawKey, drawIdentity, drawAliases, relocation};
+            if (drawIdentity != 0) {
+                drawRelocationPending = {drawKey, drawIdentity, drawAliases, relocation};
+                if (drawAliasAdmissionEnabled() && relocation == nullptr && !drawRelocations.contains(drawIdentity)) {
+                    std::uint64_t shape = 0;
+                    RegisterStateKey(queue, false, true, &shape, DrawTargetRelocationEnabled());
+                    drawRelocationPending.admissionShape = (shape ^ drawIdentity ^ localDevice->Serial()) * 0x100000001b3ull;
+                }
+            }
             if (drawAliases.structure != 0) {
                 relocateDrawEntry(queue, drawAliases, entry, decode, userPatches);
                 targetRelocated = decode != nullptr && DrawTargetRelocationEnabled() && decode->targetStateKey != DrawTargetStateKey(queue);
@@ -231,7 +238,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         std::lock_guard cacheLock(drawCacheMutex);
         auto& trial = drawRelocationTrials[drawIdentity];
         ++trial.lookups;
-        if (drawHit) ++trial.hits;
+        if (drawHit) {
+            ++trial.hits;
+            ++drawEntryCounters.aliasDonorHits;
+        }
         if (trial.lookups >= DrawRelocationTrial::Window) {
             trial.productive = trial.hits * DrawRelocationTrial::MinimumHitShare >= trial.lookups;
             if (!trial.productive) trial.idle = DrawRelocationTrial::IdleDraws;
@@ -326,6 +336,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     }
 
     cacheDrawStages(useDrawEntries, drawHit, drawParameters, indirectCpu, programs, stageCaptures, vertexInfos, decodeReads, verifyHit, matched, fresh, drawKey, registerKey, decode, phaseTiming);
+    if (registerKey && !drawHit && drawAliasAdmissionEnabled()) {
+        std::lock_guard cacheLock(drawCacheMutex);
+        learnPendingRelocation(&queue, submission.shaders.get(), localDevice->Serial());
+    }
     timing.Mark("shader_compile_and_link");
 
     for (const auto& reads : decodeReads) {

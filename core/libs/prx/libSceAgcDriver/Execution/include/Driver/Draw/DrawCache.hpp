@@ -76,6 +76,7 @@ struct DrawEntryCounters {
 
     std::uint64_t registerKeyLookups = 0, registerKeyHits = 0, decodeSkipped = 0, decodePartial = 0, facadeMismatches = 0, verifyDecodes = 0, verifyDecodeMismatches = 0;
     std::uint64_t targetLookups = 0, targetHits = 0, targetNoDonor = 0, targetDecodeRefused = 0, targetStagesRefused = 0;
+    std::uint64_t aliasShapeAdmissions = 0, aliasDonorsInserted = 0, aliasDonorHits = 0;
     double keyUs = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
@@ -143,6 +144,7 @@ struct DrawRelocationPending {
     std::uint64_t key = 0, identity = 0;
     DrawAliasKeys aliases;
     std::shared_ptr<const DrawRelocation> relocation;
+    std::uint64_t admissionShape = 0;
 };
 
 struct DrawRelocationTrial {

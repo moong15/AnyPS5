@@ -137,7 +137,8 @@ private:
     static std::shared_ptr<DispatchVariant> cloneVariant(const DispatchVariant& variant);
     static void tagBufferWords(DispatchVariant& variant, std::span<const ShaderRecompiler::BufferBaseWord> bufferBaseWords);
     static std::shared_ptr<DispatchVariant> patchBufferWords(const DispatchVariant& variant, std::span<const std::pair<std::uint32_t, std::uint32_t>> live);
-    void learnPendingRelocation();
+    static bool drawAliasAdmissionEnabled();
+    void learnPendingRelocation(const QueueState* queue = nullptr, const ShaderRegistry* registry = nullptr, std::uint64_t deviceSerial = 0);
     void relocateDrawEntry(const QueueState& queue, const DrawAliasKeys& aliases, std::shared_ptr<DrawEntry>& entry, std::shared_ptr<const DrawDecode>& decode, std::vector<DrawUserPatch>& patches);
     void reportDrawRelocation();
     static bool sameVertexInfo(const ShaderRecompiler::ShaderVertexStageInfo& a, const ShaderRecompiler::ShaderVertexStageInfo& b);

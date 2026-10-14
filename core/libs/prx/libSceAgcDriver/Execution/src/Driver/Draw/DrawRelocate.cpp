@@ -106,8 +106,8 @@ void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderReco
     }
 }
 
-void Driver::learnPendingRelocation() {
-    const auto pending = drawRelocationPending;
+void Driver::learnPendingRelocation(const QueueState* queue, const ShaderRegistry* registry, std::uint64_t deviceSerial) {
+    auto pending = drawRelocationPending;
     drawRelocationPending = {};
     if (pending.key == 0) return;
     const auto inserted = drawCache.find(pending.key);
@@ -115,6 +115,10 @@ void Driver::learnPendingRelocation() {
     const auto& entry = *inserted->second;
     const auto& programs = entry.decode->programs;
     if (entry.stages.size() != programs.size()) return;
+    if (drawAliasAdmissionEnabled() && !drawRelocations.contains(pending.identity) && drawRelocations.size() >= MaxAliases) {
+        drawRelocations.clear();
+        drawRelocationTrials.clear();
+    }
     const auto known = drawRelocations.find(pending.identity);
     auto shape = std::make_shared<DrawRelocation>();
     if (known != drawRelocations.end()) *shape = *known->second;
@@ -157,6 +161,11 @@ void Driver::learnPendingRelocation() {
         std::sort(shape->words.begin(), shape->words.end(), [](const RelocatableUserWord& a, const RelocatableUserWord& b) { return a.reg < b.reg; });
         drawRelocations[pending.identity] = std::move(shape);
     }
+    if (queue != nullptr && registry != nullptr) {
+        pending.relocation = drawRelocations.at(pending.identity);
+        pending.aliases = {};
+        drawRegisterKey(*queue, *registry, deviceSerial, pending.relocation.get(), &pending.aliases);
+    }
     if (pending.aliases.structure == 0) return;
     if (drawStageDonors.size() >= MaxAliases) drawStageDonors.clear();
     if (drawDecodes.size() >= MaxAliases) drawDecodes.clear();
@@ -187,6 +196,7 @@ void Driver::learnPendingRelocation() {
         }
     }
     drawDecodes[pending.aliases.structure] = std::move(donor);
+    ++drawEntryCounters.aliasDonorsInserted;
 }
 
 void Driver::relocateDrawEntry(const QueueState& queue, const DrawAliasKeys& aliases, std::shared_ptr<DrawEntry>& entry, std::shared_ptr<const DrawDecode>& decode, std::vector<DrawUserPatch>& patches) {
