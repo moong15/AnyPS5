@@ -36,6 +36,8 @@ inline constexpr std::uint32_t ImageModeBase = 32768u;
 inline constexpr std::uint32_t ImageModeStride = 256u;
 inline constexpr std::uint32_t FoldOffsetBase = 57344u;
 inline constexpr std::uint32_t UnnormalizedBaseLevelBase = 57408u;
+inline constexpr std::uint32_t UnnormalizedBase = 57472u;
+inline constexpr std::uint32_t UnnormalizedPointBase = 57600u;
 
 inline constexpr std::uint32_t DescriptorIndex(std::uint32_t binding, std::uint32_t element) {
     return DescriptorIndexBase + binding * DescriptorIndexStride + element;

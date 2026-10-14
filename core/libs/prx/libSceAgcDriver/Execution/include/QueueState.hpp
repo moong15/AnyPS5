@@ -264,6 +264,23 @@ struct Predication {
 
 struct QueueState {
     static constexpr std::size_t ConstantRamWords = 0x3000;
+    // Bounded, opt-in provenance for the fragment register window. Values are
+    // diagnostic only and never participate in register reads or cache keys.
+    struct ShaderWriteOrigin {
+        std::uint64_t submission = 0;
+        std::uint64_t cursor = 0;
+        std::uint64_t sourceAddress = 0;
+        std::uint32_t opcode = 0;
+        std::uint32_t value = 0;
+    };
+    std::array<ShaderWriteOrigin, 64> fragmentWriteOrigins{};
+    struct ShaderCommandSnapshot {
+        std::uint64_t submission = 0;
+        std::size_t totalWords = 0;
+        std::vector<std::uint32_t> commands;
+        std::map<std::size_t, std::vector<std::uint32_t>> registerLists;
+    };
+    std::array<std::shared_ptr<const ShaderCommandSnapshot>, 8> fragmentCommandHistory{};
     Registers shader;
     Registers context = InitialContextRegisters();
     Registers userConfig{{0x24a, 0}, {0x24b, 0}};

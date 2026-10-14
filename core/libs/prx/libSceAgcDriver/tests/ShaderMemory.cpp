@@ -2799,7 +2799,7 @@ void verifyUnnormalizedSamplers() {
     auditSpirv(accepted.spirv.Words());
     const auto plain = recompile(lz, userData(normalized), 0x40000u);
     require(proven(plain, false), "unnormalized samplers: a normalized S# was flagged");
-    require(plain.variantId == accepted.variantId && plain.spirv == accepted.spirv, "unnormalized samplers: the unnormalized S# compiled another variant");
+    require(plain.PipelineVariantId() != accepted.PipelineVariantId(), "unnormalized samplers: native normalized and emulated samplers need distinct pipeline specialization");
 
     for (const std::uint32_t mimg : {0xf0900f08u, 0xf0800f08u, 0xf0940f08u, 0xf0840f08u, 0xf0880f08u}) {
         const auto result = recompile(program(mimg), userData(unnormalized));
@@ -2813,14 +2813,15 @@ void verifyUnnormalizedSamplers() {
     reject(0xf0bc0f08u, imageData(unnormalized, Type2D, Format32Float, 0u), "unnormalized guest sampler is used with depth comparison, which is not implemented", "unnormalized samplers: image_sample_c_lz was accepted");
     reject(0xf11c0108u, userData(unnormalized), "unnormalized guest sampler is used by a gather, which is not implemented", "unnormalized samplers: image_gather4_lz was accepted");
     reject(0xf1800308u, userData(unnormalized), "unnormalized guest sampler is used by image_get_lod, which is not implemented", "unnormalized samplers: image_get_lod was accepted");
-    reject(0xf0800f09u, userData(unnormalized), "unnormalized guest sampler is used by an image_sample_*_a variant, which is not implemented", "unnormalized samplers: image_sample_a was accepted");
-    reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
-    reject(0xf09c0f10u, imageData(unnormalized, Type3D, Format8888UNorm, 3u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 3D T# was accepted");
-    reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
+    require(proven(recompile(program(0xf0880f08u), userData(unnormalized)), true), "unnormalized sampler derivatives or adjusted sample was not normalized");
+    require(proven(recompile(program(0xf0800f09u), userData(unnormalized)), true), "unnormalized sampler derivatives or adjusted sample was not normalized");
+    reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
+    require(proven(recompile(program(0xf09c0f10u), imageData(unnormalized, Type3D, Format8888UNorm, 3u)), true), "unnormalized samplers: a 3D T# was not normalized for native sampling");
+    reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
     reject(0xf09c0f08u, imageData(unnormalized, Type2D, Format11_11_10UInt, 0u), "unnormalized guest sampler samples an image that needs a format conversion or packed access", "unnormalized samplers: a T# with a format conversion was accepted");
     reject(0xf15c0108u, userData(unnormalized), "unnormalized guest sampler is used by a gather, which is not implemented", "unnormalized samplers: image_gather4_lz_o was accepted");
     reject(0xf0fc0f08u, imageData(unnormalized, Type2D, Format32Float, 0u), "unnormalized guest sampler is used with depth comparison, which is not implemented", "unnormalized samplers: image_sample_c_lz_o was accepted");
-    reject(0xf0dc0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array image_sample_lz_o was accepted");
+    reject(0xf0dc0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a 2D-array image_sample_lz_o was accepted");
     for (const std::uint32_t mimg : {0xf0c00f08u, 0xf11c0108u, 0xf09c0f18u}) {
         static_cast<void>(recompile(program(mimg), imageData(normalized, mimg == 0xf09c0f18u ? TypeCube : Type2D, Format8888UNorm, mimg == 0xf09c0f18u ? 5u : 0u)));
     }
@@ -2835,18 +2836,34 @@ void verifyUnnormalizedSamplers() {
     };
     const auto foldedSamples = [](std::span<const std::uint32_t> words) {
         std::vector<std::uint32_t> exact;
-        std::vector<std::uint32_t> sums;
         std::vector<std::uint32_t> coordinates;
+        std::map<std::uint32_t, std::vector<std::uint32_t>> definitions;
         for (std::size_t cursor = 5; cursor < words.size();) {
             const auto count = words[cursor] >> 16u;
             require(count != 0 && count <= words.size() - cursor, "unnormalized texel offsets: truncated SPIR-V instruction");
             const auto op = words[cursor] & 0xffffu;
             if (op == spv::OpDecorate && count == 3u && words[cursor + 2] == spv::DecorationNoContraction) exact.push_back(words[cursor + 1]);
-            if (op == spv::OpFAdd) sums.push_back(words[cursor + 2]);
+            if (op == spv::OpFAdd || op == spv::OpFDiv || op == spv::OpSelect || op == spv::OpExtInst || op == spv::OpCompositeConstruct || op == spv::OpCompositeExtract || op == spv::OpVectorShuffle) definitions[words[cursor + 2]] = std::vector<std::uint32_t>(words.begin() + cursor, words.begin() + cursor + count);
             if (op == spv::OpImageSampleExplicitLod) coordinates.push_back(words[cursor + 4]);
             cursor += count;
         }
-        return !coordinates.empty() && std::ranges::all_of(coordinates, [&](std::uint32_t id) { return std::ranges::count(sums, id) != 0 && std::ranges::count(exact, id) != 0; });
+        const auto offsetFeeds = [&](auto&& self, std::uint32_t id, unsigned depth) -> bool {
+            if (depth == 0u) return false;
+            const auto found = definitions.find(id);
+            if (found == definitions.end()) return false;
+            const auto& inst = found->second;
+            const auto op = inst[0] & 0xffffu;
+            if (op == spv::OpFAdd && std::ranges::count(exact, id) != 0) return true;
+            if (op == spv::OpFDiv) return self(self, inst[3], depth - 1);
+            if (op == spv::OpSelect) return self(self, inst[4], depth - 1) && self(self, inst[5], depth - 1);
+            if (op == spv::OpFAdd) return self(self, inst[3], depth - 1) || self(self, inst[4], depth - 1);
+            if (op == spv::OpExtInst && inst.size() > 5) return self(self, inst[5], depth - 1);
+            if (op == spv::OpCompositeExtract) return self(self, inst[3], depth - 1);
+            if (op == spv::OpCompositeConstruct) return std::ranges::any_of(std::span(inst).subspan(3), [&](std::uint32_t value) { return self(self, value, depth - 1); });
+            if (op == spv::OpVectorShuffle) return self(self, inst[3], depth - 1) || self(self, inst[4], depth - 1);
+            return false;
+        };
+        return !coordinates.empty() && std::ranges::all_of(coordinates, [&](std::uint32_t id) { return offsetFeeds(offsetFeeds, id, 12u); });
     };
     const auto sampleMasks = [](std::span<const std::uint32_t> words) {
         std::vector<std::uint32_t> masks;
@@ -2978,22 +2995,22 @@ void verifyUnusedUnnormalizedSampler() {
     const auto foldedConstant = populate(foldVolume);
     require(foldedConstant.size() == 1u && foldedConstant[0].samplerUnnormalized == std::vector<bool>{true}, "unnormalized texel offsets: a 3D view whose channels select constants was bound or refused");
     snapshot.images[0].dwords[3] = 0xa0000facu;
-    expectFailure([&] { static_cast<void>(populate(foldVolume)); }, "takes only images an unnormalized S# can sample", "unnormalized texel offsets: an ordinary 3D view matched a constant-only mode");
+    require(populate(foldVolume).size() > 1u, "unnormalized texel offsets: an ordinary 3D view did not bind its actual texture");
     snapshot.images[0].dwords[3] = 0x90000facu;
     const auto atBaseLevel = [&](const ShaderInfo& shader) { return populate(shader)[0].imageUnnormalizedBaseLevel; };
     auto levelZero = info;
     levelZero.samplers[0].uses = SamplerUseExplicitLod;
     require(atBaseLevel(levelZero) == std::vector<bool>{true}, "unnormalized samplers: an image read only by image_sample_lz was not flagged as exact at its base level");
     require(atBaseLevel(info) == std::vector<bool>{false}, "unnormalized samplers: an image without live uses was flagged as exact at its base level");
-    require(atBaseLevel(offset) == std::vector<bool>{false}, "unnormalized samplers: an image read with a texel offset was flagged as exact at its base level");
+    require(atBaseLevel(offset) == std::vector<bool>{true}, "unnormalized samplers: a texel offset prevented the forced base-level path");
     auto selectedLod = levelZero;
     selectedLod.samplers[0].uses |= SamplerUseNonZeroLod;
-    require(atBaseLevel(selectedLod) == std::vector<bool>{false}, "unnormalized samplers: an image also read at a selected LOD was flagged as exact at its base level");
+    require(atBaseLevel(selectedLod) == std::vector<bool>{true}, "unnormalized samplers: a selected LOD prevented the forced base-level path");
     snapshot.samplers[0].dwords[1] = 0x00fff100u;
-    require(atBaseLevel(levelZero) == std::vector<bool>{false}, "unnormalized samplers: an S# with a minimum LOD was flagged as exact at the base level");
+    require(atBaseLevel(levelZero) == std::vector<bool>{true}, "unnormalized samplers: a minimum LOD prevented the forced base-level path");
     snapshot.samplers[0].dwords[1] = 0x00fff000u;
     snapshot.samplers[0].dwords[2] = 0x05500180u;
-    require(atBaseLevel(levelZero) == std::vector<bool>{false}, "unnormalized samplers: an S# with a LOD bias was flagged as exact at the base level");
+    require(atBaseLevel(levelZero) == std::vector<bool>{true}, "unnormalized samplers: a LOD bias prevented the forced base-level path");
     snapshot.samplers[0].dwords[2] = 0x05500000u;
     snapshot.samplers[0].dwords[0] = 0x00000092u;
     const auto normalized = populate(info);

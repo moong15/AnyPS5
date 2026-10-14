@@ -38,6 +38,8 @@ constexpr std::uint8_t OtherLevelTexel = 0x40u;
 alignas(256) std::array<std::uint32_t, Threads * Words> Buffer{};
 alignas(256) std::array<std::uint8_t, 16384> SingleLevel{};
 alignas(256) std::array<std::uint8_t, 16384> MultiLevel{};
+alignas(256) std::array<std::uint8_t, 16384> ThreeLevels{};
+alignas(256) std::array<std::uint8_t, 16384> Volume{};
 
 alignas(256) constexpr std::array<std::uint32_t, 40> Code{
     0x34020086, 0xe0301000, 0x80000201, 0xe0301004, 0x80000301, 0xbf8c3f70, 0x7e0802ff, 0x402ccccd,
@@ -68,6 +70,13 @@ alignas(256) constexpr std::array<std::uint32_t, 45> OffsetCode{
     0xe0701038, 0x80001201, 0xe070103c, 0x80001301, 0xbf810000,
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 22> BiasCode{
+    0x34020086, 0xe0301000, 0x80000201, 0xe0301004, 0x80000301, 0xbf8c3f70,
+    0x7e0802ff, 0x402ccccd, 0x7e0a0302, 0x7e0c0303, 0xf0940f08, 0x00610804,
+    0xbf8c3f70, 0xe0701010, 0x80000801, 0xe0701014, 0x80000901, 0xe0701018,
+    0x80000a01, 0xe070101c, 0x80000b01, 0xbf810000,
+};
+
 enum class Offset { None, Lane, Constant };
 constexpr std::int32_t ConstantOffsetU = -3;
 constexpr std::int32_t ConstantOffsetV = 2;
@@ -82,6 +91,7 @@ struct Program {
 const Program Plain{Code, {"image_sample_lz", "image_sample_l 2.7", "image_sample"}, {Offset::None, Offset::None, Offset::None}};
 const Program LevelZero{LevelZeroCode, {"image_sample_lz", "", ""}, {Offset::None, Offset::None, Offset::None}, 1};
 const Program Gradient{GradientCode, {"image_sample_d (4, 0, 0, 4)", "", ""}, {Offset::None, Offset::None, Offset::None}, 1};
+const Program Biased{BiasCode, {"image_sample_b 2.7", "", ""}, {Offset::None, Offset::None, Offset::None}, 1};
 const Program Offsets{OffsetCode, {"image_sample_lz_o", "image_sample_l_o 2.7", "image_sample_lz_o (-3, 2) NSA"}, {Offset::Lane, Offset::Lane, Offset::Constant}};
 
 alignas(256) constexpr std::array<std::uint32_t, 34> ConstantCode{
@@ -304,6 +314,7 @@ int main() {
         if (!device) return VulkanTestSkipped;
         FillTexture(SingleLevel, 1);
         FillTexture(MultiLevel, StorageLevels);
+        FillTexture(ThreeLevels, 3u);
         const auto coordinates = Coordinates(0u);
         const auto levelOneCoordinates = Coordinates(1u);
         const auto single = TextureDescriptor(SingleLevel.data(), 0u, 0u);
@@ -329,14 +340,47 @@ int main() {
             Require(levelZeroChain == levelZeroSingle, std::string(sampler.name) + ": a 4-level view read by image_sample_lz does not sample its base level like a 1-level image");
             if (driverSamplesUnnormalizedAboveMipZero) Check(LevelZero, sampler, 1u, "3-level view starting at mip 1", levelOneCoordinates, Run(*device, LevelZero, fromLevelOne, sampler.words, levelOneCoordinates));
         }
-        ExpectFailure(*device, Plain, TextureDescriptor(MultiLevel.data(), 2u, 2u), Samplers[0].words, "single-level", "a 3-level view read by a selected LOD");
-        ExpectFailure(*device, Plain, chain, Samplers[0].words, "single-level", "a 4-level view read by image_sample_l and image_sample");
-        ExpectFailure(*device, Plain, fromLevelOne, Samplers[0].words, "single-level", "a view starting at mip 1 read by image_sample_l and image_sample");
-        ExpectFailure(*device, Offsets, chain, Samplers[0].words, "single-level", "a 4-level view read with texel offsets");
-        ExpectFailure(*device, Gradient, chain, Samplers[0].words, "single-level", "a 4-level view read by image_sample_d");
-        ExpectFailure(*device, LevelZero, chain, Samplers[2].words, "single-level", "a 4-level view through an S# with a minimum LOD and a LOD bias");
+        Check(Plain, Samplers[0], 0u, "3-level view ignores selected LOD", coordinates, Run(*device, Plain, TextureDescriptor(ThreeLevels.data(), 2u, 2u), Samplers[0].words, coordinates));
+        Check(Plain, Samplers[0], 0u, "4-level view ignores selected LOD", coordinates, Run(*device, Plain, chain, Samplers[0].words, coordinates));
+        Check(Plain, Samplers[0], 1u, "view starting at mip 1 ignores selected LOD", levelOneCoordinates, Run(*device, Plain, fromLevelOne, Samplers[0].words, levelOneCoordinates));
+        Check(Offsets, Samplers[0], 0u, "multi-level view with texel offsets", offsetCoordinates, Run(*device, Offsets, chain, Samplers[0].words, offsetCoordinates));
+        Check(LevelZero, Samplers[2], 0u, "minimum LOD and sampler bias are ignored", coordinates, Run(*device, LevelZero, chain, Samplers[2].words, coordinates));
+        Check(Gradient, Samplers[0], 0u, "multi-level gradient ignores LOD", coordinates, Run(*device, Gradient, chain, Samplers[0].words, coordinates));
         ExpectFailure(*device, Plain, single, {0x00008092u, 0x00fff000u, 0x05100000u, 0u}, "different minification", "unequal minification and magnification filters");
-        ExpectFailure(*device, Plain, single, {0x00008090u, 0x00fff000u, 0x05500000u, 0u}, "clamp mode 0", "wrap on X");
+        auto repeatSampler = Samplers[0];
+        repeatSampler.words[0] = 0x00008090u;
+        const std::vector<Coordinate> repeatInterior{{0.5f, 0.5f}, {3.5f, 2.5f}};
+        Check(Plain, repeatSampler, 0u, "repeat mode interior", repeatInterior, Run(*device, Plain, single, repeatSampler.words, repeatInterior));
+        auto volumeDescriptor = TextureDescriptor(Volume.data(), 0u, 0u);
+        volumeDescriptor[3] = (volumeDescriptor[3] & 0x0fffffffu) | (Type3D << 28u);
+        volumeDescriptor[4] = 1u;
+        const auto volumeLayout = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(volumeDescriptor));
+        const auto planeLayout = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(single));
+        Require(volumeLayout.guestBytes <= Volume.size(), "volume sampler fixture exceeds its storage");
+        Volume.fill(0x2au);
+        for (std::uint32_t y = 0; y < Height; ++y) {
+            for (std::uint32_t x = 0; x < Width; ++x) {
+                const auto source = planeLayout.mips[0].tiledOffset + static_cast<std::uint64_t>(y) * planeLayout.mips[0].pitchBytes + x * 4u;
+                const auto target = volumeLayout.mips[0].tiledOffset + static_cast<std::uint64_t>(y) * volumeLayout.mips[0].pitchBytes + x * 4u;
+                std::copy_n(SingleLevel.data() + source, 4u, Volume.data() + target);
+            }
+        }
+        Check(Plain, Samplers[1], 0u, "2D instruction on a 3D texture selects slice zero", coordinates, Run(*device, Plain, volumeDescriptor, Samplers[1].words, coordinates));
+        Check(Biased, Samplers[1], 0u, "biased 2D instruction on a 3D texture ignores LOD bias", coordinates, Run(*device, Biased, volumeDescriptor, Samplers[1].words, coordinates));
+        auto uintVolumeDescriptor = volumeDescriptor;
+        uintVolumeDescriptor[1] = (uintVolumeDescriptor[1] & ~(0x1ffu << 20u)) | (60u << 20u);
+        const auto checkUintVolume = [&](const Program& program, const std::array<std::uint32_t, 4>& sampler) {
+            const auto samples = Run(*device, program, uintVolumeDescriptor, sampler, coordinates);
+            for (std::size_t lane = 0; lane < coordinates.size(); ++lane) {
+                const auto expected = Reference(Samplers[1], 0u, coordinates[lane]);
+                for (std::uint32_t item = 0; item < program.count; ++item) {
+                    for (std::uint32_t channel = 0; channel < 4u; ++channel) Require(samples[lane][item * 4u + channel] == static_cast<std::uint32_t>(expected[channel]), "integer volume sample did not read slice zero at the requested texel");
+                }
+            }
+        };
+        checkUintVolume(Plain, Samplers[1].words);
+        checkUintVolume(Biased, Samplers[1].words);
+
         const auto constantView = [&](std::uint32_t type, std::uint32_t format, std::uint32_t swizzle) {
             auto descriptor = TextureDescriptor(SingleLevel.data(), 0u, 0u);
             descriptor[1] = (descriptor[1] & ~(0x1ffu << 20u)) | (format << 20u);

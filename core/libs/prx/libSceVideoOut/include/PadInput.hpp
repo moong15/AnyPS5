@@ -16,6 +16,9 @@ public:
     void HandleEvent(const SDL_Event& event, DisplayWindow& window);
     void Update();
     bool MouseModeEnabled() const { return keyboardMouse.MouseMode(); }
+    // Diagnostic aid: holds a pad button with no physical controller behind it, so an
+    // unattended run can get past a screen that waits for one. Cleared by CloseScripted.
+    void SetScriptedButton(Pad::PadButton button, bool down);
 
 private:
     explicit PadInput(Pad::InputConfiguration configuration);
@@ -31,6 +34,7 @@ private:
     Pad::KeyboardMouse keyboardMouse;
     SDL_GameController* controller = nullptr;
     PadInputState controllerState{};
+    std::uint32_t scriptedButtons = 0;
     std::uint32_t outputSequence = 0;
     PadOutputState outputState{};
     bool outputPending = false;

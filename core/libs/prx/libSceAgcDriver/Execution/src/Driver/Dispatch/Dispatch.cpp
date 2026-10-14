@@ -272,7 +272,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             totalMs += elapsed;
             if (profile && elapsed > 200) std::fprintf(stderr, "[gpu] compute shader 0x%llx recompile took %.0f ms (%zu SPIR-V words, %zu captured regions, total %.1f s)\n", static_cast<unsigned long long>(address), elapsed, compiledResult->spirv.size(), captured.size(), totalMs / 1000);
         } catch (const std::exception& error) {
-            const auto dump = dumpShaders ? dumpRequest(address, request) : std::string{};
+            // Always dump on the failure: the process is ending, and naming the request file
+            // here is what lets agc_shader_replay reproduce the refusal offline. APS5_DUMP_SHADERS
+            // would dump every dispatch instead, which costs far more time than the one shader
+            // the failure is about.
+            const auto dump = dumpRequest(address, request);
 
             std::string reason = error.what();
             if (const auto newline = reason.find('\n'); newline != std::string::npos) reason.resize(newline);

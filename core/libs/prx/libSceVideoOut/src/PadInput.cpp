@@ -210,6 +210,7 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
         return;
     }
     if (event.type == SDL_WINDOWEVENT) {
+        if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST || event.window.event == SDL_WINDOWEVENT_CLOSE) scriptedButtons = 0;
         if (keyboardMouse.HandleEvent(event, std::chrono::steady_clock::now()).releaseMouse) setMouseMode(false);
         publish();
         return;
@@ -240,6 +241,20 @@ void PadInput::Update() {
     if (controller != nullptr || keyboardMouse.MouseMode() || changed) publish();
 }
 
+void PadInput::SetScriptedButton(Pad::PadButton button, bool down) {
+    const auto bit = static_cast<std::uint32_t>(button);
+    if (down) {
+        if (scriptedButtons == bit) return;
+        scriptedButtons |= bit;
+    } else {
+        if ((scriptedButtons & bit) == 0) return;
+        scriptedButtons &= ~bit;
+    }
+    publish();
+}
+
 void PadInput::publish() {
-    PadPublishInput_nid_postfix(keyboardMouse.Compose(controllerState));
+    PadInputState state = controllerState;
+    state.buttons |= scriptedButtons;
+    PadPublishInput_nid_postfix(keyboardMouse.Compose(state));
 }

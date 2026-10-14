@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <span>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
@@ -1341,6 +1342,57 @@ void ValidateRuntimeResources(const CompiledShader& shader, std::span<const std:
 
 }
 
+// Diagnostic aid: a rejected guest buffer descriptor never reaches the .req dumps in
+// DrawCapture.cpp, which fire on capture and materialize failure, both upstream of this decode. This
+// writes the layout arithmetic that produced the descriptor instead - the runtime layout, every
+// binding with its role/kind/count, and each descriptor's dwords - so the slot mapping can be checked
+// offline without a game run. Writing it costs one file on a path that is already failing.
+void DumpRejectedBinding(const CompiledShader& shader, std::uint32_t rejectedElement, std::span<const std::uint32_t> rejectedWords) {
+    static std::mutex dumpMutex;
+    static std::set<std::uint64_t> dumped;
+    const auto& program = *shader.program;
+    const auto variant = program.PipelineVariantId();
+    std::lock_guard lock(dumpMutex);
+    if (!dumped.insert(variant).second) return;
+    char name[64];
+    std::snprintf(name, sizeof(name), "rejected_binding_%llx.txt", static_cast<unsigned long long>(variant));
+    std::FILE* file = std::fopen(name, "wb");
+    if (file == nullptr) return;
+    // The rejected descriptor is identified by its descriptorSet/binding number, not by its position
+    // in program.bindings: the two differ, and the position is not what the runtime binds by.
+    std::fprintf(file, "# rejected guest buffer descriptor; variant %llx, stage %u\n",
+        static_cast<unsigned long long>(variant), static_cast<unsigned>(shader.stage));
+    std::fprintf(file, "# runtime layout: memoryOffsetDword=%u shaderDataDwords=%u imageMetadataDword=%u runtimeImageCount=%u\n",
+        program.memoryOffsetDword, program.shaderDataDwords, program.imageMetadataDword, program.runtimeImageCount);
+    std::fprintf(file, "# pushConstantOffset=%u bindings=%zu rejectedElement=%u\n",
+        shader.pushConstantOffset, program.bindings.size(), rejectedElement);
+    for (std::size_t b = 0; b < program.bindings.size(); ++b) {
+        const auto& binding = program.bindings[b];
+        std::fprintf(file, "binding[%zu] set=%u number=%u count=%u role=%s kind=%s descriptorDwords=%zu%s\n",
+            b, binding.descriptorSet, binding.binding, binding.count, roleName(binding.role), kindName(binding.kind),
+            binding.guestDescriptor.size(),
+            binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers && binding.binding == 63u ? "  <-- REJECTED BINDING" : "");
+        const std::size_t width = binding.count != 0u ? binding.guestDescriptor.size() / binding.count : 0u;
+        for (std::uint32_t element = 0; element < binding.count; ++element) {
+            std::fprintf(file, "  [%u]%s", element,
+                binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers && binding.binding == 63u && element == rejectedElement ? "  <-- REJECTED ELEMENT" : "");
+            for (std::size_t d = 0; d < width && (element * width + d) < binding.guestDescriptor.size(); ++d) {
+                std::fprintf(file, " %08x", binding.guestDescriptor[element * width + d]);
+            }
+            std::fprintf(file, "\n");
+        }
+    }
+    std::fprintf(file, "# rejected descriptor: stride=%u numRecords=%u\n",
+        (rejectedWords[1] >> 16u) & 0x3FFFu, rejectedWords[2]);
+    std::fprintf(file, "# base48=%llx getSize=%llu\n",
+        static_cast<unsigned long long>((rejectedWords[0] | (static_cast<std::uint64_t>(rejectedWords[1]) << 32u)) & 0xFFFFFFFFFFFFull),
+        static_cast<unsigned long long>(((rejectedWords[1] >> 16u) & 0x3FFFu) != 0u
+            ? static_cast<std::uint64_t>((rejectedWords[1] >> 16u) & 0x3FFFu) * rejectedWords[2]
+            : static_cast<std::uint64_t>(rejectedWords[2])));
+    std::fclose(file);
+    std::fprintf(stderr, "[gpu] rejected binding layout written to %s\n", name);
+}
+
 void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint32_t colorAttachments, std::uint64_t indexAddress, std::size_t indexBytes) {
     PerformanceTimer frameTiming("Resources.Prepare");
     const auto stageStart = std::chrono::steady_clock::now();
@@ -1399,7 +1451,37 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                         const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                         const bool atomic = element < binding.bufferAtomic.size() && binding.bufferAtomic[element];
                         const bool read = element < binding.bufferRead.size() && binding.bufferRead[element];
-                        const auto index = addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), target, indexAddress, indexBytes, written, atomic, read);
+                        const auto descriptorSpan = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4);
+                        // Diagnostic aid: name where the descriptor was read from. addGuestBuffer
+                        // reports the four DWORDs it rejected, which on their own do not say whether
+                        // the shader resource table was read from the right place; the SRT address and
+                        // the array base do. A descriptor read out of shader code shows up as an SRT
+                        // address inside the code region with a fixed payload across runs.
+                        //
+                        // The existing dump sites (DrawCapture.cpp:52 on capture failure, :104 on
+                        // materialize failure) are both upstream of this throw, so a rejection here
+                        // never reached a .req and could not be replayed. This writes one directly,
+                        // carrying the whole binding list and the runtime layout rather than the
+                        // guest request: ShaderResources has no RecompileRequest to hand, and the
+                        // question here is the layout arithmetic, not the shader.
+                        std::size_t index = 0;
+                        try {
+                            index = addGuestBuffer(descriptorSpan, target, indexAddress, indexBytes, written, atomic, read);
+                        } catch (const std::runtime_error& error) {
+                            char where[320];
+                            std::snprintf(where, sizeof(where),
+                                          " [srt=0x%llx srtArray=0x%llx element=%u binding=%u stage=%u memoryOffsetDword=%u role=%s kind=%s]",
+                                          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(descriptorSpan.data())),
+                                          static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(binding.guestDescriptor.data())),
+                                          static_cast<unsigned>(element),
+                                          static_cast<unsigned>(binding.binding),
+                                          static_cast<unsigned>(shader.stage),
+                                          static_cast<unsigned>(shader.program->memoryOffsetDword),
+                                          roleName(binding.role),
+                                          kindName(binding.kind));
+                            DumpRejectedBinding(shader, element, descriptorSpan);
+                            throw std::runtime_error(std::string(error.what()) + where);
+                        }
                         const auto& push = shader.program->pushConstants;
                         if (!push.empty()) {
                             const auto position = shader.program->memoryOffsetDword * 4u + element;
@@ -2896,16 +2978,39 @@ DescriptorCache::Stats DescriptorCache::Counters() const {
 
 std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, bool written, bool atomic, bool read) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
-    Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
-    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
     if (byteSize == 0 || address == 0) {
         allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
         return allocations.size() - 1;
     }
-    Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
+    if (byteSize > context.limits.maxStorageBufferRange) {
+        // APS5_TOLERATE_OVERSIZED_DESCRIPTOR=1 routes a descriptor that decodes past the range limit
+        // to the same empty binding an absent one gets, instead of throwing. The two failure modes of
+        // this refusal are both fatal to the run: the exception escapes the presenter and aborts, or
+        // with APS5_CONTINUE_AFTER_FLIP_FAILURE it leaves the engine's WAIT_REG_MEM unsatisfied and
+        // the guest stalls into its watchdog (0xc0000005 with rax deadbeefcafebabe). One fragment
+        // shader's storage buffer rendering as zeros is the cheaper trade while that decode is
+        // understood: the draw completes and the title keeps running, so the next wall becomes
+        // reachable instead of being behind this one. Off by default, and every occurrence is
+        // reported so a run that leans on it cannot be mistaken for a correct one.
+        static const bool tolerate = std::getenv("APS5_TOLERATE_OVERSIZED_DESCRIPTOR") != nullptr;
+        if (tolerate) {
+            static std::atomic<std::uint64_t> tolerated{0};
+            const auto index = tolerated.fetch_add(1) + 1;
+            if (index <= 32) {
+                std::fprintf(stderr, "[gpu] tolerated oversized shader buffer descriptor #%llu (V# %08x %08x %08x %08x, address 0x%llx, bytes %llu, limit %u); bound empty\n",
+                    static_cast<unsigned long long>(index), words[0], words[1], words[2], words[3], static_cast<unsigned long long>(address),
+                    static_cast<unsigned long long>(byteSize), context.limits.maxStorageBufferRange);
+            }
+            allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
+            return allocations.size() - 1;
+        }
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "AGC graphics: shader buffer exceeds descriptor range limit (V# %08x %08x %08x %08x, address 0x%llx, bytes %llu, limit %u)", words[0], words[1], words[2], words[3], static_cast<unsigned long long>(address), static_cast<unsigned long long>(byteSize), context.limits.maxStorageBufferRange);
+        throw std::runtime_error(detail);
+    }
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     auto size = static_cast<std::size_t>(byteSize);
     if (const std::uint64_t stride = descriptor.Stride(); stride != 0) {
@@ -3353,10 +3458,9 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
             if (element < binding.imageUnnormalized.size() && binding.imageUnnormalized[element]) {
                 const auto range = texture->SampledViewRange(firstLayer);
                 const bool exactAtBase = element < binding.imageUnnormalizedBaseLevel.size() && binding.imageUnnormalizedBaseLevel[element];
-                const bool singleLevel = range.levels == 1u && resource.baseLevel == 0u;
-                const bool supported = range.layers == 1u && EffectiveMinLod(resource) == 0.0f && (singleLevel || exactAtBase);
-                if (!supported || (range.type != VK_IMAGE_VIEW_TYPE_1D && range.type != VK_IMAGE_VIEW_TYPE_2D)) throw std::runtime_error("AGC graphics: guest texture sampled with unnormalized coordinates is not a single-layer 1D or 2D view without a minimum LOD clamp, and is neither a single-level view at mip 0 nor read only by image_sample_lz through an S# without minimum LOD or bias, which is not implemented (base level " + std::to_string(resource.baseLevel) + ", levels " + std::to_string(range.levels) + ", layers " + std::to_string(range.layers) + ", view type " + std::to_string(static_cast<int>(range.type)) + ")");
-                baseLevel = range.levels > 1u;
+                const bool plainView = range.type == VK_IMAGE_VIEW_TYPE_1D || range.type == VK_IMAGE_VIEW_TYPE_2D || range.type == VK_IMAGE_VIEW_TYPE_3D;
+                Require(range.layers == 1u && EffectiveMinLod(resource) == 0.0f && plainView, "emulated unnormalized coordinates require a non-array 1D, 2D or 3D view without a texture minimum LOD clamp");
+                baseLevel = exactAtBase && range.levels > 1u;
             }
             RequireFilterMinmax(context, texture->ViewFormat(), binding.imageSamplers[element], shaderSamplers);
             RequireBorderSwizzle(resource.bcSwizzle, binding.imageSamplers[element], shaderSamplers);

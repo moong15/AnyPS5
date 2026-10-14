@@ -1003,9 +1003,12 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         }
         try {
             entry.alias = GuestArena::GuestArenaMapAlias_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes));
-        } catch (const std::runtime_error&) {
-            if (entry.ranges.size() == 1) throw;
-            if (joined) {
+        } catch (const std::runtime_error& error) {
+            // If the host cannot alias this range, retain the copy fallback even for a
+            // single registered range. Failed joined imports use their own failure cache.
+            std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx cannot be aliased (%s); falling back to copies\n",
+                static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), error.what());
+            if (joined || entry.ranges.size() == 1) {
                 failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
                 return nullptr;
             }

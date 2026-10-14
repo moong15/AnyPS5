@@ -132,7 +132,7 @@ struct SamplerResource {
 };
 
 inline bool FoldsTexelOffsets(const SamplerResource& sampler) {
-    return (sampler.uses & SamplerUseOffset) != 0u && (sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod | SamplerUseOffset | SamplerUseNonZeroLod)) == 0u && !sampler.depthCompare;
+    return (sampler.uses & SamplerUseOffset) != 0u && (sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod | SamplerUseImplicitLod | SamplerUseGradient | SamplerUseOffset | SamplerUseNonZeroLod | SamplerUseAdjust)) == 0u && !sampler.depthCompare;
 }
 
 inline bool SamplesBaseLevelIfUnnormalized(const SamplerResource& sampler) {

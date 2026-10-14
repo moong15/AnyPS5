@@ -52,6 +52,11 @@ float toSignedLodBias(std::uint32_t raw) {
     return static_cast<float>(extended) / 256.0f;
 }
 
+float toSignedSecondaryLodBias(std::uint32_t raw) {
+    const auto extended = static_cast<std::int32_t>((raw ^ 0x20u) - 0x20u);
+    return static_cast<float>(extended) / 16.0f;
+}
+
 }
 
 GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words, bool unnormalizedProven, bool forceDegammaPaired, bool integerBorder) {
@@ -92,10 +97,10 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     if (forceUnormCoords) {
         Require(xyMagFilter == xyMinFilter, "guest sampler descriptor uses unnormalized coordinates with different minification and magnification filters, which is not implemented");
         Require(!isAnisoFilter(xyMagFilter), "guest sampler descriptor uses unnormalized coordinates with anisotropic filtering, which is not implemented");
-        Require(clampX == 2u || clampX == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampX) + " on X; only clamp-to-last-texel and clamp-to-border are implemented");
-        Require(clampY == 2u || clampY == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampY) + " on Y; only clamp-to-last-texel and clamp-to-border are implemented");
+        Require(clampX != 5u && clampX != 7u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampX) + " on X; mirrored border clamping is not implemented");
+        Require(clampY != 5u && clampY != 7u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampY) + " on Y; mirrored border clamping is not implemented");
         Require(!truncCoord, "guest sampler descriptor uses unnormalized coordinates with TRUNC_COORD, which is not implemented");
-        Require(!mcCoordTrunc, "guest sampler descriptor uses unnormalized coordinates with MC_COORD_TRUNC, which is not implemented");
+        Require(!mcCoordTrunc || (xyMagFilter == 0u && xyMinFilter == 0u), "guest sampler descriptor uses unnormalized coordinates with MC_COORD_TRUNC on a linear filter, which is not implemented");
     } else {
         Require(!unnormalizedProven, "guest sampler descriptor is bound as unnormalized without FORCE_UNNORMALIZED");
     }
@@ -109,7 +114,6 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     static_cast<void>(anisoBias);
     const auto reductionMode = toVkReductionMode(filterMode);
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
-    Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
     Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
     static_cast<void>(anisoOverride);
     Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
@@ -155,7 +159,7 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     result.maxAnisotropy = anisoRatio;
     result.minLod = minLod;
     result.maxLod = maxLod;
-    result.lodBias = toSignedLodBias(lodBiasRaw);
+    result.lodBias = toSignedLodBias(lodBiasRaw) + toSignedSecondaryLodBias(lodBiasSec);
     result.borderColor = border;
     result.reductionMode = reductionMode;
     const std::array compareOps{VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
@@ -163,7 +167,8 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     result.forceDegamma = forceSrgb;
     result.nonSeamlessCube = disableCubeWrap;
     if (forceUnormCoords) {
-        result.unnormalizedCoordinates = true;
+        result.emulatedUnnormalizedCoordinates = true;
+        result.unnormalizedCoordinates = false;
         result.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         result.minLod = 0.0f;
         result.maxLod = 0.0f;

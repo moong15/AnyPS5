@@ -127,7 +127,7 @@ constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
 // to run, which it always does here.
 constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u | 0x00010000u);
-constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
+constexpr std::uint32_t PixelStageRunsMask = 0x000207c7u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 constexpr std::uint32_t AlphaToCoverageUndithered = 0x0000aa01u;
 constexpr std::uint32_t ScanModeMask = ~0x22u;
@@ -1097,14 +1097,21 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto slice = view & 0x1fffu;
     const auto lastSlice = (view >> 13u) & 0x1fffu;
     Require(lastSlice >= slice, "the color view ends before its first slice");
-    const auto viewMip = (view >> 26u) & 0xfu;
+    const auto declaredViewMip = (view >> 26u) & 0xfu;
     const auto attrib2 = read(cx, 0x3b0 + slot);
-    const auto maxMip = attrib2 >> 28u;
-    Require(color.samples == 1 || maxMip == 0, "multisampled color mips are unsupported");
-    Require(viewMip <= maxMip, "color view mip exceeds the surface");
+    const auto declaredMaxMip = attrib2 >> 28u;
     const auto attrib3 = read(cx, 0x3b8 + slot);
     color.tileMode = DecodeColorTileMode(attrib3);
     const bool volume = ((attrib3 >> 24u) & 3u) == 2u;
+    // Diagnostic aid: APS5_FLAT_3D_COLOR_TARGET=1 draws a mipmapped or DCC 3D color target as one
+    // unmipped uncompressed level, so a title that renders into a volume keeps presenting. Only the
+    // level the view names is drawn; the other levels and the DCC metadata are left alone.
+    static const bool flat3d = std::getenv("APS5_FLAT_3D_COLOR_TARGET") != nullptr;
+    const auto flatten = flat3d && volume && (declaredMaxMip != 0 || (info & 0x10000000u) != 0);
+    const auto maxMip = flatten ? 0u : declaredMaxMip;
+    const auto viewMip = flatten ? 0u : declaredViewMip;
+    Require(color.samples == 1 || maxMip == 0, "multisampled color mips are unsupported");
+    Require(viewMip <= maxMip, "color view mip exceeds the surface");
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
@@ -1360,10 +1367,16 @@ bool PixelProgramSkipped(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto targetMask = find(cx, 0x8e);
     const auto shaderMask = find(cx, 0x8f);
-    const auto zFormat = find(cx, 0x1c4);
     const auto shaderControl = find(cx, 0x203);
-    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
-    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+    if (targetMask == cx.end() || shaderMask == cx.end() || shaderControl == cx.end()) return false;
+    const auto alphaToMask = find(cx, 0x2dc);
+    // DecodeState enables Vulkan alpha-to-coverage from this register, so retain
+    // the pixel stage whenever it is enabled, including DB's per-shader override.
+    if (alphaToMask != cx.end() && (alphaToMask->second & 1u) != 0) return false;
+    // SPI_SHADER_Z_FORMAT describes the export payload, not whether DB consumes
+    // it. Depth-only draws can retain that format and the previous pixel program
+    // while disabling all exports in DB_SHADER_CONTROL and both color masks.
+    return (targetMask->second & shaderMask->second) == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
 }
 
 std::string NullPixelProgramRejection(const QueueState& queue) {

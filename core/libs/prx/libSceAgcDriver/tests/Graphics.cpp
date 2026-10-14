@@ -457,7 +457,18 @@ void stateTests() {
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program with Z_EXPORT_ENABLE was skipped");
     queue.context[0x203] = 0;
     queue.context[0x1c4] = 1;
-    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program exporting depth was skipped");
+    Require(AgcDriver::Graphics::PixelProgramSkipped(queue), "a retained Z export format ran a pixel program with depth exports disabled");
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "a depth-only draw with a retained Z export format was rejected");
+    for (const auto control : {1u, 2u, 4u, 0x40u, 0x80u, 0x100u, 0x200u, 0x400u, 0x20000u}) {
+        queue.context[0x203] = control;
+        Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "an enabled pixel export or execution flag was ignored with a retained Z format");
+    }
+    queue.context[0x203] = 0;
+    queue.context[0x2dc] = 0xaa01;
+    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "alpha-to-coverage skipped the pixel program");
+    queue.context[0x203] = 0x800;
+    Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "the Vulkan alpha-to-coverage state lost its pixel program with DB's override set");
+    queue.context[0x203] = queue.context[0x2dc] = 0;
     queue.context[0x1c4] = 0;
     queue.context[0x8e] = 0xf;
     Require(!AgcDriver::Graphics::PixelProgramSkipped(queue), "a pixel program writing color was skipped");
@@ -3420,6 +3431,8 @@ void resourceTests() {
         ShaderRecompiler::RecompileResult vertex;
         ShaderRecompiler::RecompileResult fragment;
         vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32))));
+        vertex.bindings.back().guestDescriptor[1] |= 0x40000000u;
+        vertex.bindings.back().guestDescriptor[3] |= 2u << 30u;
         vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, ShaderDataWords({7, 8, 9})));
         vertex.shaderDataDwords = ShaderRecompiler::RuntimeAbi::ShaderDataDwords;
         fragment.bindings.push_back(makeBinding(Role::FlattenedSrt, 43, 1, {1, 2}));
@@ -3530,8 +3543,8 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; }), "invalid compact shader data size");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor = ShaderDataWords({}); binding.guestDescriptor.pop_back(); }), "invalid compact shader data size");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
+    expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "a cache-swizzled V#");
+    for (const auto type : {1u, 2u, 3u}) expectSingleAccepted(changed([&](auto& binding) { binding.guestDescriptor[3] |= type << 30u; }), "a V# with an advisory type");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 32768; }), "descriptor range limit");
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "an unmapped V#");
