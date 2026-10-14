@@ -152,7 +152,8 @@ bool ditheredAlphaLocationsSupported(const Registers& cx) {
     return true;
 }
 constexpr std::uint32_t ScanModeMask = ~0x22u;
-constexpr std::uint32_t ScanControlMask = ~0x76023fffu;
+constexpr std::uint32_t ScanControlMask = ~0x76033fffu;
+constexpr std::uint32_t PixelShaderIteratesSamples = 0x10000u;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
 // Bits 26/27 (ZCLIP_NEAR/FAR_DISABLE) become depth clamping; bit 19 selects the [0, 1] clip space.
 constexpr std::uint32_t ClipControlMask = ~(0x80000u | 0x01000000u | 0x0c000000u);
@@ -804,7 +805,8 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) static_cast<void>(read(cx, 0x2feu + pixel * 4u));
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     }
-    zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
+    zero(cx, 0x293, ScanControlMask, "primitive discard or out-of-order rasterization");
+    result.perSampleShading = result.samples > 1 && (read(cx, 0x293) & PixelShaderIteratesSamples) != 0;
     zero(cx, 0x80, ~0u, "window offset");
     zero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits");
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
@@ -1378,7 +1380,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (!multisampled && value(cx, 0x292, word) && (word & 1u) != 0) {
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) return reason;
     }
-    if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x293, ScanControlMask, "primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits"); !reason.empty()) return reason;
     if (value(cx, 0x83, word) && word != 0xffffu) return require(false, "clip rectangles are unsupported");

@@ -607,6 +607,25 @@ void testRegisteredFloatMode() {
     }
 }
 
+void testDispatchFloatMode() {
+    using AgcDriver::DriverDetail::DispatchFloatMode;
+    using AgcDriver::DriverDetail::ShaderSnapshot;
+    using AgcDriver::DriverDetail::RegisteredShaderState;
+    const AgcDriver::Registers live{{0x212, (0xc0u << 12u) | (1u << 21u) | (1u << 26u)}};
+    ShaderSnapshot raw{0x20000, 0, 0, {}, {}};
+    const auto fromLive = DispatchFloatMode(raw, live);
+    check(fromLive.has_value() && fromLive->floatMode == 0xc0u && fromLive->dx10Clamp && !fromLive->ieeeMode && fromLive->fp16Overflow, "an unregistered compute shader does not take its float mode from the live COMPUTE_PGM_RSRC1");
+    check(!DispatchFloatMode(raw, AgcDriver::Registers{}).has_value(), "an unregistered compute shader without a live COMPUTE_PGM_RSRC1 has a float mode");
+    auto state = std::make_shared<RegisteredShaderState>();
+    state->shader.emplace(0x212, 1u << 23u);
+    ShaderSnapshot registered{0x20000, 0, 0, {}, {}};
+    registered.registeredState = state;
+    const auto fromRegistered = DispatchFloatMode(registered, live);
+    check(fromRegistered.has_value() && fromRegistered->ieeeMode && fromRegistered->floatMode == 0u, "a registered compute shader takes its float mode from the live registers");
+    registered.registeredState = std::make_shared<RegisteredShaderState>();
+    check(!DispatchFloatMode(registered, live).has_value(), "a registered compute shader without RSRC1 takes its float mode from the live registers");
+}
+
 void testProgramSnapshots() {
     alignas(256) static std::array<std::uint32_t, 64> registered{};
     registered.fill(0xbf800000);
@@ -835,6 +854,7 @@ int main(int argc, char** argv) {
         testHeaderWithoutProgramAddress();
         testCopyIntoHostMemory();
         testRegisteredFloatMode();
+        testDispatchFloatMode();
         testReadOnlyResummarize();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");

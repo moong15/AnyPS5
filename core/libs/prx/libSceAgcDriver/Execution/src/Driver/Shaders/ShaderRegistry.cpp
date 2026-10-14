@@ -12,10 +12,12 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <set>
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,9 @@
 #include <list>
 #include <atomic>
 #include <pthread.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -587,21 +592,34 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     snapshot.prepared->entries.push_back({codeOffset, std::move(handle)});
     return std::move(*invocation);
 }
-std::optional<ShaderRecompiler::ShaderFloatMode> RegisteredFloatMode(const ShaderSnapshot& snapshot) {
-    if (snapshot.registeredState == nullptr) return std::nullopt;
+namespace {
+
+std::optional<ShaderRecompiler::ShaderFloatMode> DecodeFloatMode(const Registers& registers, std::uint8_t type) {
     std::uint32_t rsrc1;
     std::uint32_t fp16OverflowBit;
-    switch (snapshot.type) {
+    switch (type) {
     case 0: rsrc1 = 0x212; fp16OverflowBit = 26; break;
     case 1: rsrc1 = 0x00a; fp16OverflowBit = 29; break;
     case 2: case 4: case 6: rsrc1 = 0x08a; fp16OverflowBit = 31; break;
     case 5: case 7: rsrc1 = 0x10a; fp16OverflowBit = 30; break;
     default: return std::nullopt;
     }
-    const auto found = snapshot.registeredState->shader.find(rsrc1);
-    if (found == snapshot.registeredState->shader.end()) return std::nullopt;
+    const auto found = registers.find(rsrc1);
+    if (found == registers.end()) return std::nullopt;
     const auto value = found->second;
     return ShaderRecompiler::ShaderFloatMode{(value >> 12u) & 0xffu, ((value >> 21u) & 1u) != 0u, ((value >> 23u) & 1u) != 0u, ((value >> fp16OverflowBit) & 1u) != 0u};
+}
+
+}
+
+std::optional<ShaderRecompiler::ShaderFloatMode> RegisteredFloatMode(const ShaderSnapshot& snapshot) {
+    if (snapshot.registeredState == nullptr) return std::nullopt;
+    return DecodeFloatMode(snapshot.registeredState->shader, snapshot.type);
+}
+
+std::optional<ShaderRecompiler::ShaderFloatMode> DispatchFloatMode(const ShaderSnapshot& snapshot, const Registers& live) {
+    if (snapshot.registeredState != nullptr) return RegisteredFloatMode(snapshot);
+    return DecodeFloatMode(live, snapshot.type);
 }
 
 namespace {
@@ -821,6 +839,16 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     return plan != nullptr ? PrepareRegistered(*plan) : std::vector<PreparedShaders::Entry>{};
 }
 
+#ifdef __GLIBC__
+void trimFreedMemory() {
+    static std::atomic<std::int64_t> last{0};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto previous = last.load(std::memory_order_relaxed);
+    if (now - previous < 1000 || !last.compare_exchange_strong(previous, now, std::memory_order_relaxed)) return;
+    malloc_trim(0);
+}
+#endif
+
 class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
@@ -931,12 +959,17 @@ private:
             const auto sequence = task.sequence;
             task.function();
             task = {};
+            bool drained = false;
             {
                 std::lock_guard lock(pool.mutex);
                 --pool.running;
                 pool.unfinished.erase(sequence);
+                drained = pool.tasks.empty() && pool.running == 0;
                 pool.idle.notify_all();
             }
+#ifdef __GLIBC__
+            if (drained) trimFreedMemory();
+#endif
         }
         return nullptr;
     }

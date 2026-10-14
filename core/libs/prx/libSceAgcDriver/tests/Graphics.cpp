@@ -270,15 +270,16 @@ void stateTests() {
     queue = makeState();
     queue.context[0x293] = 0x06020000u;
     (void)AgcDriver::Graphics::DecodeState(queue);
-    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") == std::string::npos, "per-engine primitive discard was rejected");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("out-of-order") == std::string::npos, "per-engine primitive discard was rejected");
     queue.context[0x293] = 0x760201bcu;
     (void)AgcDriver::Graphics::DecodeState(queue);
-    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") == std::string::npos, "an out-of-order watermark without out-of-order rasterization was rejected");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("out-of-order") == std::string::npos, "an out-of-order watermark without out-of-order rasterization was rejected");
     queue.context[0x293] = 0x7e0201bcu;
-    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") != std::string::npos, "out-of-order rasterization was accepted");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("out-of-order") != std::string::npos, "out-of-order rasterization was accepted");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "out-of-order");
     queue.context[0x293] = 0x06030000u;
-    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("sample iteration") != std::string::npos, "per-sample shading was accepted");
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "sample iteration");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).find("out-of-order") == std::string::npos, "per-sample iteration of a single-sample target was rejected");
+    Require(!AgcDriver::Graphics::DecodeState(queue).perSampleShading, "per-sample iteration of a single-sample target requested sample shading");
     queue.context[0x293] = 0;
     for (const auto disabled : {0x6000u, 0x00100000u, 0u, 0x000e6000u}) {
         queue.context[0x313] = disabled;
@@ -2292,6 +2293,11 @@ void multisampleTests() {
     Require(state.samples == 2 && state.colors.size() == 1 && state.colors[0].samples == 2 && state.colors[0].cmaskAddress == 0, "2x multisampling did not decode");
     const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
     Require(rejection.empty(), "the precheck refused 2x multisampling: " + rejection);
+    Require(!state.perSampleShading, "2x multisampling requested sample shading without PS_ITER_SAMPLE");
+    queue.context[0x293] = 0x10000u;
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "PS_ITER_SAMPLE on a 2x target was refused");
+    Require(DecodeState(queue).perSampleShading, "PS_ITER_SAMPLE on a 2x target did not request sample shading");
+    queue.context[0x293] = 0;
     queue.context[0x302] = 0x44cc;
     expectFailure([&] { DecodeState(queue); }, "nonstandard sample locations");
     queue = multisampled();

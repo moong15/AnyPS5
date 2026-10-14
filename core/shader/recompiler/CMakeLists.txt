@@ -73,6 +73,7 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/TranslationContext/SubwordPacking.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/TranslationContext/ExecMask.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/ScalarInstructions.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/RoundingMode.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/VectorInstructions.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/FloatInstructions.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/src/Float64Instructions.cpp
