@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PassHazards.hpp"
+#include <unordered_map>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -98,6 +99,8 @@ public:
     static constexpr std::size_t DrawSnapshotEntries = 1024;
     static constexpr std::size_t DrawInputBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawInputEntries = 16384;
+    std::shared_ptr<Buffer> UnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp);
+    void NoteUnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp, std::shared_ptr<Buffer> buffer);
     std::shared_ptr<Buffer> ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use = SnapshotUse::Storage, std::uint32_t* derived = nullptr, std::uint64_t generation = 0);
     void KeepDrawSnapshot(std::uint64_t address, std::size_t bytes, std::uint64_t generation, std::uint64_t registryGeneration, std::shared_ptr<Buffer> buffer, SnapshotUse use = SnapshotUse::Storage, std::uint32_t derived = 0);
     static constexpr std::size_t IndexRangeEntries = 16384;
@@ -824,6 +827,12 @@ private:
         std::size_t bytes = 0;
     };
     std::map<DrawSnapshotKey, DrawSnapshot> drawSnapshots;
+    struct UnwrittenSnapshot {
+        std::size_t bytes;
+        std::array<std::uint64_t, 3> stamp;
+        std::shared_ptr<Buffer> buffer;
+    };
+    std::unordered_map<std::uint64_t, UnwrittenSnapshot> unwrittenSnapshots;
     std::array<DrawSnapshotPool, 2> drawSnapshotPools;
     void eraseDrawSnapshot(std::map<DrawSnapshotKey, DrawSnapshot>::iterator entry);
     struct IndexRange {

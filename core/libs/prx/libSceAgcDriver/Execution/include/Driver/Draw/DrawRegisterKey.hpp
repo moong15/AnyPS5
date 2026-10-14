@@ -5,7 +5,11 @@
 
 namespace AgcDriver::DriverDetail {
 
-std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords = false, bool incremental = true, std::uint64_t* shapeKey = nullptr);
+bool DrawTargetRelocationEnabled();
+bool DrawTargetRegister(std::uint32_t offset);
+std::uint64_t DrawTargetStateKey(const QueueState& queue);
+
+std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords = false, bool incremental = true, std::uint64_t* shapeKey = nullptr, bool relocateTargets = false);
 
 }
 

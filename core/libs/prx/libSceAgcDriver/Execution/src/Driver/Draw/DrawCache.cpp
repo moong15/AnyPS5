@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawRegisterKey.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
@@ -87,8 +88,13 @@ bool Driver::admitDrawKey(std::uint64_t key) {
     bool seen = drawKeySightings->SeenBefore(key);
     const auto& pending = drawRelocationPending;
     if (pending.key != key || pending.identity == 0) return seen;
-    if (pending.alias != 0) {
-        if (drawKeySightings->SeenBefore(pending.alias ^ 0x9e3779b97f4a7c15ull)) seen = true;
+    if (pending.aliases.structure != 0) {
+        if (DrawTargetRelocationEnabled() && drawKeySightings->SeenBefore(pending.aliases.structure ^ 0x165667b19e3779f9ull)) seen = true;
+        for (std::size_t stage = 0; stage < pending.aliases.content.size(); ++stage) {
+            if (pending.aliases.content[stage] == 0) continue;
+            const auto stageKey = (pending.aliases.structure ^ (pending.aliases.content[stage] + 0x9e3779b97f4a7c15ull + stage)) * 0x100000001b3ull;
+            if (drawKeySightings->SeenBefore(stageKey)) seen = true;
+        }
     } else if (!drawRelocations.contains(pending.identity)) {
         if (drawKeySightings->SeenBefore(pending.identity ^ 0xc2b2ae3d27d4eb4full)) seen = true;
     }

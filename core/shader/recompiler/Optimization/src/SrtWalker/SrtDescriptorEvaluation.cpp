@@ -1,5 +1,6 @@
 #include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
+#include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 
 #include <cstdio>
@@ -145,6 +146,14 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
                     return Fail("descriptor source " + std::to_string(sourceIndex) + " dword " + std::to_string(index) + ": " + detail);
                 }
             }
+        }
+        if (runtime.userDataUse != nullptr && source->dwordCount != 0) {
+            IrValue* lead = source->dwords[0]->Resolve();
+            if (!lead->HasImmediate() && lead->Opcode() == IrOpcode::ReadConst && lead->ArgumentCount() == 2) {
+                IrValue* slot = lead->Argument(1)->Resolve();
+                if (slot->HasImmediate() && slot->Type() == IrType::U32 && slot->ImmediateU32() < program.srtReads.size()) lead = program.srtReads[slot->ImmediateU32()].value->Resolve();
+            }
+            if (!lead->HasImmediate() && IsRawRead(program, *lead)) runtime.userDataUse->sourceLeads.emplace_back(sourceIndex, lead);
         }
         evaluated.push_back(value);
     }

@@ -2516,6 +2516,18 @@ void Recorder::eraseDrawSnapshot(std::map<DrawSnapshotKey, DrawSnapshot>::iterat
     drawSnapshots.erase(entry);
 }
 
+std::shared_ptr<Buffer> Recorder::UnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp) {
+    const auto found = unwrittenSnapshots.find(address);
+    if (found == unwrittenSnapshots.end() || found->second.bytes != bytes || found->second.stamp != stamp) return {};
+    return found->second.buffer;
+}
+
+void Recorder::NoteUnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp, std::shared_ptr<Buffer> buffer) {
+    constexpr std::size_t Limit = 4096;
+    if (unwrittenSnapshots.size() >= Limit) unwrittenSnapshots.clear();
+    unwrittenSnapshots[address] = {bytes, stamp, std::move(buffer)};
+}
+
 std::shared_ptr<Buffer> Recorder::ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint32_t* derived, std::uint64_t generation) {
     auto found = use == SnapshotUse::Vertex ? drawSnapshots.lower_bound({address, use, bytes}) : drawSnapshots.find({address, use, bytes});
     if (found == drawSnapshots.end() || std::get<0>(found->first) != address || std::get<1>(found->first) != use) return {};

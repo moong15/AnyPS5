@@ -99,6 +99,7 @@ private:
     std::uint32_t* _nullRoots = nullptr;
     EvaluatedValues _cache;
     std::vector<IrValue*> _visiting;
+    int _nested = 0;
 };
 
 }

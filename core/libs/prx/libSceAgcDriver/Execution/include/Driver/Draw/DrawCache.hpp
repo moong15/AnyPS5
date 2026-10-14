@@ -29,6 +29,7 @@ struct DrawProgram {
 };
 
 struct DrawDecode {
+    std::uint64_t targetStateKey = 0;
     Graphics::State state;
     ShaderRecompiler::ShaderPixelStageInfo pixel;
     std::vector<DrawProgram> programs;
@@ -74,6 +75,7 @@ struct DrawEntryCounters {
     double validateUs = 0;
 
     std::uint64_t registerKeyLookups = 0, registerKeyHits = 0, decodeSkipped = 0, decodePartial = 0, facadeMismatches = 0, verifyDecodes = 0, verifyDecodeMismatches = 0;
+    std::uint64_t targetLookups = 0, targetHits = 0, targetNoDonor = 0, targetDecodeRefused = 0, targetStagesRefused = 0;
     double keyUs = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
@@ -99,11 +101,14 @@ struct StageCapture {
     std::uint64_t forgetSerial = 0;
     std::uint32_t pushOffset = 0;
     ShaderRecompiler::SrtUserDataUse userDataUse;
+    std::shared_ptr<const ShaderRecompiler::SourceHandle> prepared;
+    std::vector<ShaderRecompiler::BufferBaseWord> bufferBaseWords;
 };
 
 struct RelocatableUserWord {
     std::uint32_t reg;
     std::vector<std::pair<std::int64_t, std::uint32_t>> reads;
+    std::vector<std::int64_t> dataOffsets;
 };
 
 struct DrawRelocation {
@@ -116,8 +121,28 @@ struct DrawUserPatch {
     std::uint32_t index, value;
 };
 
+struct DrawAliasKeys {
+    static constexpr std::size_t Stages = 3;
+    std::uint64_t structure = 0;
+    std::array<std::uint64_t, Stages> content{};
+    static std::size_t Stage(std::uint32_t reg) { return reg >= 0x10cu ? 2 : reg >= 0x08cu ? 1 : 0; }
+    std::uint64_t Key(std::uint64_t stageKey, std::uint32_t userDataBase) const { return (stageKey ^ (content[Stage(userDataBase)] + 0x9e3779b97f4a7c15ull)) * 0x100000001b3ull + userDataBase; }
+};
+
+struct DrawStageDonor {
+    std::shared_ptr<DispatchVariant> variant;
+    std::vector<std::uint32_t> userData;
+};
+
+struct DrawDecodeDonor {
+    std::shared_ptr<const DrawDecode> decode;
+    std::vector<std::uint64_t> stageKeys;
+};
+
 struct DrawRelocationPending {
-    std::uint64_t key = 0, alias = 0, identity = 0;
+    std::uint64_t key = 0, identity = 0;
+    DrawAliasKeys aliases;
+    std::shared_ptr<const DrawRelocation> relocation;
 };
 
 struct DrawRelocationTrial {

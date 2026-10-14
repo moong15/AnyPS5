@@ -85,7 +85,7 @@ namespace ShaderRecompiler::ShaderDiskCache {
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
 static_assert(sizeof(CompiledShaderArtifact) == 232, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 112, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 352, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 400, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 568, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
@@ -100,7 +100,7 @@ static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info enc
 static_assert(sizeof(StageOutput) == 48, "StageOutput changed: update the info encoder");
 static_assert(sizeof(IrBindingLayout) == 72, "IrBindingLayout changed: update the layout encoder");
 static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: update the layout encoder");
-static_assert(sizeof(BindingAllocationResult) == 152, "BindingAllocationResult changed: update the allocation encoder");
+static_assert(sizeof(BindingAllocationResult) == 200, "BindingAllocationResult changed: update the allocation encoder");
 static_assert(sizeof(CompiledBindingLayout) == 80, "CompiledBindingLayout changed: update the allocation encoder");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
 static_assert(sizeof(IrResourcePlan) == 584, "IrResourcePlan changed: update EncodePlan and DecodePlan");
@@ -1505,6 +1505,10 @@ void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out) {
     encodeArtifact(writer, result);
     encodeInvocation(writer, result);
     writer.Value(result.workgroupMemoryDwords);
+    writer.Values(std::span<const std::uint32_t>(result.shaderDataUserWords));
+    writer.List(result.bufferBaseSlots, [](Writer& out, const std::array<std::uint32_t, 3>& slot) {
+        for (const auto word : slot) out.Value(word);
+    });
 }
 
 bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
@@ -1512,6 +1516,10 @@ bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
     decodeArtifact(reader, result);
     decodeInvocation(reader, result);
     reader.Value(result.workgroupMemoryDwords);
+    reader.Values(result.shaderDataUserWords);
+    reader.List(result.bufferBaseSlots, 3 * sizeof(std::uint32_t), [](Reader& in, std::array<std::uint32_t, 3>& slot) {
+        for (auto& word : slot) in.Value(word);
+    });
     result.cacheHit = false;
     return reader.Done() && result.runtimeAbiVersion == RuntimeAbi::Version;
 }
