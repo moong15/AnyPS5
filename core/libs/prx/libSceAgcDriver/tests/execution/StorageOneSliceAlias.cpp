@@ -170,7 +170,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels, bool watched) {
     AgcDriver::GuestMemory::BumpCollectEpoch();
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
     Store(device, texels, 0x11111111u);
-    const bool deferred = std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
+    const bool deferred = std::getenv("APS5_EAGER_WRITEBACK") == nullptr || std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
     Require((StorageTexture::FindPending(surface, SurfaceBytes) != nullptr) == deferred, deferred ? "the 2D store left no pending image" : "the eager 2D store left a pending image");
     const auto live = StorageTexture::FindLive(surface, SurfaceBytes);
     Require(live != nullptr, "the 2D storage image is not cached after its first store");

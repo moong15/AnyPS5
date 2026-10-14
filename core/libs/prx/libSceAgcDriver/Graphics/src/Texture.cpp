@@ -66,6 +66,9 @@ TextureProfile& Profile() {
 // FlushPending that forced the write-back (the other callers name themselves: "refresh", "cache
 // eviction", "explicit"). `flushReason` is set by the caller around its writeBack calls.
 thread_local const char* flushReason = nullptr;
+// A pending image read as indices or vertices must publish unchanged bytes as well as preserve
+// replacements, even when both lie in the same tracker block. Only that read enables the merge.
+thread_local std::pair<std::uint64_t, std::uint64_t> drawInputRange{};
 // Likewise what made an upload necessary: "first" (a new image), "keys" (the DCC keys changed),
 // "cpu" (a CPU store stamped a changed unit), "flushed" (another image's results were stored over
 // the surface by this refresh), "store" (a driver store: a fill, a copy, a label, an earlier
@@ -3030,7 +3033,7 @@ void StorageTexture::refreshGeneration() {
 
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
     CaptureTrace::Log("image-write image=%llx first=%u count=%u generation=%llu", static_cast<unsigned long long>(descriptor.baseAddress), first, count, static_cast<unsigned long long>(generation));
-    static const bool eager = std::getenv("APS5_DEFERRED_WRITEBACK") == nullptr;
+    static const bool eager = std::getenv("APS5_EAGER_WRITEBACK") != nullptr && std::getenv("APS5_DEFERRED_WRITEBACK") == nullptr;
     std::vector<bool> unsaved(trackedLayers, false);
     bool anyUnsaved = false;
     for (std::uint32_t layer = first; layer < first + count; ++layer) {
@@ -3125,6 +3128,18 @@ bool StorageTexture::pendingUnitInside(std::uint64_t address, std::size_t bytes)
         if (address < begin + layerBytes(layer) && begin < address + bytes) return true;
     }
     return false;
+}
+
+void StorageTexture::FlushDrawInput(std::uint64_t address, std::size_t bytes) {
+    const auto previous = std::exchange(drawInputRange, std::pair{address, address + bytes});
+    struct Restore {
+        std::pair<std::uint64_t, std::uint64_t> previous;
+        ~Restore() { drawInputRange = previous; }
+    } restore{previous};
+    // The general hook may skip a CPU-written block. A buffer read still needs GPU results in
+    // its other bytes, so force this range through the merge before the hook waits for stores.
+    FlushPending(address, bytes, nullptr, "draw input", PublishScope::Whole);
+    GuestMemory::FlushGpuWrites(address, bytes);
 }
 
 bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except, const char* reason, PublishScope scope, bool* published) {
@@ -4368,6 +4383,24 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         lastStored = std::max(lastStored, layerBegin(layer) + layerBytes(layer));
     }
     if (lastStored <= firstStored) return;
+    // Use a pre-write baseline for buffer reuse, independent of write-watch stamps. A missing
+    // baseline retains the normal store-before-read path; it is never grounds to drop results.
+    std::vector<std::byte> drawBaseline;
+    if (drawInputRange.first < lastStored && firstStored < drawInputRange.second && keptAtUnwatch.empty()) {
+        bool saved = true;
+        drawBaseline.resize(static_cast<std::size_t>(guestBytes));
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+            if (!layers[layer]) continue;
+            const auto from = layerBegin(layer);
+            const auto length = static_cast<std::size_t>(layerBytes(layer));
+            const auto& baseline = originalHolds(from, length) ? original : generationBaseline;
+            if (baseline.size() != guestBytes) { saved = false; break; }
+            const auto offset = static_cast<std::size_t>(from - descriptor.baseAddress);
+            std::copy_n(baseline.data() + offset, length, drawBaseline.data() + offset);
+        }
+        if (!saved) drawBaseline.clear();
+    }
+    const bool mergeDrawInput = !drawBaseline.empty();
     constexpr std::uint64_t block = 65536;
     const auto spanBegin = firstStored & ~(block - 1);
     const auto spanBlocks = static_cast<std::size_t>((lastStored - spanBegin + block - 1) / block);
@@ -4428,6 +4461,16 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (layers[layer]) forgetKeptAtUnwatch(layer);
     }
+    if (mergeDrawInput) {
+        // The CPU merge below decides per byte instead of throwing away a whole 64 KiB block's
+        // results. Its wait also orders the image's GPU writes before the imported buffer read.
+        keep.clear();
+        for (const auto& [begin, end] : unitRuns(layers)) keep.emplace_back(descriptor.baseAddress + begin, descriptor.baseAddress + end);
+        skippedAny = false;
+        skipped = 0;
+        std::fill(skippedLayer.begin(), skippedLayer.end(), false);
+        unsavedOutsideWatch = false;
+    }
     // Debug aid: APS5_TRACE_FLUSH also names the blocks a write-back leaves to the CPU.
     static const bool traceKept = std::getenv("APS5_TRACE_FLUSH") != nullptr;
     if (traceKept && skippedAny) {
@@ -4474,7 +4517,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         settle(true);
         return;
     }
-    if (const auto* import = HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
+    if (const auto* import = mergeDrawInput ? nullptr : HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
         Require(!unsavedOutsideWatch, "storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented");
         if (blockUnits) {
             // The kept blocks alone pass through the retiler (windows of their slices).
@@ -4625,6 +4668,12 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     Require(!unsavedOutsideWatch, "storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented");
     std::vector<bool> unsaved = layerOriginal;
     unsaved.flip();
+    if (mergeDrawInput) {
+        for (const auto& [begin, end] : unitRuns(layers)) {
+            std::copy(drawBaseline.begin() + begin, drawBaseline.begin() + end, original.begin() + begin);
+        }
+        std::fill(unsaved.begin(), unsaved.end(), false);
+    }
     for (const auto& [begin, end] : unitRuns(unsaved)) GuestMemory::ReadCommitted(descriptor.baseAddress + begin, std::span(original).subspan(static_cast<std::size_t>(begin), static_cast<std::size_t>(end - begin)));
     DeviceBuffer linear(context, static_cast<std::size_t>(sliceLinearBytes * arrayLayers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     DeviceBuffer tiled(context, original.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -4699,6 +4748,16 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     for (const auto& [from, to] : keep) {
         const auto offset = static_cast<std::size_t>(from - descriptor.baseAddress);
         const auto length = static_cast<std::size_t>(to - from);
+        // Recheck after the GPU wait: the earlier keep decision cannot see a CPU write during it.
+        // Publish GPU changes only where the guest byte still equals the pre-write baseline.
+        // Equality alone cannot prove a same-value CPU store to untracked memory.
+        std::vector<std::byte> guest(length);
+        GuestMemory::ReadCommittedUnsynced(from, guest);
+        for (std::size_t at = 0; at < length; ++at) {
+            if (guest[at] == original[offset + at]) continue;
+            current[offset + at] = original[offset + at];
+            skippedLayer[static_cast<std::size_t>((offset + at) / trackedLayerBytes)] = true;
+        }
         GuestMemory::WriteChangedCommitted(from, current.subspan(offset, length), std::span<const std::byte>(original).subspan(offset, length));
         std::memcpy(original.data() + offset, current.data() + offset, length);
     }

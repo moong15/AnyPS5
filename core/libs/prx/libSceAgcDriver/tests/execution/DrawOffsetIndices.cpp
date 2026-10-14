@@ -422,8 +422,8 @@ std::string StorageIndexReuse(Fixture& fixture) {
     const auto program = ShaderRecompiler::Recompile(request);
     fixture.device->Dispatch(program, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(storeCode.data()));
     fixture.device->WaitIdle();
-    Require(AgcDriver::Graphics::StorageTexture::FindPending(address, 65536) == nullptr, "the image results remained deferred before index reuse");
-    for (std::uint32_t lane = 0; lane < 8; ++lane) Require(memory[lane] == written, "the compute image store did not reach guest memory");
+    Require(AgcDriver::Graphics::StorageTexture::FindPending(address, 1) != nullptr, "the image results were published eagerly before index reuse");
+    for (std::uint32_t lane = 0; lane < 8; ++lane) Require(memory[lane] == Unwritten, "a deferred compute store reached guest memory before reuse");
     const std::array<std::uint32_t, 6> indices{2, 0, 1, 2, 0, 1};
     std::copy(indices.begin(), indices.end(), memory);
     {

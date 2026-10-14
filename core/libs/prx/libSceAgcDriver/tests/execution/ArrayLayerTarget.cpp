@@ -275,7 +275,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std::uint32_t sw
     const auto imageAddress = collapsed ? surface + slice * LayerBytes : surface;
     const auto imageBytes = collapsed ? LayerBytes : SurfaceBytes;
     const auto pending = StorageTexture::FindPending(imageAddress, imageBytes);
-    const bool deferred = std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
+    const bool deferred = std::getenv("APS5_EAGER_WRITEBACK") == nullptr || std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
     if (!deferred) {
         Require(pending == nullptr, "the eager draw left a pending image");
     } else if (collapsed) {
@@ -308,7 +308,7 @@ void SampleSliceZero(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std:
     AgcDriver::GuestMemory::BumpCollectEpoch();
     DrawSlice(device, surface, 0, swizzleMode, false);
     const auto pending = StorageTexture::FindPending(surface, LayerBytes);
-    const bool deferred = std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
+    const bool deferred = std::getenv("APS5_EAGER_WRITEBACK") == nullptr || std::getenv("APS5_DEFERRED_WRITEBACK") != nullptr;
     Require(deferred ? pending != nullptr : pending == nullptr, "slice 0 has the wrong pending state");
     if (pending != nullptr) {
         Require(pending->Descriptor().dimension == TextureDimension::k2DArray, "the draw into slice 0 did not render into the image of its array");

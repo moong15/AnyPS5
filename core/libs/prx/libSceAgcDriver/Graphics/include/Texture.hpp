@@ -180,6 +180,8 @@ public:
     VkImageView AttachmentProxyView();
     void RecordAttachmentProxyLoad(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
     void RecordAttachmentProxyStore(VkCommandBuffer commands, VkImageLayout attachmentLayout) const;
+    // Flush a buffer read of image memory, merging newer guest bytes when a baseline is saved.
+    static void FlushDrawInput(std::uint64_t address, std::size_t bytes);
     void WriteBack();
     void MarkDirty();
     void MarkSliceDirty(std::uint32_t slice);
