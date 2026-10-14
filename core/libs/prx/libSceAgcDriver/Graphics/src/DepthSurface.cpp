@@ -873,13 +873,8 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
     found->ApplyFastClear();
     const bool cube = resource.dimension == TextureDimension::kCube;
     const bool layered = cube || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray != 0);
-<<<<<<< HEAD
-    if (stencil || (!layered && !integer)) return found->Sampled(words, resource, components);
+    if (stencil || (!layered && !integer)) return found->Sampled(words, resource, components, found == drawnDepth);
     Require(found->hostFormat == base.format, "sampling several slices or an integer view of a depth plane that the device stores in another depth format is not implemented");
-=======
-    if (stencil || (!layered && !integer)) return (*found)->Sampled(words, resource, components, found->get() == drawnDepth);
-    Require((*found)->hostFormat == base.format, "sampling several slices or an integer view of a depth plane that the device stores in another depth format is not implemented");
->>>>>>> 586f817f6 (WIP Stellar Blade: stencil plane sampled as R8_UNORM through a copy; notes)
     const auto copyFormat = integer ? VK_FORMAT_R16_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
     const auto layers = cube ? 6u : layered ? resource.depthOrLastArray + 1u : 1u;
     if ((format != copyFormat && !depthBits) || resource.width != base.extent.width || resource.height != base.extent.height || resource.baseLevel != 0 || resource.lastLevel != 0 || resource.baseArray != 0 || (cube && resource.depthOrLastArray != 0 && resource.depthOrLastArray != 5) || (resource.dimension != TextureDimension::k2D && resource.dimension != TextureDimension::k2DArray && !cube)) {
