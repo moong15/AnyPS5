@@ -292,7 +292,7 @@ struct DepthPlaneSlice {
 
 class DepthPlaneCopy {
 public:
-    DepthPlaneCopy(const Context& context, VkExtent2D extent, VkFormat format, std::uint32_t layers) : context(context), extent(extent), format(format), layers(layers), guestLayers(layers), surfaceLayers(layers) {
+    DepthPlaneCopy(const Context& context, VkExtent2D extent, VkFormat format, std::uint32_t layers, std::uint32_t rowTexels, VkDeviceSize sliceStride) : context(context), extent(extent), format(format), layers(layers), rowTexels(rowTexels), sliceStride(sliceStride), guestLayers(layers), surfaceLayers(layers) {
         this->context.bufferPool.reset();
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         info.flags = layers % 6u == 0 && extent.width == extent.height ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
@@ -328,7 +328,10 @@ public:
     std::shared_ptr<Texture> Refresh(std::span<const DepthPlaneSlice> slices, const GuestTextureResource& resource, VkComponentMapping components, VkImageViewType viewType) {
         Require(slices.size() == layers, "depth plane copy slices do not match its layers");
         const auto geometry = DescribeSurface(resource);
-        Require(geometry.layers == layers && geometry.sliceLinearBytes == sliceBytes() && !geometry.mips.empty(), "depth plane copy geometry does not match its layers");
+        if (!(geometry.layers == layers && !geometry.mips.empty() && geometry.sliceLinearBytes == sliceBytes() && geometry.mips.front().pitchBytes == rowTexels * texelBytes())) {
+            std::fprintf(stderr, "[diag-depthcopy] base 0x%llx %ux%u fmt %d layers %u row %u stride 0x%llx | geometry layers %u mips %zu slice 0x%llx pitch %u tile %d guestFormat %u dim %d\n", static_cast<unsigned long long>(resource.baseAddress), extent.width, extent.height, static_cast<int>(format), layers, rowTexels, static_cast<unsigned long long>(sliceBytes()), geometry.layers, geometry.mips.size(), static_cast<unsigned long long>(geometry.sliceLinearBytes), geometry.mips.empty() ? 0u : geometry.mips.front().pitchBytes, static_cast<int>(resource.tileMode), resource.format, static_cast<int>(resource.dimension));
+        }
+        Require(geometry.layers == layers && !geometry.mips.empty() && geometry.sliceLinearBytes == sliceBytes() && geometry.mips.front().pitchBytes == rowTexels * texelBytes(), "depth plane copy geometry does not match its layers");
         std::vector<std::shared_ptr<Buffer>> uploads;
         std::vector<std::uint32_t> uploadLayers;
         std::vector<std::uint32_t> copiedLayers;
@@ -368,6 +371,8 @@ public:
     const VkExtent2D extent;
     const VkFormat format;
     const std::uint32_t layers;
+    const std::uint32_t rowTexels;
+    const VkDeviceSize sliceStride;
 
 private:
     struct GuestLayer {
@@ -401,6 +406,7 @@ private:
         const auto region = [&](std::uint32_t layer, VkImageAspectFlags aspectMask, std::uint32_t imageLayer) {
             VkBufferImageCopy copy{};
             copy.bufferOffset = sliceBytes() * layer;
+            copy.bufferRowLength = rowTexels;
             copy.imageSubresource = {aspectMask, 0, imageLayer, 1};
             copy.imageExtent = {extent.width, extent.height, 1};
             return copy;
@@ -444,9 +450,9 @@ private:
         else Recorder::CountBarriers(Recorder::CommandClass::Draw, 3);
     }
 
-    VkDeviceSize sliceBytes() const {
-        return static_cast<VkDeviceSize>(extent.width) * extent.height * (format == VK_FORMAT_D32_SFLOAT ? 4u : 2u);
-    }
+    std::uint32_t texelBytes() const { return format == VK_FORMAT_D32_SFLOAT ? 4u : 2u; }
+
+    VkDeviceSize sliceBytes() const { return sliceStride; }
 
     VkImageAspectFlags aspect() const {
         return format == VK_FORMAT_R16_UINT ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -790,9 +796,12 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
         else slices.push_back({slice->image, slice == drawnDepth ? 0u : slice->written});
     }
     const auto imageFormat = integer ? VK_FORMAT_R16_UINT : d16 ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
+    const auto geometry = DescribeSurface(resource);
+    Require(!geometry.mips.empty(), "depth plane copy geometry has no levels");
+    const auto rowTexels = geometry.mips.front().pitchBytes / (d16 ? 2u : 4u);
     auto& copy = planeCopies()[{context.device, base.address, base.extent.width, base.extent.height, imageFormat, layers}];
-    if (copy == nullptr) {
-        copy = std::make_unique<DepthPlaneCopy>(context, base.extent, imageFormat, layers);
+    if (copy == nullptr || copy->rowTexels != rowTexels || copy->sliceStride != geometry.sliceLinearBytes) {
+        copy = std::make_unique<DepthPlaneCopy>(context, base.extent, imageFormat, layers, rowTexels, geometry.sliceLinearBytes);
     }
     return copy->Refresh(slices, resource, components, cube || resource.dimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
 }

@@ -82,18 +82,44 @@ What was tried, and what happened:
 
 #5205 (skip zero-count indexed draws) is the only one that touches `Draw.cpp`, and it does not explain the change. #5005 (scalar aperture sources as values) is a possible indirect cause, if a refused shader had been producing that index buffer. That is not verified.
 
-## Current blocker
+## Fixed on this branch (not yet upstream)
+
+### Depth plane copy geometry does not match its layers (`DepthSurface.cpp`, `DepthPlaneCopy`)
+
+Runs 14 and 16 hit it after starting a new game, at about 37.5k log lines. The cause: `DepthPlaneCopy` assumed tight linear slices (`width*height*bpp`), but `DescribeSurface` pads each row to whole tile blocks. The render size is 2564x1444, and those surfaces have a linear pitch of 2688 texels, so the size check could never pass at that resolution, and the detiler writes padded rows anyway. The fix: the copy takes `rowTexels` (from `mips.front().pitchBytes`) and `sliceStride` (`geometry.sliceLinearBytes`), uses `bufferRowLength = rowTexels` for every buffer/image region, and the caller rebuilds the copy object when the pitch or stride changes. Runs 21 and 23 passed that point without the error, and `[diag-depthcopy]` never fired. Candidate upstream PR.
+
+### Storage store error after a copy or fill into another image over the same memory (`Texture.cpp`, `forgetOriginalOver`)
 
 ```
-AGC graphics: depth plane copy geometry does not match its layers
+AGC graphics: storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented
 ```
 
-This happens after starting a new game, at about 37.5k log lines, in runs 14 and 16 (warm cache, current main). The screen freezes while audio keeps playing, followed by a 120 s RenderThread timeout. It has not been investigated yet. Logs: `run14-depthcopy.log` and the run 16 log.
+Runs 20 and 22. The fill-clear and buffer-copy-destination paths reset `layerOriginal` on every unit of every other image overlapping the written range, including units outside it. Confirmed in run 22 with `[diag-alias]`, twice: a copy covering units 0-1 of an 18-unit image threw on units 2-17, and a copy covering units 0-3 of a 36-unit image threw on units 4-35. The fix: `StorageTexture::forgetOriginalOver(address, bytes)` clears only the overlapping units of block-unit images (other images keep the whole-image behaviour). Units wholly inside the range were already dropped by `DiscardPendingInside`. Codex is writing a regression test on branch `fix/agc-forget-original-only-over-written-units` in `E:\AnyPS5-unsaved` (off main 66f894761). Candidate upstream PR.
+
+## Open
+
+- **Vertex fetch exceeds descriptor record count** returned in run 18 (about 24k lines, an uncaught terminate). `[diag-vthrow]` in `Draw.cpp` now logs the failing attribute right before the throw; it has not fired since.
+- **Run 19:** a guest access violation on `FAsyncLoadingThread` (read of `0xffffffffffffffff`) at about 1.4k lines. Seen once, and run 18 on the same build passed that point, so it is probably a race.
+- **Cold-cache hang:** not every run after a rebuild hangs (runs 20, 21 and 23 did not).
+
+## Performance (run 22, `APS5_PROFILE_DRAW=1 APS5_PROFILE_GPU=1`, walking area)
+
+The walking area runs at about 1-2 fps and is CPU bound. Per frame, the GPU is busy for about 109 ms and idle for about 388 ms. Queue 0 holds the GPU mutex for 7.9 s of every 10 s, and each of the roughly 700 draws per second costs about 0.7 ms (`Graphics::Draw` is 659 us per packet). The heaviest phases of the `[draws]` line, per 10 s:
+
+- `readTarget`: 1.6 s. It walks 5.8M pages, mostly for partial-scissor target lookups.
+- `lookup`: 1.5 s.
+- `resources`: 1.0 s.
+- `vertex`: 0.5 s.
+
+`[buffers]`: 386k uploads, of which the guest reads take 4 s. `[storage]`: 390 clear uploads, 6.8 GB, all for the `keys` reason (DCC keys). These are the first targets for performance work. Debug logging and diagnostics are not the cause: run 21 without profiling was also about 1 fps.
 
 ## Temporary diagnostics in this worktree (remove before any PR)
 
 - **`[diag-store]`** in `Graphics/src/Texture.cpp`, just after the `unsavedOutsideWatch` loop in the store path. It logs the image and the state of each unit that has no saved bytes.
 - **`[diag-vfetch]`** in `Graphics/src/Draw.cpp`, before the `ZeroFetchSlack` clamp. It logs the V# and index values of a mode 2 or 3 draw that reads past its records. It stops after 8 entries.
+- **`[diag-vthrow]`** in `Graphics/src/Draw.cpp`, before `VertexBufferReadSize`. It logs the attribute and draw that would throw the record-count error.
+- **`[diag-depthcopy]`** in `Graphics/src/DepthSurface.cpp` (`DepthPlaneCopy::Refresh`). It logs the geometry if the check still fails.
+- **`[diag-alias]`** in `Graphics/src/Texture.cpp` (fill and copy paths). It logs when another image with pending units over unwatched memory loses its `original` flags.
 
 ## Run log index (`E:\StellarBlade`)
 
@@ -109,3 +135,10 @@ This happens after starting a new game, at about 37.5k log lines, in runs 14 and
 | 14 | Depth plane copy error |
 | 15 | Cold-cache hang |
 | 16 | Depth plane copy error (original vertex check, no vertex error) |
+| 17 | Cold-cache hang (depth copy fix) |
+| 18 | Vertex fetch error, uncaught, about 24k lines |
+| 19 | Guest access violation on FAsyncLoadingThread, about 1.4k lines |
+| 20 | Past 37.5k (no depth error); storage store error after a copy into a smaller image over the same memory, freeze |
+| 21 | Walking area, about 1 fps, no errors |
+| 22 | Profile run; `[diag-alias]` confirmed the copy cause; store error, freeze |
+| 23 | With the `forgetOriginalOver` fix |

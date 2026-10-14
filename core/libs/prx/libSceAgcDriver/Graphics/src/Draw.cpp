@@ -1165,6 +1165,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             zeroed[i] = zeroVertexBuffer(context, attribute);
             continue;
         }
+        if (args == nullptr && ((attribute.resource.fields[1] >> 16u) & 0x3fffu) != 0 && VertexBufferOutOfBoundsSelect(attribute) > 1u && (attribute.fetchIndex == 0 ? static_cast<std::uint64_t>(inputs.maxIndex) : static_cast<std::uint64_t>(draw.firstInstance) + draw.instanceCount - 1u) >= attribute.resource.fields[2]) {
+            const auto& f = attribute.resource.fields;
+            std::fprintf(stderr, "[diag-vthrow] attr %zu/%zu V# %08x %08x %08x %08x fetchIndex=%u maxIndex=%u firstVertex=%u indexed=%d indexCount=%u instances=%u firstInstance=%u\n", i, attributes.size(), f[0], f[1], f[2], f[3], static_cast<unsigned>(attribute.fetchIndex), inputs.maxIndex, draw.firstVertex, draw.indexed ? 1 : 0, draw.indexCount, draw.instanceCount, draw.firstInstance);
+        }
         // An indirect draw's counts are unknown here: the descriptor's whole range is copied.
         const auto bytes = args != nullptr ? VertexBufferExtent(attribute) : VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
