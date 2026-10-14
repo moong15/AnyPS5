@@ -104,6 +104,40 @@ void ThirdDrawHitsTheCache(bool libraries) {
     Require(counters.hits == 1, mode + ": the repeated draw did not reuse the cached draw (" + std::to_string(counters.hits) + " hits)");
 }
 
+void RetainedPixelCacheTransitions() {
+    auto commands = DrawThrice();
+    commands.resize(commands.size() - 9u);
+    const auto draw = [&] {
+        for (unsigned i = 0; i < 3; ++i) Append(commands, 0x2d, {3, 2});
+    };
+    const auto skipped = [&] {
+        Append(commands, 0x69, {0x8e, 0, 0});
+        Append(commands, 0x69, {0x203, 0});
+        Append(commands, 0x69, {0x2dc, 0xaa00});
+        draw();
+    };
+    Append(commands, 0x69, {0x1c4, 1});
+    skipped();
+    Append(commands, 0x69, {0x8e, 0xf, 0xf});
+    draw();
+    skipped();
+    Append(commands, 0x69, {0x203, 0x400});
+    draw();
+    skipped();
+    Append(commands, 0x69, {0x8e, 0xf, 0xf});
+    Append(commands, 0x69, {0x2dc, 0xaa01});
+    draw();
+    skipped();
+    const auto before = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "retained pixel cache transitions failed to submit");
+    AgcDriverWaitIdle_nid_postfix();
+    const auto after = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
+    Require(after.lookups - before.lookups == 21 && after.absent - before.absent == 8 && after.inserts - before.inserts == 4 && after.hits - before.hits == 13, "color, execution or alpha-to-coverage transitions reused the wrong cached draw");
+    if (std::getenv("APS5_VERIFY_DRAW_RECIPE") != nullptr) Require(after.verifyDecodes > before.verifyDecodes, "pixel cache transitions did not verify any cached decode");
+    Require(after.verifyDecodeMismatches == before.verifyDecodeMismatches && after.facadeMismatches == before.facadeMismatches, "cached pixel transitions disagreed with fresh decoding");
+}
+
 void SightingsKeepCollidingKeys() {
     DrawKeySightings sightings(DrawKeySightings::Ways);
     Require(!sightings.SeenBefore(0) && sightings.SeenBefore(0), "draw key 0 was not admitted at its second sight");
@@ -127,6 +161,7 @@ int main() {
         }
         if (!libraries && std::getenv("APS5_NO_GPL") == nullptr) return VulkanTestSkipped;
         ThirdDrawHitsTheCache(libraries);
+        RetainedPixelCacheTransitions();
         AgcDriverShutdown_nid_postfix();
         std::cout << "A repeated draw reused the cached draw " << (libraries ? "with" : "without") << " graphics pipeline libraries\n";
         return 0;
