@@ -786,12 +786,7 @@ struct WriteTracker {
     // another thread: the ring consulted first is per thread (ThreadCollectMemo, no mutex, no
     // eviction by other threads' walks); this shared ring (8 workers with epochs of several packets
     // hold a few hundred distinct ranges) serves APS5_SHARED_COLLECT_MEMO=1.
-    struct Memo {
-        std::uintptr_t begin = 0;
-        std::uintptr_t end = 0;
-        std::uint64_t epoch = 0;
-        std::uint64_t unwatched = 0;
-    };
+    using Memo = CollectMemo;
     std::array<Memo, 256> memo{};
     std::size_t nextMemo = 0;
 
@@ -1134,7 +1129,7 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
 #endif
 }
 
-std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized) {
+std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized, CollectMemo* memo = nullptr) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
     auto& tracker = Tracker();
     // Whole pages, so a page shared with the next range is collected with either.
@@ -1146,6 +1141,10 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
     const auto epoch = currentCollectEpoch();
     const auto unwatched = unwatchSerial.load(std::memory_order_acquire);
     const bool useMemo = memoized && collectMemoEnabled() && bytes != 0;
+    if (useMemo && memo != nullptr && memo->epoch == epoch && memo->unwatched == unwatched && memo->begin <= first && stop <= memo->end) {
+        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        return tracker.generation.load(std::memory_order_relaxed);
+    }
     if (useMemo && !sharedCollectMemo()) {
         // An entry exists only for a completed walk of an in-arena range, so the tracker is
         // initialized and watched; nothing below the lock needs asking.
@@ -1154,6 +1153,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
                 // The current generation, not the memoized one: blocks stamped since (MarkWritten, an
                 // overlapping collect) were written before this caller reads, and an older value would
                 // make every later UnchangedSince fail until the epoch ends.
+                if (memo != nullptr) *memo = entry;
                 collectMemoHits.fetch_add(1, std::memory_order_relaxed);
                 return tracker.generation.load(std::memory_order_relaxed);
             }
@@ -1166,6 +1166,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
     if (useMemo && sharedCollectMemo()) {
         for (const auto& entry : tracker.memo) {
             if (entry.epoch == epoch && entry.unwatched == unwatchSerial.load(std::memory_order_relaxed) && entry.begin <= cursor && stop <= entry.end) {
+                if (memo != nullptr) *memo = entry;
                 collectMemoHits.fetch_add(1, std::memory_order_relaxed);
                 return tracker.generation;
             }
@@ -1186,6 +1187,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
     // Only a completed walk is remembered; a failed one (uncommitted pages) returned 0 above.
     if (collectMemoEnabled()) {
         const auto serial = unwatchSerial.load(std::memory_order_relaxed);
+        if (memo != nullptr) *memo = {first, stop, epoch, serial};
         if (sharedCollectMemo()) tracker.memo[tracker.nextMemo++ % tracker.memo.size()] = {first, stop, epoch, serial};
         else threadCollectMemo.entries[threadCollectMemo.next++ % threadCollectMemo.entries.size()] = {first, stop, epoch, serial};
     }
@@ -1196,6 +1198,10 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
 
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
     return collectWrites(address, bytes, true);
+}
+
+std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes, CollectMemo& memo) {
+    return collectWrites(address, bytes, true, &memo);
 }
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {

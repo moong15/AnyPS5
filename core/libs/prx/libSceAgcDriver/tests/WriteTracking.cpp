@@ -248,7 +248,8 @@ void CheckPrivateMappingReuse() {
     const auto base = reinterpret_cast<std::uint64_t>(memory);
     std::memset(memory, 0x11, 3 * Block);
     BumpCollectEpoch();
-    const auto before = CollectWrites(base, 3 * Block);
+    CollectMemo memo;
+    const auto before = CollectWrites(base, 3 * Block, memo);
     Require(before != 0, "the original backing was not collected");
     Unwatch(base + Block, Block);
     Require(!Watched(base + Block, Block), "the imported block stayed watched");
@@ -264,7 +265,7 @@ void CheckPrivateMappingReuse() {
     Require(Watched(base, 3 * Block), "fresh backing at an excluded address is not watched");
     Require(!UnchangedSince(base + Block, Block, before), "fresh backing reused an old import generation");
     Require(!UnchangedSince(base, Block, neighbour), "fresh backing reused an adjacent block's old generation");
-    const auto after = CollectWrites(base, 3 * Block);
+    const auto after = CollectWrites(base, 3 * Block, memo);
     Require(after > before && UnchangedSince(base, 3 * Block, after), "fresh backing was not collected");
     static_cast<volatile std::uint8_t*>(replacement)[Block + 8] = 0x22;
     CollectWritesUncached(base, 3 * Block);
@@ -486,6 +487,72 @@ void CheckVersionRanges() {
     }
     Require(!UnchangedSince(base, bytes, 0), "an unknown generation was accepted");
     Require(UnchangedSince(base, bytes, checkpoints.back()), "the latest checkpoint was rejected");
+}
+
+void CheckRetainedCollect() {
+    constexpr std::size_t surfaceBytes = 4 * Block;
+    constexpr std::size_t ranges = 300;
+    constexpr std::size_t bytes = surfaceBytes + ranges * Block;
+    auto* memory = static_cast<std::uint8_t*>(AllocateWatched(bytes));
+    struct Cleanup {
+        void* memory;
+        ~Cleanup() {
+#ifdef _WIN32
+            GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+#else
+            Unwatch(reinterpret_cast<std::uint64_t>(memory), bytes);
+            munmap(memory, bytes);
+#endif
+        }
+    } cleanup{memory};
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    std::memset(memory, 0x11, bytes);
+    BumpCollectEpoch();
+    CollectMemo memo;
+    const auto initial = CollectWrites(base, surfaceBytes, memo);
+    Require(initial != 0, "the surface was not collected");
+    for (std::size_t range = 0; range < ranges; ++range) {
+        Require(CollectWrites(base + surfaceBytes + range * Block, Block) != 0, "a resource range was not collected");
+    }
+    const auto churned = TrackerGeneration();
+    const auto retained = CollectWrites(base, surfaceBytes, memo);
+    Require(retained >= churned && UnchangedSince(base, surfaceBytes, initial), "resource collects changed the surface");
+    if (CollectEpoch() != 0) Require(retained == churned, "resource collects evicted the retained surface observation");
+    const auto stored = MarkWritten(base + 8, 1);
+    Require(CollectWrites(base, surfaceBytes, memo) >= stored && !UnchangedSince(base, surfaceBytes, initial), "the retained observation hid a driver write");
+    memory[8] = 0x22;
+    BumpCollectEpoch();
+    const auto edited = CollectWrites(base, surfaceBytes, memo);
+    Require(edited > stored && !UnchangedSince(base, surfaceBytes, stored), "the retained observation hid a guest write after an epoch bump");
+    std::array<std::byte, 1> observed{};
+    ReadCommitted(base + 8, observed);
+    Require(observed[0] == std::byte{0x22}, "the guest edit did not reach the observed bytes");
+    memory[surfaceBytes] = 0x33;
+    const auto enlarged = CollectWrites(base, surfaceBytes + Block, memo);
+    Require(enlarged > edited && !UnchangedSince(base + surfaceBytes, Block, edited), "the retained observation covered an uncollected range");
+    bool otherObserved = false;
+    std::thread other([&] {
+        BumpCollectEpoch();
+        memory[16] = 0x44;
+        const auto collected = CollectWrites(base, surfaceBytes, memo);
+        otherObserved = collected > enlarged && !UnchangedSince(base, surfaceBytes, enlarged);
+    });
+    other.join();
+    Require(otherObserved, "another worker reused the retained observation");
+    BumpCollectEpoch();
+    Require(CollectWrites(base, surfaceBytes, memo) != 0, "the surface lost watched coverage");
+    Unwatch(base + Block, Block);
+    Require(CollectWrites(base, surfaceBytes, memo) == 0, "unwatch did not invalidate the retained observation");
+    bool unboundedObserved = false;
+    std::thread observer([&] {
+        CollectMemo local;
+        const auto before = CollectWrites(base, Block, local);
+        memory[7] = 0x55;
+        const auto after = CollectWrites(base, Block, local);
+        unboundedObserved = before != 0 && after > before && !UnchangedSince(base, Block, before);
+    });
+    observer.join();
+    Require(unboundedObserved, "a thread without epochs reused the retained observation");
 }
 
 void CheckCollectBoundaries() {
@@ -768,11 +835,16 @@ void CheckCommittedRanges() {
     Require(!UnchangedCommittedSince(first, 0), "an unknown generation was accepted for the committed parts");
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         if (!WriteWatched()) {
             std::cout << "no write watching: skipped\n";
             return 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--retained-collect") {
+            CheckRetainedCollect();
+            std::cout << "retained collect tests passed\n";
+            return 0;
         }
 #ifdef _WIN32
         if (std::wstring_view(GetCommandLineW()).ends_with(HostHoleMode)) {
