@@ -296,9 +296,9 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
         if (registrationModules) plan.specialization.push_back({PipelineSpecialization::BufferBase + index * PipelineSpecialization::BufferWords + 3u, misalignment});
         if (!registrationModules) {
             const auto first = PipelineSpecialization::BufferBase + index * PipelineSpecialization::BufferWords;
-            plan.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
+            if (stage != IrShaderStage::Compute) plan.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
             plan.specialization.push_back({first + 1u, descriptor.dwords[3]});
-            plan.specialization.push_back({first + 2u, present ? 1u : 0u});
+            if (stage != IrShaderStage::Compute) plan.specialization.push_back({first + 2u, present ? 1u : 0u});
             plan.specialization.push_back({first + 3u, misalignment});
         }
         if (buffer.formattedReadMask != 0u) {
