@@ -125,7 +125,10 @@ void testReadOnlyResummarize() {
 }
 
 void testClearState() {
-    AgcDriver::QueueState graphics{{{0x20c, 1}}, {{0x10, 17}, {0x11, 23}}, {{0x242, 5}}};
+    AgcDriver::QueueState graphics;
+    graphics.shader = {{0x20c, 1}};
+    graphics.context = {{0x10, 17}, {0x11, 23}};
+    graphics.userConfig = {{0x242, 5}};
     const auto shader = graphics.shader;
     const auto userConfig = graphics.userConfig;
     graphics.ClearContext();

@@ -170,6 +170,13 @@ void _readFile(const Apr::ReadFileCommand& command) {
     const auto read = static_cast<std::uint64_t>(stream.gcount());
     if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
+    if (trace) {
+        std::array<std::uint64_t, 4> words{};
+        const auto sampled = static_cast<std::size_t>(std::min<std::uint64_t>(command.size, sizeof(words)));
+        std::memcpy(words.data(), reinterpret_cast<const void*>(command.destination), sampled);
+        const auto tick = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::fprintf(stderr, "[apr] read complete id=%u offset=0x%llx size=0x%llx got=0x%llx -> 0x%llx tick=%lld first=%016llx %016llx %016llx %016llx\n", command.fileId, static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(read), static_cast<unsigned long long>(command.destination), static_cast<long long>(tick), static_cast<unsigned long long>(words[0]), static_cast<unsigned long long>(words[1]), static_cast<unsigned long long>(words[2]), static_cast<unsigned long long>(words[3]));
+    }
 }
 
 void _writeAddress(const Apr::WriteAddressCommand& command) {
