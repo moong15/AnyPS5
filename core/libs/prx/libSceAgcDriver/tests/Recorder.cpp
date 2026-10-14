@@ -2894,6 +2894,111 @@ void storageRefreshTests(const Device& device, Recorder& recorder, bool watched)
     recorder.Sync();
 }
 
+bool storageAliasOriginalTests(const Device& device, Recorder& recorder, bool copy) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0 || base.hostImportAlignment > 65536) {
+        std::cout << "skipped, storage alias originals require host imports aligned within 64 KiB\n";
+        return false;
+    }
+    constexpr std::uint32_t side = 256;
+    constexpr std::size_t unit = 65536;
+    constexpr std::size_t surfaceBytes = side * side * 4;
+    constexpr std::size_t bytes = surfaceBytes + unit;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(unit, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the storage alias original block");
+    auto* texels = static_cast<std::uint8_t*>(block);
+    std::memset(texels, 0x55, surfaceBytes);
+    std::memset(texels + surfaceBytes, 0x77, unit);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } unregister{base, block, address};
+    if (HostImportFor(base, address, bytes) == nullptr) {
+        std::cout << "skipped, host import of the storage alias original block refused\n";
+        return false;
+    }
+    Require(address % unit == 0 && !AgcDriver::GuestMemory::Watched(address, bytes), "the storage alias original block is not aligned unwatched memory");
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    GuestTextureResource resource{};
+    resource.baseAddress = address;
+    resource.width = side;
+    resource.height = side;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    Require(DescribeSurface(resource).guestBytes == surfaceBytes, "the storage alias original surface has an unexpected size");
+    {
+        auto image = StorageTexture::Create(context, detiler, resource, 0);
+        resource.width = resource.height = side / 2;
+        Require(DescribeSurface(resource).guestBytes == unit, "the storage alias destination does not cover one unit");
+        auto destination = StorageTexture::Create(context, detiler, resource, 0);
+        resource.baseAddress = address + surfaceBytes;
+        auto source = StorageTexture::Create(context, detiler, resource, 0);
+        destination->SetCached(true);
+        source->SetCached(true);
+        Require(image->Generation() == 0 && image->GuestSnapshotValid() && image->OriginalSnapshotBytes() == surfaceBytes, "the unwatched image has no creation snapshot or has a write generation");
+        const auto commands = recorder.Commands();
+        recorder.Keep(image);
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const VkClearColorValue value{{1.0f, 0.0f, 0.0f, 1.0f}};
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        image->MarkDirty();
+        Require(StorageTexture::FindPending(address, surfaceBytes) == image, "the unwatched image has no pending results outside the destination");
+        const char* refusal = nullptr;
+        if (copy) {
+            Require(destination->CopyFrom(*source, refusal), "the storage alias buffer copy was refused");
+        } else {
+            static_cast<void>(StorageTexture::DiscardPendingInside(address, unit));
+            StorageTexture::FlushPending(address, unit, destination.get(), "buffer fill", PublishScope::PartialUnits);
+            constexpr std::array<std::uint32_t, 4> pattern{0x77777777u, 0x77777777u, 0x77777777u, 0x77777777u};
+            Require(destination->FillClear(pattern, StorageTexture::WholeImage, refusal), "the storage alias fill clear was refused");
+        }
+        Require(StorageTexture::FindPending(address, surfaceBytes) == image, "the alias write discarded results outside its destination");
+        image->WriteBack();
+        destination->WriteBack();
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        constexpr std::array<std::uint8_t, 4> red{255, 0, 0, 255};
+        for (std::size_t i = 0; i < surfaceBytes; ++i) Require(texels[i] == (i < unit ? 0x77 : red[i % 4]), "the alias write lost its destination or the other units' storage results");
+        Require(std::all_of(texels + surfaceBytes, texels + bytes, [](std::uint8_t value) { return value == 0x77; }), "the alias write changed its source memory");
+    }
+    recorder.Sync();
+    std::cout << "storage alias originals: " << (copy ? "buffer copy" : "fill clear") << " passed\n";
+    return true;
+}
+
 bool writtenBufferOrderTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -6561,6 +6666,9 @@ int main(int argc, char** argv) {
             std::cout << "Completion label storage and ordering tests passed\n";
             return 0;
         }
+        if (argc == 2 && (std::string_view(argv[1]) == "--storage-alias-copy-only" || std::string_view(argv[1]) == "--storage-alias-fill-only")) {
+            return storageAliasOriginalTests(device, recorder, std::string_view(argv[1]) == "--storage-alias-copy-only") ? 0 : 77;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--written-buffer-order-only") {
             if (!writtenBufferOrderTests(device, recorder)) return 77;
             std::cout << "written buffer order tests passed\n";
@@ -6667,6 +6775,8 @@ int main(int argc, char** argv) {
         integerClearTests(device);
         denormalClearTests(device, recorder);
         unitShadowTests(device, recorder);
+        static_cast<void>(storageAliasOriginalTests(device, recorder, true));
+        static_cast<void>(storageAliasOriginalTests(device, recorder, false));
         storageRefreshTests(device, recorder, false);
         storageRefreshTests(device, recorder, true);
         static_cast<void>(writtenBufferOrderTests(device, recorder));

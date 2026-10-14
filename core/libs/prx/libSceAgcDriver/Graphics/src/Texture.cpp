@@ -3020,6 +3020,16 @@ void StorageTexture::MarkSliceDirty(std::uint32_t slice) {
     markLayersPending(first, last - first);
 }
 
+void StorageTexture::forgetOriginalOver(std::uint64_t address, std::size_t bytes) {
+    if (!blockUnits) {
+        layerOriginal.assign(trackedLayers, false);
+        return;
+    }
+    for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) {
+        if (layerBegin(unit) < address + bytes && address < layerBegin(unit) + layerBytes(unit)) layerOriginal[unit] = false;
+    }
+}
+
 bool StorageTexture::anyLayerPending() const {
     return std::any_of(layerPending.begin(), layerPending.end(), [](bool pending) { return pending; });
 }
@@ -3894,7 +3904,7 @@ bool StorageTexture::FillClear(std::span<const std::uint32_t, 4> pattern, std::u
         std::lock_guard lock(live.mutex);
         for (auto* texture : live.textures) {
             if (texture == this || texture->released || !texture->overlaps(begin, bytes)) continue;
-            texture->layerOriginal.assign(texture->trackedLayers, false);
+            texture->forgetOriginalOver(begin, bytes);
             if (texture->descriptor.dccAddress != 0) aliasedKeys = true;
         }
     }
@@ -4028,7 +4038,7 @@ bool StorageTexture::CopyFrom(StorageTexture& source, const char*& refusal) {
         auto& live = Live();
         std::lock_guard lock(live.mutex);
         for (auto* texture : live.textures) {
-            if (texture != this && !texture->released && texture->overlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) texture->layerOriginal.assign(texture->trackedLayers, false);
+            if (texture != this && !texture->released && texture->overlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) texture->forgetOriginalOver(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
         }
     }
     GuestMemory::MarkWritten(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
