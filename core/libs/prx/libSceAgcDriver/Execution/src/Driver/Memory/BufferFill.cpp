@@ -252,6 +252,12 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
             pattern = {userData[4], userData[5], userData[6], userData[7]};
         }
     }
+    storeBufferFill(queueId, base, bytes, pattern, localDevice, memoryFill.has_value(), true);
+    return true;
+}
+
+
+void Driver::storeBufferFill(std::uint32_t queueId, std::uint64_t base, std::size_t bytes, const std::array<std::uint32_t, 4>& pattern, const std::shared_ptr<VulkanDevice>& localDevice, bool memoryValueFill, bool noteMetadata) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     static std::atomic<std::uint64_t> fills{0}, filledBytes{0}, cpuFills{0};
 
@@ -266,116 +272,113 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
     static auto fillReport = std::chrono::steady_clock::now();
     ++fills;
     filledBytes += bytes;
-    if (bytes != 0) {
-        GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Fill);
-        std::lock_guard gpuLock(GuestMemory::GpuMutex());
-        const auto holdStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        auto phaseStart = holdStart;
-        const auto phase = [&](FillPhase which) {
-            if (!profile) return;
-            const auto now = std::chrono::steady_clock::now();
-            fillPhaseMs[which] += std::chrono::duration<double, std::milli>(now - phaseStart).count();
-            phaseStart = now;
-        };
+    if (bytes == 0) return;
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Fill);
+    std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    const auto holdStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    auto phaseStart = holdStart;
+    const auto phase = [&](FillPhase which) {
+        if (!profile) return;
+        const auto now = std::chrono::steady_clock::now();
+        fillPhaseMs[which] += std::chrono::duration<double, std::milli>(now - phaseStart).count();
+        phaseStart = now;
+    };
 
-        recordLabelsForPacket(localDevice.get(), queueId);
-        phase(FillLabels);
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(base), bytes, 16, true);
-        phase(FillCheck);
-        const auto coverage = Graphics::StorageTexture::ClassifyFill(base, bytes);
-        phase(FillClassify);
+    recordLabelsForPacket(localDevice.get(), queueId);
+    phase(FillLabels);
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(base), bytes, 16, true);
+    phase(FillCheck);
+    const auto coverage = Graphics::StorageTexture::ClassifyFill(base, bytes);
+    phase(FillClassify);
 
-        static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
-        if (traceKeys && coverage.cover == Graphics::StorageTexture::FillCover::Keys) std::fprintf(stderr, "[dcc-keys] title fills keys 0x%llx+0x%zx with %08x %08x %08x %08x (queue 0x%x)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3], queueId);
-        const bool uniformKeysFill = coverage.cover == Graphics::StorageTexture::FillCover::Keys && IsByteFill(pattern);
-        if (uniformKeysFill) {
-            Graphics::StorageTexture::NoteKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
-            Graphics::StorageTexture::ClearByKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
-        }
+    static const bool traceKeys = std::getenv("APS5_TRACE_DCC_KEYS") != nullptr;
+    if (traceKeys && coverage.cover == Graphics::StorageTexture::FillCover::Keys) std::fprintf(stderr, "[dcc-keys] title fills keys 0x%llx+0x%zx with %08x %08x %08x %08x (queue 0x%x)\n", static_cast<unsigned long long>(base), bytes, pattern[0], pattern[1], pattern[2], pattern[3], queueId);
+    const bool uniformKeysFill = coverage.cover == Graphics::StorageTexture::FillCover::Keys && IsByteFill(pattern);
+    if (uniformKeysFill) {
+        Graphics::StorageTexture::NoteKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
+        Graphics::StorageTexture::ClearByKeysFill(base, bytes, static_cast<std::uint8_t>(pattern[0]));
+    }
 
-        const auto discarded = fillClearEnabled() ? Graphics::StorageTexture::DiscardPendingInside(base, bytes) : 0u;
-        phase(FillDiscard);
-        const char* refusal = nullptr;
-        bool cleared = false;
-        if (coverage.image != nullptr) {
-            if (!fillClearEnabled()) {
-                refusal = "disabled";
-            } else if (fillClearExactOnly() && (coverage.cover != Graphics::StorageTexture::FillCover::Exact || coverage.others != 0)) {
-                refusal = "exact only";
-            } else {
+    const auto discarded = fillClearEnabled() ? Graphics::StorageTexture::DiscardPendingInside(base, bytes) : 0u;
+    phase(FillDiscard);
+    const char* refusal = nullptr;
+    bool cleared = false;
+    if (coverage.image != nullptr) {
+        if (!fillClearEnabled()) {
+            refusal = "disabled";
+        } else if (fillClearExactOnly() && (coverage.cover != Graphics::StorageTexture::FillCover::Exact || coverage.others != 0)) {
+            refusal = "exact only";
+        } else {
 
-                Graphics::StorageTexture::FlushPending(base, bytes, coverage.image.get(), "buffer fill", Graphics::PublishScope::PartialUnits);
-                cleared = coverage.image->FillClear(pattern, coverage.layer, refusal);
-            }
-        }
-        phase(FillClearPhase);
-        fillClearCount(coverage, bytes, pattern, discarded, cleared, refusal);
-        noteForeignWriter(base, base + bytes, queueId);
-
-        const bool uniform = pattern[0] == pattern[1] && pattern[1] == pattern[2] && pattern[2] == pattern[3];
-        const bool absorbed = !cleared && uniform && coverage.cover == Graphics::StorageTexture::FillCover::None && Graphics::MultisampledColorFillAbsorbs(base, bytes, pattern[0]);
-        if (absorbed) {
-            ++absorbedFills;
-            absorbedBytes += bytes;
-        } else if (!cleared) {
-            ++flushes;
-
-            if (Graphics::StorageTexture::FlushPending(base, bytes, nullptr, "buffer fill", Graphics::PublishScope::PartialUnits)) ++flushed;
-        }
-        phase(FillFlush);
-        const bool stored = cleared || absorbed || localDevice->FillBuffer(base, bytes, pattern);
-        phase(FillDevice);
-        if (stored && !cleared && !absorbed) {
-            if (const auto filled = KeysFillMemo(pattern, uniformKeysFill, memoryFill.has_value())) Graphics::NoteKeysFillOnGpu(base, bytes, *filled);
-        }
-        if (profile && stored && !cleared && !absorbed) {
-            ++(uniform ? uniformFills : patternFills);
-            (uniform ? uniformBytes : patternBytes) += bytes;
-            if (!uniform) chainCopies += static_cast<std::uint64_t>(std::bit_width((bytes / 16) - 1));
-        }
-        if (!stored) {
-            ++cpuFills;
-
-            localDevice->WaitIdle();
-            static thread_local std::vector<std::byte>* blockSlot = nullptr;
-            auto& block = ShaderRecompiler::ThreadOwned(blockSlot);
-            const auto chunk = std::min<std::size_t>(bytes, 1u << 20u);
-            block.resize(chunk);
-            for (std::size_t at = 0; at < chunk; at += 16) std::memcpy(block.data() + at, pattern.data(), 16);
-            for (std::size_t done = 0; done < bytes; done += chunk) GuestMemory::Write(base + done, std::span<const std::byte>(block).first(std::min(chunk, bytes - done)), 16);
-            phase(FillCpu);
-        }
-        if (uniform) {
-            Graphics::NoteDepthMetadataFill(base, bytes, pattern[0]);
-            Graphics::NoteColorMetadataFill(base, bytes, pattern[0]);
-        }
-        if (profile) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto cover = static_cast<std::size_t>(coverage.cover);
-            ++holdByCover[cover];
-            holdByCoverMs[cover] += std::chrono::duration<double, std::milli>(now - holdStart).count();
-            if (now - fillReport > std::chrono::seconds(10)) {
-                fillReport = now;
-                static constexpr std::array<const char*, 8> coverNames{"none", "exact", "inside", "around", "straddle", "several", "keys", "layer"};
-                std::string line;
-                char text[64];
-                for (std::size_t i = 0; i < FillPhaseCount; ++i) {
-                    std::snprintf(text, sizeof(text), " %s %.0f", fillPhaseNames[i], fillPhaseMs[i]);
-                    line += text;
-                }
-                char absorbedText[128];
-                std::snprintf(absorbedText, sizeof(absorbedText), "; multisampled clears not stored %llu (%.0f MiB)", static_cast<unsigned long long>(absorbedFills), static_cast<double>(absorbedBytes) / 1048576.0);
-                line += absorbedText;
-                line += "; hold by cover (count/ms):";
-                for (std::size_t i = 0; i < coverNames.size(); ++i) {
-                    std::snprintf(text, sizeof(text), " %s %llu/%.0f", coverNames[i], static_cast<unsigned long long>(holdByCover[i]), holdByCoverMs[i]);
-                    line += text;
-                }
-                std::fprintf(stderr, "[fill] %llu buffer fills (%.0f MiB), %llu stored by the CPU; hold phases ms (cumulative):%s; pre-store flushes %llu (%llu stored an image); stored on the GPU: uniform %llu (%.0f MiB), pattern %llu (%.0f MiB), chain copies %llu\n", static_cast<unsigned long long>(fills.load()), filledBytes.load() / 1048576.0, static_cast<unsigned long long>(cpuFills.load()), line.c_str(), static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(flushed), static_cast<unsigned long long>(uniformFills), uniformBytes / 1048576.0, static_cast<unsigned long long>(patternFills), patternBytes / 1048576.0, static_cast<unsigned long long>(chainCopies));
-            }
+            Graphics::StorageTexture::FlushPending(base, bytes, coverage.image.get(), "buffer fill", Graphics::PublishScope::PartialUnits);
+            cleared = coverage.image->FillClear(pattern, coverage.layer, refusal);
         }
     }
-    return true;
-}
+    phase(FillClearPhase);
+    fillClearCount(coverage, bytes, pattern, discarded, cleared, refusal);
+    noteForeignWriter(base, base + bytes, queueId);
 
+    const bool uniform = pattern[0] == pattern[1] && pattern[1] == pattern[2] && pattern[2] == pattern[3];
+    const bool absorbed = !cleared && uniform && coverage.cover == Graphics::StorageTexture::FillCover::None && Graphics::MultisampledColorFillAbsorbs(base, bytes, pattern[0]);
+    if (absorbed) {
+        ++absorbedFills;
+        absorbedBytes += bytes;
+    } else if (!cleared) {
+        ++flushes;
+
+        if (Graphics::StorageTexture::FlushPending(base, bytes, nullptr, "buffer fill", Graphics::PublishScope::PartialUnits)) ++flushed;
+    }
+    phase(FillFlush);
+    const bool stored = cleared || absorbed || localDevice->FillBuffer(base, bytes, pattern);
+    phase(FillDevice);
+    if (stored && !cleared && !absorbed) {
+        if (const auto filled = KeysFillMemo(pattern, uniformKeysFill, memoryValueFill)) Graphics::NoteKeysFillOnGpu(base, bytes, *filled);
+    }
+    if (profile && stored && !cleared && !absorbed) {
+        ++(uniform ? uniformFills : patternFills);
+        (uniform ? uniformBytes : patternBytes) += bytes;
+        if (!uniform) chainCopies += static_cast<std::uint64_t>(std::bit_width((bytes / 16) - 1));
+    }
+    if (!stored) {
+        ++cpuFills;
+
+        localDevice->WaitIdle();
+        static thread_local std::vector<std::byte>* blockSlot = nullptr;
+        auto& block = ShaderRecompiler::ThreadOwned(blockSlot);
+        const auto chunk = std::min<std::size_t>(bytes, 1u << 20u);
+        block.resize(chunk);
+        for (std::size_t at = 0; at < chunk; at += 16) std::memcpy(block.data() + at, pattern.data(), 16);
+        for (std::size_t done = 0; done < bytes; done += chunk) GuestMemory::Write(base + done, std::span<const std::byte>(block).first(std::min(chunk, bytes - done)), 16);
+        phase(FillCpu);
+    }
+    if (noteMetadata && uniform) {
+        Graphics::NoteDepthMetadataFill(base, bytes, pattern[0]);
+        Graphics::NoteColorMetadataFill(base, bytes, pattern[0]);
+    }
+    if (profile) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto cover = static_cast<std::size_t>(coverage.cover);
+        ++holdByCover[cover];
+        holdByCoverMs[cover] += std::chrono::duration<double, std::milli>(now - holdStart).count();
+        if (now - fillReport > std::chrono::seconds(10)) {
+            fillReport = now;
+            static constexpr std::array<const char*, 8> coverNames{"none", "exact", "inside", "around", "straddle", "several", "keys", "layer"};
+            std::string line;
+            char text[64];
+            for (std::size_t i = 0; i < FillPhaseCount; ++i) {
+                std::snprintf(text, sizeof(text), " %s %.0f", fillPhaseNames[i], fillPhaseMs[i]);
+                line += text;
+            }
+            char absorbedText[128];
+            std::snprintf(absorbedText, sizeof(absorbedText), "; multisampled clears not stored %llu (%.0f MiB)", static_cast<unsigned long long>(absorbedFills), static_cast<double>(absorbedBytes) / 1048576.0);
+            line += absorbedText;
+            line += "; hold by cover (count/ms):";
+            for (std::size_t i = 0; i < coverNames.size(); ++i) {
+                std::snprintf(text, sizeof(text), " %s %llu/%.0f", coverNames[i], static_cast<unsigned long long>(holdByCover[i]), holdByCoverMs[i]);
+                line += text;
+            }
+            std::fprintf(stderr, "[fill] %llu buffer fills (%.0f MiB), %llu stored by the CPU; hold phases ms (cumulative):%s; pre-store flushes %llu (%llu stored an image); stored on the GPU: uniform %llu (%.0f MiB), pattern %llu (%.0f MiB), chain copies %llu\n", static_cast<unsigned long long>(fills.load()), filledBytes.load() / 1048576.0, static_cast<unsigned long long>(cpuFills.load()), line.c_str(), static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(flushed), static_cast<unsigned long long>(uniformFills), uniformBytes / 1048576.0, static_cast<unsigned long long>(patternFills), patternBytes / 1048576.0, static_cast<unsigned long long>(chainCopies));
+        }
+    }
+}
 }

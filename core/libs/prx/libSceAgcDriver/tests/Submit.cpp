@@ -489,6 +489,34 @@ std::array<std::uint32_t, 7> memoryCopy(const void* destination, const void* sou
     return {0xc0055000, 0x60000000, static_cast<std::uint32_t>(from), static_cast<std::uint32_t>(static_cast<std::uint64_t>(from) >> 32u), static_cast<std::uint32_t>(to), static_cast<std::uint32_t>(static_cast<std::uint64_t>(to) >> 32u), bytes};
 }
 
+std::array<std::uint32_t, 7> dataFill(const void* destination, std::uint32_t value, std::uint32_t bytes) {
+    const auto to = reinterpret_cast<std::uintptr_t>(destination);
+    return {0xc0055000, 0x40300000, value, 0, static_cast<std::uint32_t>(to), static_cast<std::uint32_t>(static_cast<std::uint64_t>(to) >> 32u), bytes};
+}
+
+void testLargeDataFill() {
+    alignas(64) static volatile std::uint32_t filled = 0;
+    constexpr std::size_t words = 65536;
+    constexpr auto bytes = static_cast<std::uint32_t>(words * 4);
+    constexpr std::uint32_t value = 0x5a5a5a5au;
+    auto* produced = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
+    auto* destination = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
+    for (std::size_t i = 0; i < words; ++i) {
+        produced[i] = 0x96000000u | static_cast<std::uint32_t>(i);
+        destination[i] = 0;
+    }
+    const auto drainsBefore = AgcDriver::DriverDetail::storesDrained.load();
+    const auto fillsBefore = AgcDriver::DriverDetail::dmaFills.load();
+    submit(0, commands(memoryCopy(destination, produced, bytes), dataFill(destination, value, bytes), writeData(&filled, 1)));
+    waitFor(&filled, 1, "the label after a DMA_DATA fill never landed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::all_of(destination, destination + words, [](std::uint32_t word) { return word == value; }), "a DMA_DATA fill over a GPU copy's destination lost the fill or ran before the copy");
+    check(AgcDriver::DriverDetail::storesDrained.load() == drainsBefore, "a DMA_DATA fill larger than 64 KiB drained the device");
+    check(AgcDriver::DriverDetail::dmaFills.load() == fillsBefore + 1, "a DMA_DATA fill larger than 64 KiB was not stored as a buffer fill");
+    GuestHeap::GuestHeapFree_nid_postfix(destination);
+    GuestHeap::GuestHeapFree_nid_postfix(produced);
+}
+
 void testCopyIntoHostMemory() {
     constexpr std::size_t words = 32768;
     constexpr auto bytes = static_cast<std::uint32_t>(words * 4);
@@ -853,6 +881,7 @@ int main(int argc, char** argv) {
         testShaderHeaderAlignment();
         testHeaderWithoutProgramAddress();
         testCopyIntoHostMemory();
+        testLargeDataFill();
         testRegisteredFloatMode();
         testDispatchFloatMode();
         testReadOnlyResummarize();

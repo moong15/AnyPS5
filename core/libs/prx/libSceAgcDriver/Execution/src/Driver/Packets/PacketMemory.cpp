@@ -165,6 +165,18 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 }
             }
         }
+        if (drained && opcode == 0x50 && Pm4::DmaSource(packet) == 2 && Pm4::DmaDestination(packet) != 1) {
+            const auto destination = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
+            const std::size_t bytes = packet[6] & 0x3ffffffu;
+            if (bytes != 0 && destination % 16 == 0 && bytes % 16 == 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(destination), bytes, true)) {
+                if (const auto localDevice = device.Load()) {
+                    storeBufferFill(submission.queue, destination, bytes, {packet[2], packet[2], packet[2], packet[2]}, localDevice, false, false);
+                    ++dmaFills;
+                    wroteOnGpu = true;
+                    drained = false;
+                }
+            }
+        }
         if (drained) ++storesDrained;
     }
 
