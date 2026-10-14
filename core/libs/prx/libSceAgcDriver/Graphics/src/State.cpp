@@ -127,7 +127,7 @@ constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
 // to run, which it always does here.
 constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u | 0x00010000u);
-constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
+constexpr std::uint32_t PixelStageRunsMask = 0x000207c7u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 constexpr std::uint32_t AlphaToCoverageUndithered = 0x0000aa01u;
 constexpr std::uint32_t AlphaToCoverageDithered = 0x00018701u;
@@ -1404,10 +1404,11 @@ bool PixelProgramSkipped(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto targetMask = find(cx, 0x8e);
     const auto shaderMask = find(cx, 0x8f);
-    const auto zFormat = find(cx, 0x1c4);
     const auto shaderControl = find(cx, 0x203);
-    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
-    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+    if (targetMask == cx.end() || shaderMask == cx.end() || shaderControl == cx.end()) return false;
+    const auto alphaToMask = find(cx, 0x2dc);
+    if (alphaToMask != cx.end() && (alphaToMask->second & 1u) != 0) return false;
+    return (targetMask->second & shaderMask->second) == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
 }
 
 std::string NullPixelProgramRejection(const QueueState& queue) {
