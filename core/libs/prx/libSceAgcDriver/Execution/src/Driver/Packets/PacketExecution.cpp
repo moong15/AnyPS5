@@ -56,14 +56,23 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
     if (header == FlipPacketHeader || header == RenderingWaitPacketHeader) return false;
     if (Pm4::DrawOpcode(opcode)) return true;
     switch (opcode) {
-        case 0x11: case 0x12: case 0x13: case 0x26: case 0x2a: case 0x2f: case 0x42: case 0x58: case 0x59: case 0x69: case 0x76: case 0x79: case 0x7a: case 0x81: return true;
+        case 0x11: case 0x12: case 0x13: case 0x20: case 0x26: case 0x2a: case 0x2f: case 0x42: case 0x58: case 0x59: case 0x69: case 0x76: case 0x79: case 0x7a: case 0x81: return true;
         case 0x46: return packet.size() >= 2 && (packet[1] & 0x3fu) != 0x39u;
         case 0x15: return orderedFills();
         case 0x63: case 0x64: case 0x9f:
             return packet.size() >= 5 && !DrawPipeline::Queue0().Overlaps(packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u), static_cast<std::size_t>(packet[4]) * 8);
+        case 0x50: {
+            if (packet.size() < 7) return false;
+            const auto dst = ((packet[1] >> 20u) & 3u) | ((packet[6] >> 25u) & 4u) | ((packet[6] >> 26u) & 8u);
+            if (dst == 1 || dst == 2) return true;
+            const std::size_t bytes = packet[6] & 0x3ffffffu;
+            if (bytes == 0) return true;
+            const auto destination = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
+            return !DrawPipeline::Queue0().Overlaps(destination, bytes);
+        }
         case 0x10: {
             const auto operation = (header >> 2u) & 0x3fu;
-            return operation == 0 || operation == 0x09 || operation == 0x0b || operation == 0x0c || operation == 0x1a;
+            return operation != 0x09;
         }
         default: return false;
     }
@@ -280,6 +289,7 @@ void Driver::execute(const Submission& submission) {
         GuestMemory::SetCurrentPacket(header == FlipPacketHeader ? 0xffffu : opcode, submission.queue);
         CaptureTrace::Log("packet submission=%llu queue=%x offset=%zu header=%08x words=%zu", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, header, packet.size());
         if (predicated) {
+            if (pipelined && DrawPipeline::Queue0().Busy() && DrawPipeline::Queue0().Overlaps(queue.predication.address, queue.predication.operation == 3 ? 8 : 4)) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, opcode);
             landPendingWaits(submission.queue);
             recordQueuedLabelsBeforeRead(submission.queue);
             if (!Pm4::PredicationPasses(queue)) {
