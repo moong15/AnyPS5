@@ -176,6 +176,76 @@ void CheckTargetWalkSkip() {
 
 }
 
+// The dirty summary (GuestMemory.cpp): a collect walks only the blocks of its range that this
+// queue's ordering point has not already walked clean, and a range it covers whole is not walked at
+// all. It is the same rule the memo gives, one block at a time, and it covers what the memo's range
+// map cannot: a range no entry holds exactly, because its first walk was of another range.
+void CheckTargetDirtySummary() {
+    const bool summary = std::getenv("APS5_NO_TARGET_DIRTY_SUMMARY") == nullptr;
+    constexpr std::size_t bytes = 4 * Block;
+    auto* memory = static_cast<std::uint8_t*>(AllocateWatched(bytes));
+    struct Cleanup {
+        std::uint8_t* memory;
+        std::size_t bytes;
+        ~Cleanup() {
+#ifdef _WIN32
+            GuestArena::GuestArenaRelease_nid_postfix(memory, bytes);
+#else
+            Unwatch(reinterpret_cast<std::uint64_t>(memory), bytes);
+            munmap(memory, bytes);
+#endif
+        }
+    } cleanup{memory, bytes};
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    std::memset(memory, 0x11, bytes);
+    Follow follow;
+
+    // The queue's first ordering point settles the whole target. The tokens are its own: a scope's
+    // memo is kept per (queue, token), and the check above uses the low ones.
+    follow(0, 1001, 101);
+    Require(CollectWrites(base, bytes) != 0, "the target was not collected");
+
+    // The next one: its walks find nothing, so each block stands clean under that ordering point.
+    follow(0, 1002, 102);
+    Require(CollectWrites(base, 2 * Block) != 0, "the target's first half was not collected");
+    const auto generation = TrackerGeneration();
+    const auto beforeWalked = ThreadSummaryWalkedBytes();
+
+    // A range no memo entry holds exactly, whose first two blocks stand clean: only the third block
+    // is walked. The same collect with the summary off walks all three.
+    auto before = Sample();
+    Require(CollectWrites(base, 3 * Block) != 0, "the target's three blocks were not collected");
+    Require(Walked(before, Sample()), "the range the summary had to leave did not walk");
+    if (summary) {
+        Require(ThreadSummaryWalkedBytes() == beforeWalked + Block, "the summary walked a block it had cleared");
+    }
+    Require(UnchangedSince(base, bytes, generation), "the partly summarised target reads as written");
+
+    // The last block walked on its own, then the whole target: no memo entry covers the whole range,
+    // but every block of it stands clean, so the summary skips the walk and a raw CPU store waits for
+    // the next ordering point, exactly as it does for a memoized walk.
+    Require(CollectWrites(base + 3 * Block, Block) != 0, "the target's last block was not collected");
+    static_cast<volatile std::uint8_t*>(memory)[3 * Block + 11] = 0x22;
+    before = Sample();
+    const auto beforeSkips = ThreadSummarySkips();
+    Require(CollectWrites(base, bytes) != 0, "the target was not collected");
+    if (summary) {
+        Require(!Walked(before, Sample()), "a range the summary covers was walked after a CPU store");
+        Require(ThreadSummarySkips() == beforeSkips + 1, "a range the summary covers whole is not counted as a summary skip");
+        Require(UnchangedSince(base, bytes, generation), "a store made after a summary skip was seen before the next ordering point");
+    } else {
+        Require(Walked(before, Sample()), "APS5_NO_TARGET_DIRTY_SUMMARY=1 did not restore the walk of the whole range");
+        Require(!UnchangedSince(base, bytes, generation), "APS5_NO_TARGET_DIRTY_SUMMARY=1 did not restore the walk that finds the store");
+    }
+
+    // The queue's next ordering point walks the target again and finds the store.
+    follow(0, 1003, 103);
+    before = Sample();
+    const auto after = CollectWrites(base, bytes);
+    Require(after != 0 && Walked(before, Sample()), "the next ordering point did not walk the target");
+    Require(!UnchangedSince(base, bytes, generation) && WrittenSince(base + 3 * Block, 4, generation), "a CPU store after a summary skip was missed");
+}
+
 int main() {
     try {
         if (!WriteWatched()) {
@@ -183,6 +253,7 @@ int main() {
             return 77;
         }
         CheckTargetWalkSkip();
+        CheckTargetDirtySummary();
     } catch (const std::exception& error) {
         std::cerr << "target walk skip test failed: " << error.what() << "\n";
         return 1;
