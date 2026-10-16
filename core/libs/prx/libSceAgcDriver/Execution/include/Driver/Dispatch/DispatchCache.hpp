@@ -40,6 +40,8 @@ struct DispatchVariant {
     std::vector<std::uint32_t> dataSlots;
     std::uint32_t flatBinding = NoFlatBinding;
 
+    std::vector<std::uint32_t> userData;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> relocationRuns;
     std::uint32_t pushOffset = 0;
     std::shared_ptr<const ShaderRecompiler::SourceHandle> prepared;
     std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> bufferWordBuffers;
@@ -66,6 +68,8 @@ struct DispatchEntry {
 
 struct EntryCounters {
     std::uint64_t lookups = 0, absent = 0, equal = 0, differing = 0, inaccessible = 0, queuedLabel = 0, flushingImage = 0, publishMoved = 0, pendingMoved = 0, forgetMoved = 0, imagesFlushed = 0, runsSynced = 0, forgetSinceInsert = 0, replaced = 0, inserts = 0, unstable = 0, touches = 0;
+
+    std::uint64_t aliasLookups = 0, aliasHits = 0, aliasUnreadable = 0, aliasWords = 0, aliasRange = 0, aliasPatches = 0, aliasValidation = 0;
 
     std::uint64_t runsValidated = 0, runsInserted = 0, retriesEqual = 0, retriesMoved = 0;
     double validateUs = 0;

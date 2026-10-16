@@ -140,13 +140,15 @@ void SrtMovingPerDispatch(const GuestBlock& block) {
     for (std::uint32_t record = 0; record < Records; ++record) SetRecord(block, record, record % 4u);
     std::uint64_t most = 0;
     std::size_t entries = 0;
+    const auto aliasesBefore = Driver::Get().DispatchCacheCounters().aliasHits;
     for (std::size_t slot = 0; slot < SrtSlots; ++slot) {
         Dispatch(block, slot);
         const auto size = Driver::Get().DispatchCacheSize();
         most = std::max(most, size.variantBytes);
         entries = std::max(entries, size.entries);
     }
-    Require(entries >= 2, "image table cache bounds: the dispatches were not kept in the dispatch cache");
+    const auto aliases = Driver::Get().DispatchCacheCounters().aliasHits - aliasesBefore;
+    Require(entries >= 2 || aliases >= SrtSlots - 1, "image table cache bounds: the dispatches were neither kept nor reused through relocated SRTs");
     Require(most <= Driver::DispatchCacheBytes(), "image table cache bounds: dispatches reading a 2 MiB table through " + std::to_string(SrtSlots) + " SRTs kept " + std::to_string(most >> 20u) + " MiB of captured words in the dispatch cache, over its budget of " + std::to_string(Driver::DispatchCacheBytes() >> 20u) + " MiB");
 }
 

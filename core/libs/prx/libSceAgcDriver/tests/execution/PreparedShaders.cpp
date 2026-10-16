@@ -149,7 +149,9 @@ void Run(AgcDriver::VulkanDevice& device) {
     users[0] += 1;
     const auto changedCapture = invocation.Capture(preparedRuntime);
     const auto changedResult = invocation.Materialize(*changedCapture);
-    Require(changedResult != firstResult && changedResult->spirv.data() == firstResult->spirv.data(), "prepared invocation did not distinguish changed runtime data");
+    Require(firstResult->shaderDataUserWords.empty(), "the empty-shader fixture unexpectedly forwards user data");
+    const bool reuseUnusedData = std::getenv("APS5_NO_RESULT_MEMO_USER_DATA") == nullptr;
+    Require((changedResult == firstResult) == reuseUnusedData && changedResult->spirv.data() == firstResult->spirv.data(), "prepared invocation did not follow the unused-user-data memo policy");
     users[0] -= 1;
     Require(invocation.Materialize(*preparedCapture) == firstResult, "prepared invocation evicted the previous runtime data");
     auto replacement = OpenVulkanTestDevice();

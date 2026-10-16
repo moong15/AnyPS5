@@ -1643,6 +1643,7 @@ IrResourcePlan handBuiltPlan() {
     plan.srtGuardOffset = 6u;
     plan.cleanFlatSlots = {0u, 1u};
     plan.pureFlatSlots = {1u, 0u};
+    plan.userDataValues = 0x123456789abcdef0ull;
     plan.requiresSpecializationMemory = true;
     plan.srtPlanComplete = true;
     plan.resourceTrackingComplete = true;
@@ -1726,7 +1727,7 @@ bool samePlan(const IrResourcePlan& left, const IrResourcePlan& right) {
     for (std::size_t index = 0; index < left.uniformFill.values.size(); ++index) {
         if (!sameValue(left.uniformFill.values[index], right.uniformFill.values[index])) return false;
     }
-    return left.materializationSources == right.materializationSources && left.guardedSrtSlots == right.guardedSrtSlots && left.srtGuardOffset == right.srtGuardOffset && left.cleanFlatSlots == right.cleanFlatSlots && left.pureFlatSlots == right.pureFlatSlots &&
+    return left.userDataValues == right.userDataValues && left.materializationSources == right.materializationSources && left.guardedSrtSlots == right.guardedSrtSlots && left.srtGuardOffset == right.srtGuardOffset && left.cleanFlatSlots == right.cleanFlatSlots && left.pureFlatSlots == right.pureFlatSlots &&
            left.requiresSpecializationMemory == right.requiresSpecializationMemory && left.srtPlanComplete == right.srtPlanComplete && left.resourceTrackingComplete == right.resourceTrackingComplete && left.info == right.info && left.uniformFill.fill == right.uniformFill.fill;
 }
 
@@ -2134,6 +2135,129 @@ void verifyPlanAcrossProcesses(const char* self) {
     run("--load-plan-switch");
 }
 
+
+void verifyResultMemo(bool benchmark = false) {
+    const bool memo = std::getenv("APS5_NO_RESULT_MEMO") == nullptr;
+    const bool refresh = std::getenv("APS5_NO_RESULT_MEMO_USER_DATA") == nullptr;
+    for (const auto pushBytes : {128u, 0u}) {
+        PlanFixture fixture;
+        fixture.codeAddress = 0x900000u + pushBytes * 256u;
+        fixture.code = {0xf4000100u, 0xfa000000u, 0xbf8cc07fu, 0x7e020204u, 0x34040082u, 0xe0701000u, 0x80020102u, 0xbf810000u};
+        fixture.userData = {0x100000u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0x200000u, 0u, 256u, 0x31016facu};
+        fixture.regions = {{0x100000u, {0x12345678u}}};
+        auto request = fixture.Request(true);
+        request.layout.pushConstantSizeBytes = pushBytes;
+        const auto capture = [&] {
+            RequestMemoryView view(request.context.memory);
+            return CaptureResources(request, view.MakeRuntime(request.context.userData, request.shader.codeAddress));
+        };
+        auto firstCapture = capture();
+        bool hit = true;
+        const auto first = Recompile(request, *firstCapture, &hit);
+        require(!hit, "first memo invocation hit");
+        require(std::ranges::find(first->shaderDataUserWords, 0u) != first->shaderDataUserWords.end(), "memo test did not forward the root pointer");
+        const auto check = [&](const ResourceCapture& input, bool expected, const char* label) {
+            bool memoHit = false;
+            const auto result = Recompile(request, input, &memoHit);
+            require(memoHit == (memo && expected), std::string(label) + ": unexpected memo path");
+            auto uncached = request;
+            uncached.useCache = false;
+            requireSameResult(*Recompile(uncached, input), *result, label);
+            return result;
+        };
+        check(*firstCapture, true, "identical invocation");
+        fixture.userData[0] += 0x1000u;
+        fixture.regions[0].first += 0x1000u;
+        request = fixture.Request(true);
+        request.layout.pushConstantSizeBytes = pushBytes;
+        const auto movedCapture = capture();
+        const auto moved = check(*movedCapture, refresh, "moved root pointer");
+        require(first->pushConstants != moved->pushConstants || !sameBindings(first->bindings, moved->bindings), "moved root pointer was not refreshed");
+        requireSameResult(*Recompile(request, *firstCapture), *first, "immutable donor after patch");
+        auto unused = *movedCapture;
+        unused.snapshot.userData[7] = 0xfeed1234u;
+        check(unused, refresh, "unused user word");
+        auto changed = *movedCapture;
+        changed.snapshot.buffers.at(0).dwords[0] += 0x2000u;
+        check(changed, false, "changed buffer descriptor");
+        changed = *movedCapture;
+        changed.snapshot.nullRootReads += 1u;
+        check(changed, false, "changed poison count");
+        changed = *movedCapture;
+        require(!changed.snapshot.flattenedSrt.empty(), "memo fixture has no flat SRT");
+        changed.snapshot.flattenedSrt[0] ^= 1u;
+        check(changed, false, "changed flattened SRT");
+        auto collision = *movedCapture;
+        collision.snapshot.tables.ranges = {{0u, 0u}};
+        check(collision, false, "collision donor");
+        std::uint64_t hash = 0xcbf29ce484222325ull;
+        constexpr std::uint64_t prime = 0x100000001b3ull;
+        const auto mix = [&](std::uint64_t value) { hash = (hash ^ value) * prime; };
+        const auto descriptors = [&](const auto& values) {
+            mix(values.size());
+            for (const auto& value : values) {
+                mix(value.dwordCount);
+                mix(value.availableDwordMask);
+                for (const auto word : value.dwords) mix(word);
+            }
+        };
+        const auto words = [&](const auto& values) { mix(values.size()); for (const auto word : values) mix(word); };
+        const auto& snapshot = collision.snapshot;
+        descriptors(snapshot.buffers);
+        descriptors(snapshot.images);
+        descriptors(snapshot.samplers);
+        words(snapshot.flattenedSrt);
+        if (!refresh) words(snapshot.userData);
+        mix(static_cast<std::uint64_t>(snapshot.uniformFill.kind));
+        mix(snapshot.uniformFill.resource);
+        for (const auto stride : snapshot.uniformFill.groupStride) mix(stride);
+        mix(snapshot.uniformFill.words);
+        mix(snapshot.uniformFill.value);
+        mix(snapshot.tables.shader);
+        mix(0u);
+        mix(0u);
+        mix(1u);
+        collision.snapshot.tables.ranges[0] = {1u, (hash * prime) ^ ((hash ^ 1u) * prime)};
+        const auto collisions = ResultMemoIdentityCollisions();
+        check(collision, false, "equal hash with different identity");
+        require(ResultMemoIdentityCollisions() == collisions + (memo ? 1u : 0u), "the collision fixture did not exercise an equal-hash identity refusal");
+        auto original = *movedCapture;
+        original.snapshot.tables.ranges = {{0u, 0u}};
+        check(original, false, "collision replaced, original not aliased");
+        std::array<std::future<std::shared_ptr<const RecompileResult>>, 8> concurrent;
+        for (std::size_t index = 0; index < concurrent.size(); ++index) {
+            concurrent[index] = std::async(std::launch::async, [&, index] {
+                auto input = *movedCapture;
+                input.snapshot.userData[0] += static_cast<std::uint32_t>(index) * 0x100u;
+                auto uncached = request;
+                uncached.useCache = false;
+                const auto result = Recompile(request, input);
+                requireSameResult(*Recompile(uncached, input), *result, "concurrent user-data refresh");
+                return result;
+            });
+        }
+        for (auto& result : concurrent) static_cast<void>(result.get());
+        if (benchmark) {
+            auto input = *movedCapture;
+            std::uint64_t hits = 0;
+            const auto started = std::chrono::steady_clock::now();
+            std::shared_ptr<const RecompileResult> result;
+            for (std::uint32_t iteration = 0; iteration < 4096u; ++iteration) {
+                input.snapshot.userData[0] = 0x800000u + iteration * 16u;
+                bool memoHit = false;
+                result = Recompile(request, input, &memoHit);
+                hits += memoHit ? 1u : 0u;
+            }
+            const auto elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+            auto uncached = request;
+            uncached.useCache = false;
+            requireSameResult(*Recompile(uncached, input), *result, "benchmark final result");
+            std::cout << "Memo bench: push bytes " << pushBytes << ", 4096 moved-user-data invocations, " << hits << " hits, " << elapsed / 4096.0 << " us per invocation\n";
+        }
+    }
+    std::cout << "Result memo push/storage refresh, invalidation, collision refusal and concurrency passed\n";
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -2149,6 +2273,10 @@ void verifyDefaultDirectory(const char* self) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && (std::string_view(argv[1]) == "--result-memo" || std::string_view(argv[1]) == "--result-memo-bench")) {
+            verifyResultMemo(std::string_view(argv[1]) == "--result-memo-bench");
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--resource-plan-codec") {
             verifyResultRoundTrip();
             verifyEntryRoundTrip();

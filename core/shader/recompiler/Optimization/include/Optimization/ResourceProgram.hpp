@@ -28,6 +28,7 @@ private:
 [[nodiscard]] IrProgram PrepareResourceProgram(const RecompileRequest& request);
 [[nodiscard]] IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparationContext* preparation);
 [[nodiscard]] std::uint64_t FrontEndBuilds();
+[[nodiscard]] std::uint64_t ResultMemoIdentityCollisions();
 [[nodiscard]] std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request);
 
 struct ResourceCapture {

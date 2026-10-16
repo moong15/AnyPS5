@@ -38,6 +38,27 @@ std::atomic<std::uint64_t> specializationNanoseconds{0};
 std::atomic<std::uint64_t> evaluateNanoseconds{0};
 std::atomic<std::uint64_t> materializeNanoseconds{0};
 
+bool onlyAddressBase(const IrValue& value, const IrResourcePlan& plan, bool handle = false, std::uint32_t depth = 0) {
+    if (depth >= 16) return false;
+    for (const auto& use : value.OperandUses()) {
+        const auto& user = *use.user;
+        if (user.IsIdentity() && use.operand == 0) {
+            if (!onlyAddressBase(user, plan, handle, depth + 1)) return false;
+        } else if (!handle && use.operand == 0 && (user.Opcode() == IrOpcode::CompositeConstructU32x2 || user.Opcode() == IrOpcode::CompositeConstructU32x4 || user.Opcode() == IrOpcode::GetAddressResource || user.Opcode() == IrOpcode::GetBufferResource)) {
+            if (!onlyAddressBase(user, plan, true, depth + 1)) return false;
+        } else if (handle && use.operand == 0 && (user.Opcode() == IrOpcode::LoadAddressU32 || user.Opcode() == IrOpcode::ReadConstBuffer)) {
+            const auto index = user.Flags<MemoryFlags>().index;
+            if (index >= plan.memoryInfo.size()) return false;
+            const auto kind = plan.memoryInfo[index].kind;
+            if (kind != ResourceKind::ScalarAddress && kind != ResourceKind::ScalarBuffer) return false;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 bool MaterializeProfiled() {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     return profile;
@@ -1648,6 +1669,16 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.shaderHash = source.shaderHash;
     plan.userDataBase = source.userDataBase;
     plan.userDataCount = source.userDataCount;
+    plan.userDataValues = 0;
+    for (const auto& block : program.Blocks()) {
+        for (const auto* value : block->Instructions()) {
+            if (value->Opcode() != IrOpcode::GetUserData) continue;
+            const auto reg = value->Argument(0)->Register().index;
+            if (reg < source.userDataBase || reg - source.userDataBase >= 64) continue;
+            const bool control = std::any_of(program.Metadata().blockInfo.begin(), program.Metadata().blockInfo.end(), [&](const auto& info) { return (info.condition != nullptr && info.condition->Resolve() == value) || (info.indirectTarget != nullptr && info.indirectTarget->Resolve() == value); });
+            if (control || !onlyAddressBase(*value, source)) plan.userDataValues |= std::uint64_t {1} << (reg - source.userDataBase);
+        }
+    }
     plan.srgbDecodeFormats = source.srgbDecodeFormats;
     plan.memoryInfo = source.memoryInfo;
     plan.descriptorSources = source.descriptorSources;

@@ -156,6 +156,7 @@ struct IrResourcePlan {
     std::uint64_t shaderHash = 0;
     std::uint32_t userDataBase = 0;
     std::uint32_t userDataCount = 64;
+    std::uint64_t userDataValues = ~std::uint64_t {0};
     std::uint32_t srgbDecodeFormats = 0;
     IrValueArena valueStorage;
     std::vector<std::unique_ptr<IrBlock>> blockStorage;

@@ -67,6 +67,7 @@ void Driver::reportDispatchCache(EntryCounters& counters) {
         dataRanks += text;
     }
     AgcDriver::ProfilePrint_nid_no_patch("[dispatch-cache] data hits (10 s): %llu (%llu words refreshed; by rank 1..k %s; %llu data variants missed on pending runs), verified %llu; inserts with data positions %llu of %llu (%.1f positions each), leaves skipped: unmapped %llu, mismatched %llu, aliased %llu\n", count(counters.dataHits), count(counters.dataWordsRefreshed), dataRanks.c_str(), count(dataPendingMisses.exchange(0, std::memory_order_relaxed)), count(counters.dataVerified), count(counters.dataInserts), count(counters.inserts), counters.dataInserts != 0 ? static_cast<double>(counters.dataPositionsInserted) / static_cast<double>(counters.dataInserts) : 0.0, count(counters.dataLeavesUnmapped), count(counters.dataLeavesMismatched), count(counters.dataLeavesAliased));
+    AgcDriver::ProfilePrint_nid_no_patch("[dispatch-cache] relocation (10 s): %llu alias lookups, %llu alias hits; refusals: unreadable %llu, user words %llu, address range %llu, shader-data patches %llu, validation %llu; %zu shader sets learned, %zu aliases held\n", count(counters.aliasLookups), count(counters.aliasHits), count(counters.aliasUnreadable), count(counters.aliasWords), count(counters.aliasRange), count(counters.aliasPatches), count(counters.aliasValidation), dispatchRelocations.size(), dispatchAliases.size());
     counters = EntryCounters{};
 }
 
