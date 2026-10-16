@@ -111,6 +111,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
     auto lastDone = packetsDone.load();
 
     GuestMemory::TagGpuLockThread(queue);
+    workerQueue() = queue;
     auto& outcomes = waitOutcomes();
     const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
     const std::size_t awaitedBytes = Pm4::WaitAwaitedBytes(packet);

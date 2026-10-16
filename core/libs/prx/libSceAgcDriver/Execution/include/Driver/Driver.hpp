@@ -298,6 +298,11 @@ private:
     static Graphics::Recorder::LateStatistics& lateCountsSeen();
     static EpochBumps& epochBumps();
     static void bumpEpoch(std::uint64_t EpochBumps::*counter);
+    // The queue whose worker owns this thread, or QueueUnknown off one. An ordering point is that
+    // queue's alone (a submission, a wait, a drain, a reap its worker made), so the collect scope
+    // the draw-commit thread uses for that queue's items only moves for it.
+    static constexpr std::uint32_t QueueUnknown = 0xffffffff;
+    static std::uint32_t& workerQueue();
     static std::chrono::steady_clock::time_point& lastEpochBump();
     static std::deque<const std::uint32_t*>& releasedTails();
     void noteReleasedTails(const Submission& submission);

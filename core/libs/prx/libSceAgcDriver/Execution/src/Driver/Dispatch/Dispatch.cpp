@@ -456,9 +456,10 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         const auto recipe = keepVariant->recipe.load(std::memory_order_acquire);
         const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
         const auto queueId = submission.queue;
+        const auto queueEpoch = DrawPipeline::QueueEpochToken(queueId).load(std::memory_order_relaxed);
         itemCommits.fetch_add(1, std::memory_order_relaxed);
-        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, snapshots = std::move(snapshots), groups, address, queueId, recipe, keepVariant, dataHit, epoch] {
-            DrawPipeline::FollowEpoch(epoch);
+        DrawPipeline::Queue0().Enqueue([this, localDevice = std::move(localDevice), result = compiledResult, snapshots = std::move(snapshots), groups, address, queueId, recipe, keepVariant, dataHit, epoch, queueEpoch] {
+            DrawPipeline::FollowEpoch(queueId, epoch, queueEpoch);
             GuestMemory::SetCurrentPacket(0x15, queueId);
             const auto& compiledCommit = *result;
             const bool noteWrites = writeEvidenceEnabled() || traceCapSync();

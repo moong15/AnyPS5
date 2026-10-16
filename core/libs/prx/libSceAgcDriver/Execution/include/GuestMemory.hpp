@@ -95,11 +95,24 @@ bool StoredAllSince_nid_no_patch(std::uint64_t address, std::size_t bytes, std::
 // (at entry, polled, timed out, or by another queue's recorded label; a label this queue recorded
 // itself orders no CPU write), a device drain, and before reaping completions outside a submission.
 // A thread that never bumps (the presenter, game threads inside the flush hook) gets a fresh epoch
-// for every collect: nothing is reused without an ordering point. APS5_PACKET_EPOCH=1 makes the
-// workers bump before every packet as before. CollectEpochBumps counts the bumps ([guestmem] line).
+// for every collect: nothing is reused without an ordering point. The draw-commit thread commits
+// several queues' items, so it holds one epoch per queue with SetCollectScope instead (an ordering
+// point on one queue does not order another queue's CPU writes, which is what the workers above
+// already assume). APS5_PACKET_EPOCH=1 makes the workers bump before every packet as before.
+// CollectEpochBumps counts the bumps, CollectScopeSwitches the scope changes ([guestmem] line).
 void BumpCollectEpoch();
+// Collect scope: the ordering point of one queue, for a thread that commits several queues' work
+// (the draw-commit thread). BumpCollectEpoch takes a value from a counter no other source can
+// produce, so one walk is never reused for another thread or another queue. A scope value has the
+// top bit set and the queue in its lowest byte, so a scope never collides with a worker epoch, and
+// the collect memo keeps one range map per scope (see GuestMemory.cpp): switching the scope drops
+// the previous queue's entries from the per-thread ring but not from its own range map, so the
+// thread reuses a walk for a later item of the same queue that reached the same ordering point
+// while never reusing it for another queue's item.
+void SetCollectScope(std::uint32_t queue, std::uint64_t token);
 std::uint64_t CollectEpoch();
 std::uint64_t CollectEpochBumps();
+std::uint64_t CollectScopeSwitches();
 std::uint64_t ThreadCollectEpoch();
 std::uint64_t UnwatchSerial();
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes);
@@ -183,6 +196,11 @@ void NoteLockedGpuWait(double ms);
 // Bytes the calling thread's write-watch collects walked so far (0 without the memory profile):
 // a caller reads the difference across a span of its own work.
 std::uint64_t ThreadCollectedBytes();
+// Collects the calling thread skipped because the memo already proved their range this scope, and
+// the bytes those walks would have covered: the pages a memo saves. Sampled like
+// ThreadCollectedBytes (0 without the memory profile).
+std::uint64_t ThreadSkippedWalks();
+std::uint64_t ThreadSkippedBytes();
 // A code address (a return address) as an offset into its module, in the form of the [guestmem]
 // callers (symbolized with nm against the driver's image). Takes the loader lock: for reports only.
 unsigned long long CodeOffset(const void* address);

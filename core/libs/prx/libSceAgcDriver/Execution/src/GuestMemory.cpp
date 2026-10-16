@@ -86,6 +86,7 @@ std::atomic<std::uint64_t> forgetSerial{0};
 std::atomic<std::uint64_t> forgetBytes{0};
 std::atomic<std::uint64_t> collectMemoHits{0};
 std::atomic<std::uint64_t> collectEpochBumps{0};
+std::atomic<std::uint64_t> collectScopeSwitches{0};
 std::atomic<std::uint64_t> unwatchSerial{0};
 // Walks that reported at least one written page (the ones the probe pass used to double), and the
 // tracker mutex acquisitions that had to wait (APS5_PROFILE_DRAW; see lockTracker).
@@ -317,6 +318,7 @@ public:
             AgcDriver::ProfilePrint_nid_no_patch(" %s %llu calls %.0f MiB %.1f s", MemoryCounterNames[i], static_cast<unsigned long long>(totals[i][0]), totals[i][1] / 1048576.0, totals[i][2] / 1e9);
         }
         AgcDriver::ProfilePrint_nid_no_patch(" collect-memo hits %llu, collect epochs %llu", static_cast<unsigned long long>(collectMemoHits.load()), static_cast<unsigned long long>(collectEpochBumps.load()));
+        AgcDriver::ProfilePrint_nid_no_patch(" collect scopes %llu", static_cast<unsigned long long>(collectScopeSwitches.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" collect-dirty %llu tracker waits %llu / %llu", static_cast<unsigned long long>(collectDirty.load()), static_cast<unsigned long long>(trackerWaits.load()), static_cast<unsigned long long>(trackerAcquisitions.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" | arena 0x%llx+0x%llx image 0x%llx+0x%llx forgets %llu (%.0f MiB)", static_cast<unsigned long long>(PagesBase()), static_cast<unsigned long long>(PagesSize()), static_cast<unsigned long long>(ImagePagesBase()), static_cast<unsigned long long>(ImagePagesSize()), static_cast<unsigned long long>(forgetCalls.load()), forgetBytes.load() / 1048576.0);
         {
@@ -1083,19 +1085,48 @@ struct ThreadCollectMemo {
 };
 thread_local ThreadCollectMemo threadCollectMemo;
 
+// Walks the calling thread's memo replaced, and the bytes they would have covered: what a caller
+// spends on its own (see ThreadSkippedWalks). Kept with the profile so an unprofiled run pays
+// nothing for them.
+thread_local std::uint64_t threadSkippedWalks = 0;
+thread_local std::uint64_t threadSkippedBytes = 0;
+
+void noteSkippedWalk(std::size_t bytes) {
+    if (!MemoryProfiled()) return;
+    ++threadSkippedWalks;
+    threadSkippedBytes += bytes;
+}
+
 struct EpochCollectMap {
-    std::uint64_t epoch = 0;
-    std::unordered_map<std::uintptr_t, WriteTracker::Memo> ranges;
+    // One range map per epoch the thread has used. A queue worker only ever holds one epoch at a
+    // time (the map in use is the only one filled), while the draw-commit thread runs under one
+    // epoch per queue scope and switches between them for every item it commits of another queue;
+    // keeping a map per scope is what lets it come back to a queue and reuse its walks. An epoch of
+    // 0 is never handed out (BumpCollectEpoch starts at 2, a scope has its top bit set), so a fresh
+    // slot never matches by accident.
+    struct Scopes {
+        std::uint64_t epoch = 0;
+        std::unordered_map<std::uintptr_t, WriteTracker::Memo> ranges;
+    };
+    static constexpr std::size_t ScopeCount = 8;
+    std::array<Scopes, ScopeCount> scopes{};
+    std::size_t next = 0;
+
+    Scopes& slot(std::uint64_t epoch) {
+        for (auto& scope : scopes) {
+            if (scope.epoch == epoch) return scope;
+        }
+        auto& scope = scopes[next++ % ScopeCount];
+        scope.epoch = epoch;
+        scope.ranges.clear();
+        return scope;
+    }
 };
 
-EpochCollectMap& epochCollectMap(std::uint64_t epoch) {
+EpochCollectMap::Scopes& epochCollectMap(std::uint64_t epoch) {
     thread_local EpochCollectMap* slot = nullptr;
     auto& map = ShaderRecompiler::ThreadOwned(slot);
-    if (map.epoch != epoch) {
-        map.ranges.clear();
-        map.epoch = epoch;
-    }
-    return map;
+    return map.slot(epoch);
 }
 
 bool epochCollectMapEnabled() {
@@ -1192,6 +1223,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
             const auto& map = epochCollectMap(epoch);
             if (const auto found = map.ranges.find(first); found != map.ranges.end() && found->second.unwatched == unwatched && stop <= found->second.end) {
                 collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                noteSkippedWalk(bytes);
                 return tracker.generation.load(std::memory_order_relaxed);
             }
         }
@@ -1201,6 +1233,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
                 // overlapping collect) were written before this caller reads, and an older value would
                 // make every later UnchangedSince fail until the epoch ends.
                 collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                noteSkippedWalk(bytes);
                 return tracker.generation.load(std::memory_order_relaxed);
             }
         }
@@ -1213,6 +1246,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         for (const auto& entry : tracker.memo) {
             if (entry.epoch == epoch && entry.unwatched == unwatchSerial.load(std::memory_order_relaxed) && entry.begin <= cursor && stop <= entry.end) {
                 collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                noteSkippedWalk(bytes);
                 return tracker.generation;
             }
         }
@@ -1259,6 +1293,18 @@ void BumpCollectEpoch() {
     collectEpochBumps.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Collect scopes (see GuestMemory.hpp): the epoch of a thread that commits several queues' work is
+// a value of its own, built from the queue and the ordering point that queue reached, so a walk
+// made for one queue's item is never matched by another queue's item. The top bit separates the two
+// sources (a worker epoch counts from 2 and would need 2^63 bumps to reach it) and the queue sits in
+// the lowest byte, so two queues at the same ordering point still get different epochs.
+void SetCollectScope(std::uint32_t queue, std::uint64_t token) {
+    constexpr std::uint64_t ScopeBit = std::uint64_t{1} << 63;
+    constexpr std::uint64_t TokenMask = 0x00ffffffffffffffull;
+    threadCollectEpoch = ScopeBit | ((token & TokenMask) << 8) | std::min<std::uint32_t>(queue, 0xffu);
+    collectScopeSwitches.fetch_add(1, std::memory_order_relaxed);
+}
+
 std::uint64_t ThreadCollectEpoch() {
     return collectMemoEnabled() ? threadCollectEpoch : 0;
 }
@@ -1269,6 +1315,10 @@ std::uint64_t UnwatchSerial() {
 
 std::uint64_t CollectEpochBumps() {
     return collectEpochBumps.load(std::memory_order_relaxed);
+}
+
+std::uint64_t CollectScopeSwitches() {
+    return collectScopeSwitches.load(std::memory_order_relaxed);
 }
 
 std::uint64_t CollectEpoch() {
@@ -2049,6 +2099,14 @@ void NoteLockedGpuWait(double ms) {
 std::uint64_t ThreadCollectedBytes() {
     if (!MemoryProfiled()) return 0;
     return CounterFor(CounterCollect).bytes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ThreadSkippedWalks() {
+    return MemoryProfiled() ? threadSkippedWalks : 0;
+}
+
+std::uint64_t ThreadSkippedBytes() {
+    return MemoryProfiled() ? threadSkippedBytes : 0;
 }
 
 std::uint32_t GpuLockThreadTag() {

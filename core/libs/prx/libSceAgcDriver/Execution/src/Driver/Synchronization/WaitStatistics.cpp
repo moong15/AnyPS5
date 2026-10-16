@@ -30,10 +30,15 @@ std::chrono::steady_clock::time_point& Driver::lastEpochBump() {
     return at;
 }
 
+std::uint32_t& Driver::workerQueue() {
+    static thread_local std::uint32_t queue = Driver::QueueUnknown;
+    return queue;
+}
+
 void Driver::bumpEpoch(std::uint64_t EpochBumps::*counter) {
     lastEpochBump() = std::chrono::steady_clock::now();
     GuestMemory::BumpCollectEpoch();
-    if (DrawPipeline::Active()) DrawPipeline::EpochToken().fetch_add(1, std::memory_order_relaxed);
+    DrawPipeline::BumpEpoch(workerQueue());
     ++(epochBumps().*counter);
 }
 

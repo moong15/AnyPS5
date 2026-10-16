@@ -23,13 +23,23 @@ public:
     using Commit = std::function<void()>;
     using Range = std::pair<std::uint64_t, std::uint64_t>;
     enum class DrainReason : std::uint8_t { Packet, Flush, Labels, Capture, Indirect, Submission, Count };
+    // One token per queue a worker can own: advanced by that queue's own ordering points, and by
+    // every queue's when a bump is made off a queue worker (nothing then orders one queue's CPU
+    // writes without another's). EpochToken is the device-wide token, advanced by every bump.
+    static constexpr std::size_t QueueCount = 16;
 
     static DrawPipeline& Queue0();
     static std::size_t Depth();
     static std::size_t QueuedItems();
     static bool& Active();
     static std::atomic<std::uint64_t>& EpochToken();
-    static void FollowEpoch(std::uint64_t token);
+    static std::atomic<std::uint64_t>& QueueEpochToken(std::uint32_t queue);
+    static void BumpEpoch(std::uint32_t queue);
+    // Puts the committing thread under the ordering point the item's queue reached. One epoch for
+    // the whole thread under APS5_NO_TARGET_WALK_SKIP=1 (the shared token alone, as before);
+    // otherwise one scope per queue, so a walk made for a queue's item is reused for that queue's
+    // later items and never for another queue's.
+    static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
 
     void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {});
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);

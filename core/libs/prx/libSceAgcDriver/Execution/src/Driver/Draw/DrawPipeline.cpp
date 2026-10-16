@@ -52,11 +52,42 @@ std::atomic<std::uint64_t>& DrawPipeline::EpochToken() {
     return token;
 }
 
-void DrawPipeline::FollowEpoch(std::uint64_t token) {
-    static thread_local std::uint64_t followed = 0;
-    if (followed == token) return;
-    followed = token;
-    GuestMemory::BumpCollectEpoch();
+std::atomic<std::uint64_t>& DrawPipeline::QueueEpochToken(std::uint32_t queue) {
+    static std::array<std::atomic<std::uint64_t>, DrawPipeline::QueueCount> tokens{};
+    return tokens[std::min<std::size_t>(queue, tokens.size() - 1)];
+}
+
+void DrawPipeline::BumpEpoch(std::uint32_t queue) {
+    if (!Active()) return;
+    EpochToken().fetch_add(1, std::memory_order_relaxed);
+    // A bump no queue owns orders every queue's CPU writes (the presenter's drain, a reap off the
+    // workers), so every queue's token moves.
+    if (queue >= DrawPipeline::QueueCount) {
+        for (std::size_t i = 0; i < DrawPipeline::QueueCount; ++i) QueueEpochToken(static_cast<std::uint32_t>(i)).fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    QueueEpochToken(queue).fetch_add(1, std::memory_order_relaxed);
+}
+
+void DrawPipeline::FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken) {
+    static const bool scoped = std::getenv("APS5_NO_TARGET_WALK_SKIP") == nullptr;
+    if (!scoped) {
+        static thread_local std::uint64_t followed = 0;
+        if (followed == sharedToken) return;
+        followed = sharedToken;
+        GuestMemory::BumpCollectEpoch();
+        return;
+    }
+    // The scope belongs to the item being committed, not to the last token that moved: coming back
+    // to a queue whose ordering point has not moved must return to that queue's scope, or its
+    // items would reuse whichever queue's scope ran in between.
+    static thread_local std::size_t scope = DrawPipeline::QueueCount;
+    static thread_local std::uint64_t token = 0;
+    const auto slot = std::min<std::size_t>(queue, DrawPipeline::QueueCount - 1);
+    if (scope == slot && token == queueToken) return;
+    scope = slot;
+    token = queueToken;
+    GuestMemory::SetCollectScope(static_cast<std::uint32_t>(slot), queueToken);
 }
 
 void DrawPipeline::rethrowFailure() {

@@ -522,6 +522,28 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+add_test_executable(agc_target_walk_skip_tests EXCLUDE_FROM_ALL
+        tests/TargetWalkSkip.cpp
+        Execution/src/GuestMemory.cpp
+)
+target_include_directories(agc_target_walk_skip_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_target_walk_skip_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_target_walk_skip_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_target_walk_skip_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_target_walk_skip_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_target_walk_skip COMMAND agc_target_walk_skip_tests)
+    set_tests_properties(agc_target_walk_skip PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_PROFILE_DRAW=1")
+    add_test(NAME agc_target_walk_skip_off COMMAND agc_target_walk_skip_tests)
+    set_tests_properties(agc_target_walk_skip_off PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_PROFILE_DRAW=1;APS5_NO_TARGET_WALK_SKIP=1")
+    if(WIN32)
+        set_tests_properties(agc_target_walk_skip PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(agc_target_walk_skip_off PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_thread_priority_tests EXCLUDE_FROM_ALL
         tests/ThreadPriority.cpp
         Execution/src/ThreadPriority.cpp
