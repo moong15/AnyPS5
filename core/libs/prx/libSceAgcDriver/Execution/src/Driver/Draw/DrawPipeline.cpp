@@ -18,6 +18,12 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point since) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - since).count());
 }
 
+// HeldReads: the read ranges the queue holds, and how often a store asked about one (hits are
+// deferred write-backs that waited for a queued index read).
+std::atomic<std::uint64_t> heldReadRanges{0};
+std::atomic<std::uint64_t> heldReadQueries{0};
+std::atomic<std::uint64_t> heldReadHits{0};
+
 }
 
 DrawPipeline& DrawPipeline::Queue0() {
@@ -96,7 +102,7 @@ void DrawPipeline::rethrowFailure() {
     std::rethrow_exception(error);
 }
 
-void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes) {
+void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     std::unique_lock lock(mutex);
     rethrowFailure();
@@ -111,7 +117,8 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     }
     depthSum += items.size();
     ++enqueued;
-    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes)});
+    heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
+    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads)});
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) thread = std::thread([this] { run(); });
     if (committerWaiting) wake.notify_one();
@@ -141,7 +148,10 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
     const auto perCommit = commits == 0 ? 0.0 : static_cast<double>(commitNs) / 1e3 / static_cast<double>(commits);
     const auto perDraw = enqueued == 0 ? 0.0 : static_cast<double>(fullWaitNs) / 1e3 / static_cast<double>(enqueued);
     const auto queued = enqueued == 0 ? 0.0 : static_cast<double>(depthSum) / static_cast<double>(enqueued);
-    std::fprintf(stderr, "[draw] pipelined (10 s, depth %zu): %llu commits at %.1f us each on the committer, %llu failed; %llu enqueued behind %.2f on average, waiting %.1f us per draw for room; drains:%s\n", Depth(), static_cast<unsigned long long>(commits), perCommit, static_cast<unsigned long long>(commitErrors), static_cast<unsigned long long>(enqueued), queued, perDraw, drainText.c_str());
+    char reads[64];
+    std::snprintf(reads, sizeof(reads), " %llu read ranges, %llu stores held", static_cast<unsigned long long>(heldReadRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadHits.exchange(0, std::memory_order_relaxed)));
+    drainText += reads;
+    std::fprintf(stderr, "[draw] pipelined (10 s, depth %zu): %llu commits at %.1f us each on the committer, %llu failed; %llu enqueued behind %.2f on average, waiting %.1f us per draw for room;%s; drains:%s\n", Depth(), static_cast<unsigned long long>(commits), perCommit, static_cast<unsigned long long>(commitErrors), static_cast<unsigned long long>(enqueued), queued, perDraw, reads, drainText.c_str());
     commits = commitNs = commitErrors = enqueued = fullWaitNs = depthSum = 0;
     drains = {};
     drainWaitNs = {};
@@ -206,6 +216,28 @@ void DrawPipeline::Drain(DrainReason reason, std::uint32_t opcode) {
 
 std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
     return Queue0().drainRequests[std::min<std::uint32_t>(opcode, 0x100)].load(std::memory_order_relaxed);
+}
+
+// The index range of a commit that has been decoded but has not run yet is still a guest read at
+// the commit's own place in the command stream: the packets that came after it must not store into
+// those bytes first. The item is in the queue while its commit runs, so a commit's own flush of a
+// deferred write is held back too, and the image keeps its results for the consumer that follows the
+// draw. Off with APS5_NO_QUEUED_DRAW_READ_ORDER=1 (the pre-fix behaviour, write-backs overtake
+// queued index reads).
+bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") != nullptr) return false;
+    const auto end = address + bytes;
+    auto& pipeline = Queue0();
+    std::lock_guard lock(pipeline.mutex);
+    heldReadQueries.fetch_add(1, std::memory_order_relaxed);
+    for (const auto& item : pipeline.items) {
+        for (const auto& [begin, limit] : item.reads) {
+            if (address >= limit || begin >= end) continue;
+            heldReadHits.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
 }
 
 std::optional<std::uint64_t> DrawPipeline::PendingLabel(std::uint64_t address, std::size_t bytes) {
