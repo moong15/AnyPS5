@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace AgcDriver::DriverDetail {
 
@@ -671,7 +672,15 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             }
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
-        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes));
+        // The index range the commit reads in place belongs to this draw's place in the command
+        // stream, not to the commit's: hold it against the writes the packets behind this one
+        // record while the commit waits (see DrawPipeline::HeldReads).
+        std::vector<DrawPipeline::Range> reads;
+        if (drawParameters.indexed && drawParameters.indexSize != 0 && drawParameters.indexCount != 0) {
+            const auto bytes = static_cast<std::uint64_t>(drawParameters.indexCount) * drawParameters.indexSize;
+            if (bytes != 0 && drawParameters.indexAddress <= std::numeric_limits<std::uint64_t>::max() - bytes) reads.emplace_back(drawParameters.indexAddress, drawParameters.indexAddress + bytes);
+        }
+        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads));
         phaseTiming.Phase(DrawRowLockWait);
         timing.Mark("draw_enqueued");
         return drawn();
