@@ -1398,7 +1398,10 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
 const char* ResourceMaterializer::UnnormalizedSampleMismatch(const ImageResource& image) {
     if (image.table != NoTable) return "samples an image selected at run time";
     if (image.constantSwizzle) return nullptr;
-    if ((image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D) || image.cube) return "samples a 1D-array, 2D-array, 3D, cube or multisampled image";
+    // A 3D view normalizes exactly like a 1D or 2D one: the emulated sample divides the texel
+    // coordinate by the base-level extent componentwise (OpImageQuerySizeLod returns a uvec3 for
+    // Dim3D) and forces LOD zero, so the third component needs nothing the other two do not.
+    if ((image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D && image.dimension != RdnaImageDimension::Dim3D) || image.cube) return "samples a 1D-array, 2D-array, cube or multisampled image";
     if (image.depthCompare) return "is used with depth comparison";
     if (image.conversionFormat != IrBufferFormat::Invalid || image.packed) return "samples an image that needs a format conversion or packed access";
     return nullptr;

@@ -4117,13 +4117,13 @@ void verifyUnnormalizedSamplers() {
     reject(0xf1800308u, userData(unnormalized), "unnormalized guest sampler is used by image_get_lod, which is not implemented", "unnormalized samplers: image_get_lod was accepted");
     require(proven(recompile(program(0xf0880f08u), userData(unnormalized)), true), "unnormalized sampler derivatives or adjusted sample was not normalized");
     require(proven(recompile(program(0xf0800f09u), userData(unnormalized)), true), "unnormalized sampler derivatives or adjusted sample was not normalized");
-    reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
+    reject(0xf09c0f18u, imageData(unnormalized, TypeCube, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a cube T# was accepted");
     require(proven(recompile(program(0xf09c0f10u), imageData(unnormalized, Type3D, Format8888UNorm, 3u)), true), "unnormalized samplers: a 3D T# was not normalized for native sampling");
-    reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
+    reject(0xf09c0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a 2D-array sample was accepted");
     reject(0xf09c0f08u, imageData(unnormalized, Type2D, Format11_11_10UInt, 0u), "unnormalized guest sampler samples an image that needs a format conversion or packed access", "unnormalized samplers: a T# with a format conversion was accepted");
     reject(0xf15c0108u, userData(unnormalized), "unnormalized guest sampler is used by a gather, which is not implemented", "unnormalized samplers: image_gather4_lz_o was accepted");
     reject(0xf0fc0f08u, imageData(unnormalized, Type2D, Format32Float, 0u), "unnormalized guest sampler is used with depth comparison, which is not implemented", "unnormalized samplers: image_sample_c_lz_o was accepted");
-    reject(0xf0dc0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 2D-array image_sample_lz_o was accepted");
+    reject(0xf0dc0f28u, imageData(unnormalized, Type2DArray, Format8888UNorm, 5u), "unnormalized guest sampler samples a 1D-array, 2D-array, cube or multisampled image", "unnormalized samplers: a 2D-array image_sample_lz_o was accepted");
     for (const std::uint32_t mimg : {0xf0c00f08u, 0xf11c0108u, 0xf09c0f18u}) {
         static_cast<void>(recompile(program(mimg), imageData(normalized, mimg == 0xf09c0f18u ? TypeCube : Type2D, Format8888UNorm, mimg == 0xf09c0f18u ? 5u : 0u)));
     }
@@ -4332,7 +4332,11 @@ void verifyUnusedUnnormalizedSampler() {
     require(atBaseLevel(implicitUse) == std::vector<bool>{true}, "unnormalized samplers: an image read through an S# without a mip filter was not flagged as exact at its base level");
     require(atBaseLevel(selectedLod) == std::vector<bool>{true}, "unnormalized samplers: an image read at a selected LOD through an S# without a mip filter was not flagged as exact at its base level");
     snapshot.samplers[0].dwords[2] = 0x05500180u;
-    require(atBaseLevel(implicitUse) == std::vector<bool>{false}, "unnormalized samplers: an image read through an S# with a point mip filter was flagged as exact at its base level");
+    // The emulated sampler is built with VK_SAMPLER_MIPMAP_MODE_NEAREST and a zero LOD range
+    // (GuestSamplerResource.cpp), so the guest S#'s mip filter cannot reach the sample the way it
+    // did when unnormalized coordinates were passed through natively. This is the same reason the
+    // texel offset, selected LOD, minimum LOD and LOD bias cases above are all flagged exact.
+    require(atBaseLevel(implicitUse) == std::vector<bool>{true}, "unnormalized samplers: an image read through an S# with a linear mip filter was not flagged as exact at its base level");
     snapshot.samplers[0].dwords[1] = 0x00fff000u;
     snapshot.samplers[0].dwords[2] = 0x05500000u;
     snapshot.samplers[0].dwords[0] = 0x00000092u;
