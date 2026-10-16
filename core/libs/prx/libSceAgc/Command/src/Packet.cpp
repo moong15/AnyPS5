@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -66,6 +68,8 @@ std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* 
     Reserve(buffer, count, function);
     auto* result = buffer->cursor_up;
     buffer->cursor_up += count;
+    static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+    if (traceIndex && std::strstr(function, "Index") != nullptr) std::fprintf(stderr, "[index-hle] allocate function=%s buffer=%p packet=%p words=%u\n", function, static_cast<void*>(buffer), static_cast<void*>(result), count);
     return result;
 }
 

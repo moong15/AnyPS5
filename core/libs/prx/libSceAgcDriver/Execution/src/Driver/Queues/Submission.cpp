@@ -68,6 +68,7 @@ void Driver::noteReleasedTails(const Submission& submission) {
 
 void Driver::copyCommands(Submission& submission, const std::uint32_t* guest, std::size_t words) {
     submission.commands.clear();
+    submission.indexCommandSources.clear();
     submission.conditionalEnds.clear();
     std::size_t budget = std::size_t{1} << 26u;
     copySegment(submission, guest, words, budget);
@@ -100,6 +101,8 @@ bool Driver::copySegment(Submission& submission, const std::uint32_t* guest, std
         }
         reach(cursor, cursor + count);
         const auto opcode = (header >> 8u) & 0xffu;
+        static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+        if (traceIndex && (Pm4::DrawOpcode(opcode) || opcode == 0x11 || opcode == 0x13 || opcode == 0x26 || opcode == 0x2a || opcode == 0x91 || opcode == 0x64 || ((opcode == 0x79 || opcode == 0x7a) && count > 2 && (guest[cursor + 1] & ~0x70000000u) <= 0x243 && 0x243 - (guest[cursor + 1] & ~0x70000000u) < count - 2))) submission.indexCommandSources.emplace(submission.commands.size(), reinterpret_cast<std::uintptr_t>(guest + cursor));
         if (opcode == 0x3fu && count == 14) {
             const auto mode = guest[cursor + 1] & 3u;
             require(mode == 1u || mode == 2u, "invalid COND_INDIRECT_BUFFER mode");

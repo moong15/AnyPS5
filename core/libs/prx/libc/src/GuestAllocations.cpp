@@ -73,6 +73,11 @@ struct MutationState {
     std::vector<std::pair<std::uintptr_t, std::size_t>> gpuMapped;
 };
 
+void traceMapping(const char* operation, std::uintptr_t address, std::size_t bytes, int readable = -1, int writable = -1, int gpu = -1) {
+    static const bool enabled = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+    if (enabled) std::fprintf(stderr, "[index-map] op=%s address=0x%llx bytes=0x%llx readable=%d writable=%d gpu=%d generationBefore=%llu\n", operation, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), readable, writable, gpu, static_cast<unsigned long long>(generation.load(std::memory_order_acquire)));
+}
+
 void recordChange(void* mutation, const void* pointer, std::size_t bytes) {
     if (mutation != nullptr && bytes != 0) static_cast<MutationState*>(mutation)->changed.emplace_back(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 }
@@ -159,6 +164,7 @@ void GuestAllocationsSetInvalidator_nid_postfix(void (*callback)(std::uintptr_t,
 }
 
 void GuestAllocationsInvalidate_nid_postfix(std::uintptr_t address, std::size_t bytes) {
+    traceMapping("invalidate", address, bytes);
     generation.fetch_add(1, std::memory_order_release);
     if (const auto callback = invalidator.load(std::memory_order_acquire)) callback(address, bytes);
 }
@@ -297,6 +303,7 @@ void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t 
         require(previous.address + previous.bytes <= address, "overlapping guest allocation");
     }
     ranges.emplace(address, std::make_shared<const Range>(Range{address, bytes, readable, writable, address, bytes, true, gpu}));
+    traceMapping("add", address, bytes, readable, writable, gpu);
 }
 
 [[noreturn]] void PinnedFailure(std::uintptr_t address, std::size_t bytes, const char* why) {
@@ -452,6 +459,7 @@ void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer) {
     } else {
         std::erase_if(ranges, [&](const auto& entry) { return entry.second->allocationAddress == range.address; });
     }
+    traceMapping("remove", range.address, range.bytes);
     if (const auto observer = unmapObserver.load(std::memory_order_acquire)) observer(range.address, range.bytes);
 }
 
@@ -519,6 +527,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
     const auto patch = replaceRange(pointer, bytes, false, readable, writable, gpu);
     apply();
     applyPatch(patch);
+    traceMapping("protect", reinterpret_cast<std::uintptr_t>(pointer), bytes, readable, writable, gpu);
 }
 
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, std::size_t, const void*, bool)>& apply) {
@@ -546,6 +555,7 @@ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std:
         const bool last = !allocationRemains(range, patch);
         apply(reinterpret_cast<const void*>(cursor), pieceEnd - cursor, reinterpret_cast<const void*>(range.allocationAddress), last);
         applyPatch(patch);
+        traceMapping("unmap", cursor, pieceEnd - cursor);
         if (const auto observer = unmapObserver.load(std::memory_order_acquire)) observer(cursor, pieceEnd - cursor);
         any = true;
         cursor = pieceEnd;

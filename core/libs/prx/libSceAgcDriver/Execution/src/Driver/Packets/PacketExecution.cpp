@@ -19,6 +19,33 @@ namespace AgcDriver::DriverDetail {
 
 namespace {
 
+bool traceIndexBase() {
+    static const bool enabled = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+    return enabled;
+}
+
+void traceIndexPacket(const Submission& submission, std::size_t cursor, std::span<const std::uint32_t> packet, const QueueState& queue) {
+    if (!traceIndexBase()) return;
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    bool relevant = Pm4::DrawOpcode(opcode) || opcode == 0x11 || opcode == 0x13 || opcode == 0x26 || opcode == 0x2a || opcode == 0x91 || (opcode == 0x10 && ((packet[0] >> 2u) & 0x3fu) == 9);
+    if (opcode == 0x79 || opcode == 0x7a) {
+        const auto base = packet[1] & ~0x70000000u;
+        relevant = base <= 0x243 && 0x243 - base < packet.size() - 2;
+    } else if (opcode == 0x64) {
+        const auto& pairs = submission.registerLists.at(cursor);
+        for (std::size_t i = 0; i < pairs.size(); i += 2) relevant |= (pairs[i] & ~0x70000000u) == 0x243;
+    }
+    if (!relevant) return;
+    std::string words;
+    for (const auto word : packet) {
+        char text[16];
+        std::snprintf(text, sizeof(text), " %08x", word);
+        words += text;
+    }
+    const auto source = submission.indexCommandSources.find(cursor);
+    std::fprintf(stderr, "[index-base] packet serial=%llu queue=0x%x cursor=%zu source=0x%llx op=%s base=0x%llx limitIndices=%u type=%u primitive=%u raw:%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(source != submission.indexCommandSources.end() ? source->second : 0), Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType, queue.userConfig.contains(0x242) ? queue.userConfig.at(0x242) : 0u, words.c_str());
+}
+
 bool orderedFills() {
     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
     return ordered;
@@ -137,6 +164,7 @@ void Driver::execute(const Submission& submission) {
         } else {
             ++costs.suspendsSkipped;
         }
+        if (traceIndexBase()) std::fprintf(stderr, "[index-base] suspend serial=%llu queue=0x%x resetGraphics=1\n", static_cast<unsigned long long>(submission.serial), submission.queue);
         resetGraphics = true;
         return;
     }
@@ -150,6 +178,7 @@ void Driver::execute(const Submission& submission) {
         state = &queues[submission.queue];
     }
     auto& queue = *state;
+    if (traceIndexBase()) std::fprintf(stderr, "[index-base] begin serial=%llu queue=0x%x base=0x%llx limitIndices=%u type=%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType);
     static const bool traceShaderOrigins = std::getenv("APS5_TRACE_SHADER_ORIGINS") != nullptr;
     if (traceShaderOrigins && submission.queue == 0) {
         constexpr std::size_t HistoryWordLimit = 65536;
@@ -392,6 +421,7 @@ void Driver::execute(const Submission& submission) {
             }
         } else if (drawPacket) {
             landPendingWaits(submission.queue);
+            traceIndexPacket(submission, cursor, packet, queue);
             bool drawn = false;
             timed(&WorkerProfile::drawMs, [&] {
                 static const bool traceDraws = std::getenv("APS5_TRACE_DRAWS") != nullptr;
@@ -417,6 +447,7 @@ void Driver::execute(const Submission& submission) {
                     }
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
+                    if (traceIndexBase()) std::fprintf(stderr, "[index-base] failure serial=%llu queue=0x%x cursor=%zu error=%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
                     throw;
                 }
@@ -432,6 +463,7 @@ void Driver::execute(const Submission& submission) {
             landPendingWaits(submission.queue);
             recordQueuedLabelsBeforeRead(submission.queue);
             Pm4::Execute(packet, queue);
+            traceIndexPacket(submission, cursor, packet, queue);
         } else if (sampleDump && !wroteOnGpu) {
             dumpSampleCounters(Pm4::SampleDumpAddress(packet));
         } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
@@ -456,6 +488,7 @@ void Driver::execute(const Submission& submission) {
                 }
                 if (Pm4::IndirectRegisterOpcode(opcode)) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
                 else Pm4::Execute(packet, queue);
+                traceIndexPacket(submission, cursor, packet, queue);
                 if (opcode == 0x49 || opcode == 0x37) {
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
                 }

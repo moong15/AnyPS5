@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -35,6 +36,18 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         return DrawVerdict::Drawn;
     };
     auto drawParameters = Pm4::ResolveDraw(packet, queue);
+    static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+    if (traceIndex) {
+        std::fprintf(stderr, "[index-base] resolved serial=%llu queue=0x%x cursor=%zu indexed=%d address=0x%llx count=%u elementBytes=%u firstVertex=%u instances=%u indirect=%d\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), drawParameters.indexed ? 1 : 0, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, drawParameters.firstVertex, drawParameters.instanceCount, drawParameters.indirect ? 1 : 0);
+        if (drawParameters.indirect) {
+            const auto& indirect = *drawParameters.indirect;
+            std::fprintf(stderr, "[index-base] indirect serial=%llu queue=0x%x cursor=%zu arguments=0x%llx stride=%u maxRecords=%u countIndirect=%d countAddress=0x%llx\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned long long>(indirect.arguments), indirect.stride, indirect.count, indirect.countIndirect ? 1 : 0, static_cast<unsigned long long>(indirect.countAddress));
+        }
+        if (drawParameters.indexed) {
+            const auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(drawParameters.indexAddress, false);
+            if (range != nullptr) std::fprintf(stderr, "[index-base] mapping address=0x%llx range=0x%llx+0x%llx allocation=0x%llx+0x%llx readable=%d writable=%d gpu=%d generation=%llu\n", static_cast<unsigned long long>(drawParameters.indexAddress), static_cast<unsigned long long>(range->address), static_cast<unsigned long long>(range->bytes), static_cast<unsigned long long>(range->allocationAddress), static_cast<unsigned long long>(range->allocationBytes), range->readable ? 1 : 0, range->writable ? 1 : 0, range->gpu ? 1 : 0, static_cast<unsigned long long>(GuestAllocations::GuestAllocationsGeneration_nid_postfix()));
+        }
+    }
     const bool pipelined = DrawPipeline::Active();
     if (pipelined && drawParameters.indirect) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Indirect);
     bool traceIndirect = false;
@@ -199,6 +212,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     }
     resolveDrawDecode(queue, submission, decode, registerKey, drawKey, profile);
     const auto& graphics = decode->state;
+    if (traceIndex) std::fprintf(stderr, "[index-base] graphics serial=%llu queue=0x%x cursor=%zu topology=%u rectList=%d mesh=%d tessellation=%d target=0x%llx extent=%ux%u scissor=%d,%d,%u,%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned>(graphics.topology), graphics.rectList ? 1 : 0, graphics.stages.mesh ? 1 : 0, graphics.stages.tessellation ? 1 : 0, static_cast<unsigned long long>(graphics.color.address), graphics.renderExtent.width, graphics.renderExtent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.scissor.extent.width, graphics.scissor.extent.height);
     auto pixel = decode->pixel;
     std::vector<DrawProgram> programs = decode->programs;
     for (const auto& patch : userPatches) programs[patch.program].userData[patch.index] = patch.value;
@@ -214,14 +228,15 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     else if (graphics.stages.mesh) setMeshIndexBuffer(Pm4::DrawParameters{drawParameters.indexAddress, std::max(drawParameters.indexCount, 1u), drawParameters.indexSize, 1, 0, drawParameters.indexed});
     const std::vector<Role>& roles = decode->roles;
     static const bool tracePrograms = std::getenv("APS5_TRACE_DRAW_PROGRAMS") != nullptr;
-    if (tracePrograms) {
+    if (tracePrograms || traceIndex) {
         std::vector<DrawProgramTraceEntry> identities;
         identities.reserve(programs.size());
         for (std::size_t i = 0; i < programs.size(); ++i) {
             identities.push_back({programs[i].binary.stage, roles[i], programs[i].snapshot->codeAddress, programs[i].binary.codeAddress});
         }
         const auto line = FormatDrawProgramTrace(submission.serial, submission.queue, identities);
-        std::fprintf(stderr, "%s\n", line.c_str());
+        if (traceIndex) std::fprintf(stderr, "[index-base] programs cursor=%zu %s\n", static_cast<std::size_t>(packet.data() - submission.commands.data()), line.c_str());
+        else std::fprintf(stderr, "%s\n", line.c_str());
     }
     phaseTiming.Phase(DrawRowDecode);
 
@@ -639,12 +654,19 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         phaseTiming.Phase(DrawRowVectors);
         auto writes = drawWriteRanges(graphics, stages);
         const auto commitQueue = submission.queue;
+        const auto commitSerial = submission.serial;
+        const auto commitCursor = static_cast<std::size_t>(packet.data() - submission.commands.data());
         const auto commitPacket = (packet[0] >> 8u) & 0xffu;
         const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
-        auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, commitQueue, commitPacket, epoch, programs = std::move(programs), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
+        auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, commitQueue, commitSerial, commitCursor, commitPacket, epoch, programs = std::move(programs), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
             DrawPipeline::FollowEpoch(epoch);
             GuestMemory::SetCurrentPacket(commitPacket, commitQueue);
-            commitDraw(localDevice, commitQueue, decode->state, drawParameters, stages, snapshots, recipe, recipeStages, drawKey);
+            try {
+                commitDraw(localDevice, commitQueue, decode->state, drawParameters, stages, snapshots, recipe, recipeStages, drawKey);
+            } catch (const std::exception& error) {
+                if (traceIndex) std::fprintf(stderr, "[index-base] pipeline-failure serial=%llu queue=0x%x cursor=%zu address=0x%llx count=%u elementBytes=%u error=%s\n", static_cast<unsigned long long>(commitSerial), commitQueue, commitCursor, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, error.what());
+                throw;
+            }
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
         DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes));

@@ -44,6 +44,7 @@ struct Submission {
     std::chrono::steady_clock::time_point orderedAt{};
     const std::uint32_t* rewindTail = nullptr;
     std::size_t rewindWords = 0;
+    std::map<std::size_t, std::uintptr_t> indexCommandSources;
 };
 
 struct QueueWorker {
