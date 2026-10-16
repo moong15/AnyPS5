@@ -63,12 +63,12 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
             return packet.size() >= 5 && !DrawPipeline::Queue0().Overlaps(packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u), static_cast<std::size_t>(packet[4]) * 8);
         case 0x50: {
             if (packet.size() < 7) return false;
-            const auto dst = ((packet[1] >> 20u) & 3u) | ((packet[6] >> 25u) & 4u) | ((packet[6] >> 26u) & 8u);
-            if (dst == 1 || dst == 2) return true;
-            const std::size_t bytes = packet[6] & 0x3ffffffu;
+            const auto destination = Pm4::DmaDestination(packet);
+            if (destination == Pm4::DmaSelectGds || destination == Pm4::DmaDestinationNowhere) return true;
+            const auto bytes = Pm4::DmaBytes(packet);
             if (bytes == 0) return true;
-            const auto destination = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
-            return !DrawPipeline::Queue0().Overlaps(destination, bytes);
+            const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
+            return !DrawPipeline::Queue0().Overlaps(address, bytes);
         }
         case 0x10: {
             const auto operation = (header >> 2u) & 0x3fu;
