@@ -383,6 +383,19 @@ struct DrawOutcome {
     // the ranges the memo did not hold.
     std::uint64_t summarySkips = 0;
     std::uint64_t summaryPagesWalked = 0;
+    // The target lookups' own sub-phases, sampled from LookupOutcomes (Texture.cpp) around each
+    // lookup: what the readTarget time went on besides the collect, which the walk counters cannot
+    // see. refresh proved is the proof that returned; unchanged/compared are the full refresh's two
+    // endings; the rest are the pending flush, the DCC key scan and the uploads.
+    std::uint64_t provedLookups = 0;
+    std::uint64_t unchangedLookups = 0;
+    std::uint64_t comparedLookups = 0;
+    double provedMs = 0;
+    double unchangedMs = 0;
+    double comparedMs = 0;
+    double flushMs = 0;
+    double keysMs = 0;
+    double uploadMs = 0;
     double lookupUs = 0;
     // How the draw's resources came about (DrawKind), for the per-kind averages.
     std::size_t kind = 0;
@@ -411,6 +424,15 @@ struct DrawProfile {
     std::uint64_t pagesSaved = 0;
     std::uint64_t summarySkips = 0;
     std::uint64_t summaryPagesWalked = 0;
+    std::uint64_t provedLookups = 0;
+    std::uint64_t unchangedLookups = 0;
+    std::uint64_t comparedLookups = 0;
+    double provedMs = 0;
+    double unchangedMs = 0;
+    double comparedMs = 0;
+    double flushMs = 0;
+    double keysMs = 0;
+    double uploadMs = 0;
     double lookupUs = 0;
     std::array<double, PhaseCount> totalsUs{};
     // The longest single draw's time per phase, and the longest draw: the [lock] line's 'draw'
@@ -521,6 +543,15 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.pagesSaved += outcome.pagesSaved;
     profile.summarySkips += outcome.summarySkips;
     profile.summaryPagesWalked += outcome.summaryPagesWalked;
+    profile.provedLookups += outcome.provedLookups;
+    profile.unchangedLookups += outcome.unchangedLookups;
+    profile.comparedLookups += outcome.comparedLookups;
+    profile.provedMs += outcome.provedMs;
+    profile.unchangedMs += outcome.unchangedMs;
+    profile.comparedMs += outcome.comparedMs;
+    profile.flushMs += outcome.flushMs;
+    profile.keysMs += outcome.keysMs;
+    profile.uploadMs += outcome.uploadMs;
     profile.lookupUs += outcome.lookupUs;
     if (outcome.kind < KindCount) {
         ++profile.kindCounts[outcome.kind];
@@ -543,7 +574,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
         if (profile.totalsUs[i] <= 0) continue;
         n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s=%.1fms", DrawPhaseNames[i], profile.totalsUs[i] / 1000.0);
         if (i == PhaseResources && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (bindings %.1f, upload %.1f, descriptors %.1f, other %.1f of which %.1f in %llu address-based builds)", profile.bindingsUs / 1000.0, profile.uploadUs / 1000.0, profile.descriptorsUs / 1000.0, profile.otherUs / 1000.0, profile.addressOtherUs / 1000.0, static_cast<unsigned long long>(profile.addressBuilds));
-        if (i == PhaseReadTarget && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (%llu resident lookups, %llu of them >= 1 ms = %.1f; target lookups: full-scissor %llu / partial %llu / pages walked %llu / %.0f us; walks skipped %llu / pages saved %llu; summary skips %llu / pages walked after summary %llu)", static_cast<unsigned long long>(profile.targetLookups), static_cast<unsigned long long>(profile.slowLookups), profile.slowLookupUs / 1000.0, static_cast<unsigned long long>(profile.fullScissorLookups), static_cast<unsigned long long>(profile.partialLookups), static_cast<unsigned long long>(profile.pagesWalked), profile.lookupUs, static_cast<unsigned long long>(profile.walksSkipped), static_cast<unsigned long long>(profile.pagesSaved), static_cast<unsigned long long>(profile.summarySkips), static_cast<unsigned long long>(profile.summaryPagesWalked));
+        if (i == PhaseReadTarget && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (%llu resident lookups, %llu of them >= 1 ms = %.1f; target lookups: full-scissor %llu / partial %llu / pages walked %llu / %.0f us; walks skipped %llu / pages saved %llu; summary skips %llu / pages walked after summary %llu; sub-phases: proved %llu=%.1fms unchanged %llu=%.1fms compared %llu=%.1fms, flush %.1fms, keys %.1fms, uploads %.1fms)", static_cast<unsigned long long>(profile.targetLookups), static_cast<unsigned long long>(profile.slowLookups), profile.slowLookupUs / 1000.0, static_cast<unsigned long long>(profile.fullScissorLookups), static_cast<unsigned long long>(profile.partialLookups), static_cast<unsigned long long>(profile.pagesWalked), profile.lookupUs, static_cast<unsigned long long>(profile.walksSkipped), static_cast<unsigned long long>(profile.pagesSaved), static_cast<unsigned long long>(profile.summarySkips), static_cast<unsigned long long>(profile.summaryPagesWalked), static_cast<unsigned long long>(profile.provedLookups), profile.provedMs, static_cast<unsigned long long>(profile.unchangedLookups), profile.unchangedMs, static_cast<unsigned long long>(profile.comparedLookups), profile.comparedMs, profile.flushMs, profile.keysMs, profile.uploadMs);
     }
     if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), "; per kind (avg us, count):");
     for (std::size_t kind = 0; kind < KindCount && room(); ++kind) {
@@ -590,6 +621,9 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.fullScissorLookups = profile.partialLookups = profile.pagesWalked = 0;
     profile.walksSkipped = profile.pagesSaved = 0;
     profile.summarySkips = profile.summaryPagesWalked = 0;
+    profile.provedLookups = profile.unchangedLookups = profile.comparedLookups = 0;
+    profile.provedMs = profile.unchangedMs = profile.comparedMs = 0;
+    profile.flushMs = profile.keysMs = profile.uploadMs = 0;
     profile.lookupUs = 0;
     profile.kindUs.fill(0);
     profile.kindCounts.fill(0);
@@ -1306,6 +1340,10 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
     const auto savedBefore = profile ? GuestMemory::ThreadSkippedBytes() : 0;
     const auto summarySkipsBefore = GuestMemory::ThreadSummarySkips();
     const auto summaryWalkedBefore = GuestMemory::ThreadSummaryWalkedBytes();
+    // The lookup's own sub-phases (Texture.cpp's LookupOutcomes, which the dispatch path reads on
+    // its [indirect] line): what the readTarget time went on besides the collect, whose own cost the
+    // pages-walked field does not show.
+    LookupOutcomes outcomes = profile ? ThreadLookupOutcomes() : LookupOutcomes{};
     std::shared_ptr<StorageTexture> resident;
     try {
         resident = lookup();
@@ -1330,6 +1368,26 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
         outcome.pagesSaved += (GuestMemory::ThreadSkippedBytes() - savedBefore) / 4096;
         outcome.summarySkips += GuestMemory::ThreadSummarySkips() - summarySkipsBefore;
         outcome.summaryPagesWalked += (GuestMemory::ThreadSummaryWalkedBytes() - summaryWalkedBefore) / 4096;
+        // Sub-phase deltas. A lookup's own Refresh charges its whole time to RefreshProved,
+        // RefreshUnchanged or RefreshCompared (it returns through one of them), so the three
+        // together are the lookups' refresh time and the uploads and key scans lie inside them.
+        const auto& after = ThreadLookupOutcomes();
+        constexpr auto take = [](const LookupOutcomes& now, const LookupOutcomes& before, LookupOutcomes::Kind kind) {
+            return std::make_pair(now.counts[kind] - before.counts[kind], now.ms[kind] - before.ms[kind]);
+        };
+        for (const auto kind : {LookupOutcomes::RefreshProved, LookupOutcomes::RefreshUnchanged, LookupOutcomes::RefreshCompared}) {
+            const auto [count, ms] = take(after, outcomes, kind);
+            switch (kind) {
+                case LookupOutcomes::RefreshProved: outcome.provedLookups += count; outcome.provedMs += ms; break;
+                case LookupOutcomes::RefreshUnchanged: outcome.unchangedLookups += count; outcome.unchangedMs += ms; break;
+                default: outcome.comparedLookups += count; outcome.comparedMs += ms; break;
+            }
+        }
+        outcome.flushMs += after.ms[LookupOutcomes::PendingFlush] - outcomes.ms[LookupOutcomes::PendingFlush];
+        outcome.keysMs += after.ms[LookupOutcomes::DccScan] - outcomes.ms[LookupOutcomes::DccScan];
+        for (const auto kind : {LookupOutcomes::UploadDirect, LookupOutcomes::UploadCpu, LookupOutcomes::UploadClear}) {
+            outcome.uploadMs += after.ms[kind] - outcomes.ms[kind];
+        }
         const bool fullScissor = state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 && state.scissor.extent.width >= color.extent.width && state.scissor.extent.height >= color.extent.height;
         ++(fullScissor ? outcome.fullScissorLookups : outcome.partialLookups);
     }
