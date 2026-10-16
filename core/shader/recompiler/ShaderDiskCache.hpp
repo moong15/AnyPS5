@@ -3,6 +3,7 @@
 
 #include "CompiledVariant.hpp"
 #include "IntermediateRepresentation/IrMetadata/ResourcePlan.hpp"
+#include "Optimization/include/Optimization/DescriptorBindingBuilder.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -13,7 +14,11 @@
 
 namespace ShaderRecompiler::ShaderDiskCache {
 
-inline constexpr std::uint32_t FormatVersion = 37;
+inline constexpr std::uint32_t FormatVersion = 38;
+
+// The size in bytes of ArtifactIdentity's result, the digest a specialized module or a prepared
+// binding plan names its base artifact by.
+inline constexpr std::size_t ArtifactIdentityBytes = 16;
 
 enum class LoadStatus {
     Loaded,
@@ -34,6 +39,14 @@ struct Counters {
     std::uint64_t planMisses = 0;
     std::uint64_t planWrites = 0;
     std::uint64_t planLoadFailures = 0;
+    std::uint64_t specializedHits = 0;
+    std::uint64_t specializedMisses = 0;
+    std::uint64_t specializedWrites = 0;
+    std::uint64_t specializedLoadFailures = 0;
+    std::uint64_t bindingPlanHits = 0;
+    std::uint64_t bindingPlanMisses = 0;
+    std::uint64_t bindingPlanWrites = 0;
+    std::uint64_t bindingPlanLoadFailures = 0;
     std::uint64_t prebuiltHits = 0;
     std::uint64_t prebuiltMisses = 0;
     std::uint64_t prebuiltRejected = 0;
@@ -64,7 +77,46 @@ void BuildPlanKey(const RecompileRequest& request, std::uint32_t hostSubgroupSiz
 [[nodiscard]] std::vector<std::byte> EncodePlanEntry(std::span<const std::byte> key, const IrResourcePlan& plan);
 [[nodiscard]] LoadStatus DecodePlanEntry(std::span<const std::byte> file, std::span<const std::byte> key, IrResourcePlan& plan);
 
+// The stored form of a specialized module: the SPIR-V words buildSpecializedModule produces for one
+// artifact, one set of specialization constants and one target, the descriptor binding numbers the
+// surviving variables kept, and whether a push-constant variable survived. The process-lifetime
+// specialization id is deliberately not stored: it is assigned per load.
+struct SpecializedModule {
+    SharedSpirv spirv;
+    std::vector<std::uint32_t> bindings;
+    bool pushData = false;
+};
+
+// The digest of a base artifact's entry name (two 64-bit hashes of its key, the same value the
+// variant entry's file is named by), so a specialized module or a prepared binding plan can name
+// the artifact it was built from without copying that artifact's key, which holds every code word.
+void BuildArtifactIdentity(std::span<const std::byte> artifactKey, std::vector<std::byte>& identity);
+
+// The exact specialization inputs of one buildSpecializedModule call: the base artifact's identity,
+// the captured descriptor words and export mappings the binding plan was prepared from, the
+// per-request module words, the vertex input classes, the constants themselves and whether the
+// module was materialized for the registration defaults.
+void BuildSpecializedKey(std::span<const std::byte> artifactIdentity, std::span<const std::uint64_t> planIdentity, std::span<const std::uint32_t> moduleKey, std::span<const std::uint32_t> vertexClasses, std::span<const PipelineSpecializationConstant> constants, bool registrationDefaults, std::vector<std::byte>& key);
+
+// The prepared binding plan's inputs: the base artifact's identity and the captured descriptor
+// words and export mappings. The layout, ShaderInfo, stage and registration flags are properties of
+// the artifact the identity names.
+void BuildBindingPlanKey(std::span<const std::byte> artifactIdentity, std::span<const std::uint64_t> planIdentity, std::vector<std::byte>& key);
+
+[[nodiscard]] bool EncodeSpecialized(const SpecializedModule& module, std::vector<std::byte>& out);
+[[nodiscard]] bool DecodeSpecialized(std::span<const std::byte> bytes, SpecializedModule& module, std::shared_ptr<const void> owner = nullptr);
+[[nodiscard]] std::vector<std::byte> EncodeSpecializedEntry(std::span<const std::byte> key, const SpecializedModule& module);
+[[nodiscard]] LoadStatus DecodeSpecializedEntry(std::span<const std::byte> file, std::span<const std::byte> key, SpecializedModule& module, std::shared_ptr<const void> owner = nullptr);
+
+[[nodiscard]] bool EncodeBindingPlan(const DescriptorBindingPlan& plan, std::vector<std::byte>& out);
+[[nodiscard]] bool DecodeBindingPlan(std::span<const std::byte> bytes, DescriptorBindingPlan& plan);
+[[nodiscard]] std::vector<std::byte> EncodeBindingPlanEntry(std::span<const std::byte> key, const DescriptorBindingPlan& plan);
+[[nodiscard]] LoadStatus DecodeBindingPlanEntry(std::span<const std::byte> file, std::span<const std::byte> key, DescriptorBindingPlan& plan);
+
 [[nodiscard]] bool Enabled();
+// APS5_NO_SPECIALIZED_DISK_CACHE=1: neither read nor write the specialized module and prepared
+// binding plan entries, so a run can be compared against this without touching the variant entries.
+[[nodiscard]] bool SpecializedEnabled();
 [[nodiscard]] std::filesystem::path EntryDirectory();
 
 [[nodiscard]] bool Load(std::span<const std::byte> key, CompiledVariant& variant);
@@ -72,6 +124,10 @@ void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> va
 [[nodiscard]] std::shared_ptr<const CompiledVariant> Persist(std::span<const std::byte> key, const CompiledVariant& variant);
 [[nodiscard]] bool LoadPlan(std::span<const std::byte> key, IrResourcePlan& plan);
 void StorePlan(std::vector<std::byte> key, std::shared_ptr<const IrResourcePlan> plan);
+[[nodiscard]] bool LoadSpecialized(std::span<const std::byte> key, SpecializedModule& module);
+void StoreSpecialized(std::vector<std::byte> key, std::shared_ptr<const SpecializedModule> module);
+[[nodiscard]] bool LoadBindingPlan(std::span<const std::byte> key, DescriptorBindingPlan& plan);
+void StoreBindingPlan(std::vector<std::byte> key, std::shared_ptr<const DescriptorBindingPlan> plan);
 void Flush();
 [[nodiscard]] Counters Totals();
 
