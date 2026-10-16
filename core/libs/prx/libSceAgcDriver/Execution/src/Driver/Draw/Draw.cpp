@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawRegisterKey.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/IndexTraceRing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawProgramTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
@@ -38,14 +39,14 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     auto drawParameters = Pm4::ResolveDraw(packet, queue);
     static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
     if (traceIndex) {
-        std::fprintf(stderr, "[index-base] resolved serial=%llu queue=0x%x cursor=%zu indexed=%d address=0x%llx count=%u elementBytes=%u firstVertex=%u instances=%u indirect=%d\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), drawParameters.indexed ? 1 : 0, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, drawParameters.firstVertex, drawParameters.instanceCount, drawParameters.indirect ? 1 : 0);
+        AgcDriver::indexTrace("[index-base] resolved serial=%llu queue=0x%x cursor=%zu indexed=%d address=0x%llx count=%u elementBytes=%u firstVertex=%u instances=%u indirect=%d\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), drawParameters.indexed ? 1 : 0, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, drawParameters.firstVertex, drawParameters.instanceCount, drawParameters.indirect ? 1 : 0);
         if (drawParameters.indirect) {
             const auto& indirect = *drawParameters.indirect;
-            std::fprintf(stderr, "[index-base] indirect serial=%llu queue=0x%x cursor=%zu arguments=0x%llx stride=%u maxRecords=%u countIndirect=%d countAddress=0x%llx\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned long long>(indirect.arguments), indirect.stride, indirect.count, indirect.countIndirect ? 1 : 0, static_cast<unsigned long long>(indirect.countAddress));
+            AgcDriver::indexTrace("[index-base] indirect serial=%llu queue=0x%x cursor=%zu arguments=0x%llx stride=%u maxRecords=%u countIndirect=%d countAddress=0x%llx\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned long long>(indirect.arguments), indirect.stride, indirect.count, indirect.countIndirect ? 1 : 0, static_cast<unsigned long long>(indirect.countAddress));
         }
         if (drawParameters.indexed) {
             const auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(drawParameters.indexAddress, false);
-            if (range != nullptr) std::fprintf(stderr, "[index-base] mapping address=0x%llx range=0x%llx+0x%llx allocation=0x%llx+0x%llx readable=%d writable=%d gpu=%d generation=%llu\n", static_cast<unsigned long long>(drawParameters.indexAddress), static_cast<unsigned long long>(range->address), static_cast<unsigned long long>(range->bytes), static_cast<unsigned long long>(range->allocationAddress), static_cast<unsigned long long>(range->allocationBytes), range->readable ? 1 : 0, range->writable ? 1 : 0, range->gpu ? 1 : 0, static_cast<unsigned long long>(GuestAllocations::GuestAllocationsGeneration_nid_postfix()));
+            if (range != nullptr) AgcDriver::indexTrace("[index-base] mapping address=0x%llx range=0x%llx+0x%llx allocation=0x%llx+0x%llx readable=%d writable=%d gpu=%d generation=%llu\n", static_cast<unsigned long long>(drawParameters.indexAddress), static_cast<unsigned long long>(range->address), static_cast<unsigned long long>(range->bytes), static_cast<unsigned long long>(range->allocationAddress), static_cast<unsigned long long>(range->allocationBytes), range->readable ? 1 : 0, range->writable ? 1 : 0, range->gpu ? 1 : 0, static_cast<unsigned long long>(GuestAllocations::GuestAllocationsGeneration_nid_postfix()));
         }
     }
     const bool pipelined = DrawPipeline::Active();
@@ -212,7 +213,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     }
     resolveDrawDecode(queue, submission, decode, registerKey, drawKey, profile);
     const auto& graphics = decode->state;
-    if (traceIndex) std::fprintf(stderr, "[index-base] graphics serial=%llu queue=0x%x cursor=%zu topology=%u rectList=%d mesh=%d tessellation=%d target=0x%llx extent=%ux%u scissor=%d,%d,%u,%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned>(graphics.topology), graphics.rectList ? 1 : 0, graphics.stages.mesh ? 1 : 0, graphics.stages.tessellation ? 1 : 0, static_cast<unsigned long long>(graphics.color.address), graphics.renderExtent.width, graphics.renderExtent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.scissor.extent.width, graphics.scissor.extent.height);
+    if (traceIndex) AgcDriver::indexTrace("[index-base] graphics serial=%llu queue=0x%x cursor=%zu topology=%u rectList=%d mesh=%d tessellation=%d target=0x%llx extent=%ux%u scissor=%d,%d,%u,%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned>(graphics.topology), graphics.rectList ? 1 : 0, graphics.stages.mesh ? 1 : 0, graphics.stages.tessellation ? 1 : 0, static_cast<unsigned long long>(graphics.color.address), graphics.renderExtent.width, graphics.renderExtent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.scissor.extent.width, graphics.scissor.extent.height);
     auto pixel = decode->pixel;
     std::vector<DrawProgram> programs = decode->programs;
     for (const auto& patch : userPatches) programs[patch.program].userData[patch.index] = patch.value;
@@ -235,7 +236,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             identities.push_back({programs[i].binary.stage, roles[i], programs[i].snapshot->codeAddress, programs[i].binary.codeAddress});
         }
         const auto line = FormatDrawProgramTrace(submission.serial, submission.queue, identities);
-        if (traceIndex) std::fprintf(stderr, "[index-base] programs cursor=%zu %s\n", static_cast<std::size_t>(packet.data() - submission.commands.data()), line.c_str());
+        if (traceIndex) AgcDriver::indexTrace("[index-base] programs cursor=%zu %s\n", static_cast<std::size_t>(packet.data() - submission.commands.data()), line.c_str());
         else std::fprintf(stderr, "%s\n", line.c_str());
     }
     phaseTiming.Phase(DrawRowDecode);
@@ -665,7 +666,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             try {
                 commitDraw(localDevice, commitQueue, decode->state, drawParameters, stages, snapshots, recipe, recipeStages, drawKey);
             } catch (const std::exception& error) {
-                if (traceIndex) std::fprintf(stderr, "[index-base] pipeline-failure serial=%llu queue=0x%x cursor=%zu address=0x%llx count=%u elementBytes=%u error=%s\n", static_cast<unsigned long long>(commitSerial), commitQueue, commitCursor, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, error.what());
+                if (traceIndex) AgcDriver::indexTrace("[index-base] pipeline-failure serial=%llu queue=0x%x cursor=%zu address=0x%llx count=%u elementBytes=%u error=%s\n", static_cast<unsigned long long>(commitSerial), commitQueue, commitCursor, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, error.what());
                 throw;
             }
         };

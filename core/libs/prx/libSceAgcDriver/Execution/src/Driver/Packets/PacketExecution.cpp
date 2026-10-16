@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/IndexTraceRing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
@@ -43,7 +44,7 @@ void traceIndexPacket(const Submission& submission, std::size_t cursor, std::spa
         words += text;
     }
     const auto source = submission.indexCommandSources.find(cursor);
-    std::fprintf(stderr, "[index-base] packet serial=%llu queue=0x%x cursor=%zu source=0x%llx op=%s base=0x%llx limitIndices=%u type=%u primitive=%u raw:%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(source != submission.indexCommandSources.end() ? source->second : 0), Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType, queue.userConfig.contains(0x242) ? queue.userConfig.at(0x242) : 0u, words.c_str());
+    AgcDriver::indexTrace("[index-base] packet serial=%llu queue=0x%x cursor=%zu source=0x%llx op=%s base=0x%llx limitIndices=%u type=%u primitive=%u raw:%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(source != submission.indexCommandSources.end() ? source->second : 0), Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType, queue.userConfig.contains(0x242) ? queue.userConfig.at(0x242) : 0u, words.c_str());
 }
 
 bool orderedFills() {
@@ -164,7 +165,7 @@ void Driver::execute(const Submission& submission) {
         } else {
             ++costs.suspendsSkipped;
         }
-        if (traceIndexBase()) std::fprintf(stderr, "[index-base] suspend serial=%llu queue=0x%x resetGraphics=1\n", static_cast<unsigned long long>(submission.serial), submission.queue);
+        if (traceIndexBase()) AgcDriver::indexTrace("[index-base] suspend serial=%llu queue=0x%x resetGraphics=1\n", static_cast<unsigned long long>(submission.serial), submission.queue);
         resetGraphics = true;
         return;
     }
@@ -178,7 +179,7 @@ void Driver::execute(const Submission& submission) {
         state = &queues[submission.queue];
     }
     auto& queue = *state;
-    if (traceIndexBase()) std::fprintf(stderr, "[index-base] begin serial=%llu queue=0x%x base=0x%llx limitIndices=%u type=%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType);
+    if (traceIndexBase()) AgcDriver::indexTrace("[index-base] begin serial=%llu queue=0x%x base=0x%llx limitIndices=%u type=%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType);
     static const bool traceShaderOrigins = std::getenv("APS5_TRACE_SHADER_ORIGINS") != nullptr;
     if (traceShaderOrigins && submission.queue == 0) {
         constexpr std::size_t HistoryWordLimit = 65536;
@@ -447,7 +448,7 @@ void Driver::execute(const Submission& submission) {
                     }
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
-                    if (traceIndexBase()) std::fprintf(stderr, "[index-base] failure serial=%llu queue=0x%x cursor=%zu error=%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, error.what());
+                    if (traceIndexBase()) AgcDriver::indexTrace("[index-base] failure serial=%llu queue=0x%x cursor=%zu error=%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
                     throw;
                 }

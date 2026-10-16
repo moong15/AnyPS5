@@ -68,7 +68,8 @@ std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* 
     Reserve(buffer, count, function);
     auto* result = buffer->cursor_up;
     buffer->cursor_up += count;
-    static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr;
+    // Printed only in the per-line mode: APS5_TRACE_INDEX_BASE=ring keeps the driver's lines in memory.
+    static const bool traceIndex = std::getenv("APS5_TRACE_INDEX_BASE") != nullptr && std::strcmp(std::getenv("APS5_TRACE_INDEX_BASE"), "ring") != 0;
     if (traceIndex && std::strstr(function, "Index") != nullptr) std::fprintf(stderr, "[index-hle] allocate function=%s buffer=%p packet=%p words=%u\n", function, static_cast<void*>(buffer), static_cast<void*>(result), count);
     return result;
 }
