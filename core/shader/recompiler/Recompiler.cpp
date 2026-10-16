@@ -1273,7 +1273,7 @@ void reportResultMemo() {
     for (std::size_t kind = 0; kind < names.size(); ++kind) {
         std::fprintf(stderr, "[recompile] materialize %s (10 s): %llu calls, module/plan %.1f ms, image tables %.1f ms, binding Populate %.1f ms\n", names[kind], take(phases.calls[kind]), static_cast<double>(take(phases.moduleNanoseconds[kind])) / 1e6, static_cast<double>(take(phases.tableNanoseconds[kind])) / 1e6, static_cast<double>(take(phases.bindingNanoseconds[kind])) / 1e6);
     }
-    std::fprintf(stderr, "[recompile] materialize builds (10 s): %llu specialized modules (%llu built, %llu loaded from disk), %llu binding plans (%llu built, %llu loaded from disk)\n", take(phases.moduleBuilds), take(phases.moduleLoads), take(phases.bindingPlanBuilds), take(phases.bindingPlanLoads));
+    std::fprintf(stderr, "[recompile] materialize builds (10 s): specialized modules %llu built, %llu loaded from disk; binding plans %llu built, %llu loaded from disk\n", take(phases.moduleBuilds), take(phases.moduleLoads), take(phases.bindingPlanBuilds), take(phases.bindingPlanLoads));
 }
 
 bool ResultMemoUserData() {
