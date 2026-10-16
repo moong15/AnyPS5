@@ -7,6 +7,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,7 +23,11 @@ alignas(256) std::array<std::uint32_t, 7> CounterCode{0xf4080200u, 0xfa000000u, 
 
 constexpr std::size_t BlockBytes = 65536;
 constexpr std::uint32_t ArgumentsOffset = 4;
-alignas(BlockBytes) std::array<std::uint8_t, BlockBytes> Block{};
+struct alignas(BlockBytes) AlignedBlock {
+    std::array<std::uint8_t, BlockBytes> bytes{};
+};
+const auto BlockStorage = std::make_unique<AlignedBlock>();
+auto& Block = BlockStorage->bytes;
 alignas(256) std::array<std::uint32_t, 4> WriterDescriptor{};
 alignas(256) std::array<std::uint32_t, 4> Counter{};
 alignas(256) std::array<std::uint32_t, 4> CounterDescriptor{};

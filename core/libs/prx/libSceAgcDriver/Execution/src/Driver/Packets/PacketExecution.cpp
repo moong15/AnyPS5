@@ -150,6 +150,25 @@ void Driver::execute(const Submission& submission) {
         state = &queues[submission.queue];
     }
     auto& queue = *state;
+    static const bool traceShaderOrigins = std::getenv("APS5_TRACE_SHADER_ORIGINS") != nullptr;
+    if (traceShaderOrigins && submission.queue == 0) {
+        constexpr std::size_t HistoryWordLimit = 65536;
+        auto snapshot = std::make_shared<QueueState::ShaderCommandSnapshot>();
+        snapshot->submission = submission.serial;
+        snapshot->totalWords = submission.commands.size();
+        const auto copiedWords = std::min(HistoryWordLimit, submission.commands.size());
+        snapshot->commands.assign(submission.commands.begin(), submission.commands.begin() + copiedWords);
+        std::size_t remainingPairs = HistoryWordLimit;
+        for (const auto& [cursor, pairs] : submission.registerLists) {
+            if (cursor >= copiedWords || remainingPairs == 0) break;
+            const auto count = std::min(remainingPairs, pairs.size());
+            snapshot->registerLists.emplace(cursor, std::vector<std::uint32_t>(pairs.begin(), pairs.begin() + count));
+            remainingPairs -= count;
+        }
+        for (std::size_t i = 1; i < queue.fragmentCommandHistory.size(); ++i)
+            queue.fragmentCommandHistory[i - 1] = std::move(queue.fragmentCommandHistory[i]);
+        queue.fragmentCommandHistory.back() = std::move(snapshot);
+    }
     static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
     if (traceGpu) std::fprintf(stderr, "[gpu] %.1f execute serial=%llu queue=0x%x dwords=%zu\n", TraceMs(), static_cast<unsigned long long>(submission.serial), submission.queue, submission.commands.size());
 
@@ -417,6 +436,24 @@ void Driver::execute(const Submission& submission) {
             dumpSampleCounters(Pm4::SampleDumpAddress(packet));
         } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
             if (!wroteOnGpu) {
+                if (traceShaderOrigins && (opcode == 0x76 || opcode == 0x63) && !Pm4::IsTagMarker(packet)) {
+                    const auto remember = [&](std::uint32_t offset, std::uint32_t value, std::uint64_t source) {
+                        offset &= ~0x70000000u;
+                        if (offset < queue.fragmentWriteOrigins.size())
+                            queue.fragmentWriteOrigins[offset] = {submission.serial, cursor, source, opcode, value};
+                    };
+                    if (opcode == 0x76) {
+                        const auto base = packet[1] & ~0x70000000u;
+                        for (std::size_t i = 2; i < packet.size(); ++i)
+                            remember(base + static_cast<std::uint32_t>(i - 2), packet[i], 0);
+                    } else {
+                        const auto& pairs = submission.registerLists.at(cursor);
+                        const auto source = packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u);
+                        const bool interleaved = packet[3] == 0x80000000u;
+                        for (std::size_t i = 0; i < pairs.size(); i += 2)
+                            remember(pairs[i], pairs[i + 1], source + (interleaved ? i + 1 : i / 2) * sizeof(std::uint32_t));
+                    }
+                }
                 if (Pm4::IndirectRegisterOpcode(opcode)) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
                 else Pm4::Execute(packet, queue);
                 if (opcode == 0x49 || opcode == 0x37) {

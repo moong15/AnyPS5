@@ -35,6 +35,7 @@ struct DrawProgram {
 };
 
 struct DrawDecode {
+    std::uint64_t targetStateKey = 0;
     Graphics::State state;
     ShaderRecompiler::ShaderPixelStageInfo pixel;
     std::vector<DrawProgram> programs;
@@ -90,6 +91,8 @@ struct DrawEntryCounters {
     double validateUs = 0;
 
     std::uint64_t registerKeyLookups = 0, registerKeyHits = 0, decodeSkipped = 0, decodePartial = 0, facadeMismatches = 0, verifyDecodes = 0, verifyDecodeMismatches = 0;
+    std::uint64_t targetLookups = 0, targetHits = 0, targetNoDonor = 0, targetDecodeRefused = 0, targetStagesRefused = 0;
+    std::uint64_t aliasShapeAdmissions = 0, aliasDonorsInserted = 0, aliasDonorHits = 0;
     double keyUs = 0;
     std::uint64_t absentNewRegisters = 0, absentUserWords = 0, absentEvicted = 0, absentNeverInserted = 0, evictions = 0;
     std::array<std::uint64_t, 6> registerKeyMissChanges{};
@@ -163,6 +166,7 @@ struct DrawRelocationPending {
     std::uint64_t key = 0, identity = 0;
     DrawAliasKeys aliases;
     std::shared_ptr<const DrawRelocation> relocation;
+    std::uint64_t admissionShape = 0;
 };
 
 struct DrawRelocationTrial {

@@ -15,13 +15,14 @@ bool runtimeRegister(std::uint32_t offset) {
     return offset - 0x00cu < 32u || offset - 0x08cu < 32u || offset - 0x10cu < 32u || offset == 0x082u || offset == 0x083u || offset == 0x102u || offset == 0x103u;
 }
 
-const auto& registerMasks() {
-    static const auto masks = [] {
+const auto& registerMasks(bool relocateTargets = false) {
+    static const auto make = [](bool targets) {
         std::array<std::vector<std::uint64_t>, 3> bits;
         for (const auto& range : Graphics::DrawKeyRegisters) {
             auto& bank = bits[static_cast<std::size_t>(range.bank)];
             bank.resize(std::max(bank.size(), (static_cast<std::size_t>(range.first) + range.count + 63) / 64));
             for (auto offset = range.first; offset < range.first + range.count; ++offset) {
+                if (targets && range.bank == Graphics::RegisterBank::Context && DrawTargetRegister(offset)) continue;
                 if (range.bank == Graphics::RegisterBank::Shader && runtimeRegister(offset)) continue;
                 bank[offset / 64] |= std::uint64_t{1} << (offset % 64);
             }
@@ -29,8 +30,10 @@ const auto& registerMasks() {
         std::array<std::shared_ptr<const Registers::Mask>, 3> result;
         for (std::size_t i = 0; i < bits.size(); ++i) result[i] = std::make_shared<const Registers::Mask>(std::move(bits[i]));
         return result;
-    }();
-    return masks;
+    };
+    static const auto masks = make(false);
+    static const auto targetMasks = make(true);
+    return relocateTargets ? targetMasks : masks;
 }
 
 template <typename TVisit>
@@ -49,8 +52,34 @@ void forEachKeyedUserWord(const QueueState& queue, bool allUserWords, TVisit&& v
 
 }
 
-std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords, bool incremental, std::uint64_t* shapeKey, RegisterStateKeyParts* parts) {
-    const auto& masks = registerMasks();
+bool DrawTargetRelocationEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_DRAW_TARGET_RELOCATION") == nullptr;
+    return enabled;
+}
+
+bool DrawTargetRegister(std::uint32_t offset) {
+    if (offset == 0x005u || offset - 0x012u < 4u || offset - 0x01au < 5u) return true;
+    if (offset - 0x00cu < 2u || offset - 0x081u < 2u || offset - 0x090u < 2u || offset - 0x094u < 2u) return true;
+    if (offset - 0x10fu < 6u) return true;
+    if (offset - 0x318u < 0x78u) {
+        const auto word = (offset - 0x318u) % 15u;
+        return word == 0u || word == 7u || word == 9u || word == 13u;
+    }
+    return offset - 0x390u < 16u || offset - 0x3a8u < 8u;
+}
+
+std::uint64_t DrawTargetStateKey(const QueueState& queue) {
+    std::uint64_t key = 0xcbf29ce484222325ull;
+    for (const auto& [offset, value] : queue.context) {
+        if (!DrawTargetRegister(offset)) continue;
+        key = (key ^ offset) * 0x100000001b3ull;
+        key = (key ^ value) * 0x100000001b3ull;
+    }
+    return key;
+}
+
+std::uint64_t RegisterStateKey(const QueueState& queue, bool allUserWords, bool incremental, std::uint64_t* shapeKey, RegisterStateKeyParts* parts, bool relocateTargets) {
+    const auto& masks = registerMasks(relocateTargets);
     const auto fingerprint = [&](const Registers& registers, Graphics::RegisterBank bank) {
         const auto& mask = masks[static_cast<std::size_t>(bank)];
         return incremental ? registers.Fingerprint(mask) : registers.RecomputeFingerprint(*mask);
@@ -131,7 +160,7 @@ std::uint64_t Driver::drawIdentityKey(const QueueState& queue, const ShaderRegis
 }
 
 std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegistry& registry, std::uint64_t deviceSerial, std::uint64_t* shape, std::array<std::uint64_t, 5>* components, const DrawRelocation* relocation, DrawAliasKeys* aliases) {
-    const bool aliased = aliases != nullptr && relocation != nullptr && !relocation->words.empty();
+    const bool aliased = aliases != nullptr && relocation != nullptr && (!relocation->words.empty() || DrawTargetRelocationEnabled());
     std::array<std::uint64_t, DrawAliasKeys::Stages> content{};
     bool readable = true;
     std::uint64_t other = 0x6c62272e07bb0142ull;
@@ -146,7 +175,9 @@ std::uint64_t Driver::drawRegisterKey(const QueueState& queue, const ShaderRegis
     auto key = RegisterStateKey(queue, allUserWords, true, &shapeKey, components != nullptr ? &parts : nullptr);
     if (verify && key != RegisterStateKey(queue, allUserWords, false)) throw std::runtime_error("incremental register fingerprint disagrees with full state");
     if (aliased) {
-        mixOther(shapeKey);
+        std::uint64_t aliasShape = shapeKey;
+        if (DrawTargetRelocationEnabled()) RegisterStateKey(queue, allUserWords, true, &aliasShape, nullptr, true);
+        mixOther(aliasShape);
         forEachKeyedUserWord(queue, allUserWords, [&](std::uint32_t offset, std::uint32_t value) {
             mixOther(offset);
             const auto word = std::find_if(relocation->words.begin(), relocation->words.end(), [&](const RelocatableUserWord& candidate) { return candidate.reg == offset; });

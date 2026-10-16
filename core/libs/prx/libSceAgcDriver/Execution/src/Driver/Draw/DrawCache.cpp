@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawRegisterKey.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
 #include <algorithm>
@@ -98,6 +99,11 @@ bool DrawKeySightings::SeenBefore(std::uint64_t key) {
     return false;
 }
 
+bool Driver::drawAliasAdmissionEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_DRAW_ALIAS_ADMISSION") == nullptr;
+    return enabled;
+}
+
 bool Driver::admitDrawKey(std::uint64_t key, std::uint64_t shape) {
     std::lock_guard cacheLock(drawCacheMutex);
     if (drawCache.contains(key)) return true;
@@ -105,9 +111,28 @@ bool Driver::admitDrawKey(std::uint64_t key, std::uint64_t shape) {
     bool seen = drawKeySightings->SeenBefore(key);
     const auto& pending = drawRelocationPending;
     if (pending.key == key && pending.identity != 0) {
+        if (drawAliasAdmissionEnabled()) {
+            auto aliasShape = pending.aliases.structure;
+            if (aliasShape != 0) {
+                for (const auto content : pending.aliases.content) aliasShape = (aliasShape ^ content) * 0x100000001b3ull;
+            } else if (!drawRelocations.contains(pending.identity)) {
+                aliasShape = pending.admissionShape;
+            }
+            bool aliasSeen = aliasShape != 0 && drawKeySightings->SeenBefore(aliasShape ^ 0xd6e8feb86659fd93ull);
+            if (aliasSeen && drawRelocations.contains(pending.identity)) {
+                auto& trial = drawRelocationTrials[pending.identity];
+                aliasSeen = trial.idle == 0 && (trial.productive || trial.hits != 0 || trial.admissions < DrawRelocationTrial::ProbationAdmissions);
+                if (!seen && aliasSeen && !trial.productive && trial.hits == 0) ++trial.admissions;
+            }
+            if (!seen && aliasSeen) ++drawEntryCounters.aliasShapeAdmissions;
+            if (seen || aliasSeen) return true;
+            if (shape == 0 || drawShapes.contains(shape)) return false;
+            if (!drawShapeSightings) drawShapeSightings.emplace(drawCacheEntries() * DrawKeySightings::Ways);
+            return drawShapeSightings->SeenBefore(shape);
+        }
         if (pending.aliases.structure != 0) {
             const auto trial = drawRelocationTrials.find(pending.identity);
-            bool aliasSeen = false;
+            bool aliasSeen = DrawTargetRelocationEnabled() && drawKeySightings->SeenBefore(pending.aliases.structure ^ 0x165667b19e3779f9ull);
             for (std::size_t stage = 0; stage < pending.aliases.content.size(); ++stage) {
                 if (pending.aliases.content[stage] == 0) continue;
                 const auto stageKey = (pending.aliases.structure ^ (pending.aliases.content[stage] + 0x9e3779b97f4a7c15ull + stage)) * 0x100000001b3ull;

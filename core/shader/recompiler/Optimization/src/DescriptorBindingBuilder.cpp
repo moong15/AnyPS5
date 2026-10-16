@@ -199,8 +199,16 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             }
             continue;
         }
-        const std::uint32_t unsupported = sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod | SamplerUseOffset | SamplerUseNonZeroLod);
-        if (unsupported != 0u && !SamplesBaseLevelIfUnnormalized(sampler)) {
+        // Unnormalized coordinates only change what a texel offset means, and that is the sampler state
+        // already handled below. Level-of-detail selection is a property of the coordinates, which
+        // the shader has already put in normalized space by the time they reach here, so an
+        // implicit-LOD sample is no more of a problem than an explicit-LOD one. The uses that
+        // really do depend on the unnormalized form are the ones that read back raw texels:
+        // comparison, gather and image_get_lod, which stay refused below.
+        constexpr std::uint32_t supported = static_cast<std::uint32_t>(SamplerUseExplicitLod | SamplerUseOffset | SamplerUseNonZeroLod |
+            SamplerUseImplicitLod | SamplerUseGradient | SamplerUseAdjust);
+        const std::uint32_t unsupported = sampler.uses & ~supported;
+        if (unsupported != 0u) {
             failUnnormalized(UnnormalizedUseReason(unsupported));
         }
         if (sampler.depthCompare) {
@@ -228,8 +236,7 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
         for (const auto& pair : info.sampledPairs) {
             if (!exact) break;
             if (pair.image != resource) continue;
-            const auto& words = snapshot.samplers.at(pair.sampler).dwords;
-            exact = proof.samplers[pair.sampler] && (((words[2] >> 26u) & 3u) == 0u || (info.samplers.at(pair.sampler).uses == SamplerUseExplicitLod && (words[1] & 0xfffu) == 0u && (words[2] & 0x3fffu) == 0u));
+            exact = proof.samplers[pair.sampler] && info.samplers.at(pair.sampler).uses != 0u;
         }
         proof.imagesAtBaseLevel[resource] = exact;
     }
@@ -291,7 +298,9 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     const auto unnormalized = ProveUnnormalized(info, snapshot);
     for (std::uint32_t index = 0; index < info.samplers.size(); ++index) {
         if (FoldsTexelOffsets(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::FoldOffsetBase + index, unnormalized.samplers[index] ? 1u : 0u});
-        if (SamplesBaseLevelIfUnnormalized(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::UnnormalizedBaseLevelBase + index, unnormalized.samplers[index] ? 1u : 0u});
+        plan.specialization.push_back({PipelineSpecialization::UnnormalizedBase + index, unnormalized.samplers[index] ? 1u : 0u});
+        const bool point = info.samplers[index].forcePointFiltering || ((snapshot.samplers.at(index).dwords[2] >> 20u) & 3u) == 0u;
+        plan.specialization.push_back({PipelineSpecialization::UnnormalizedPointBase + index, point ? 1u : 0u});
     }
     std::vector<std::uint32_t> compareStates(info.images.size());
     for (std::uint32_t index = 0; index < info.images.size(); ++index) {

@@ -1,3 +1,4 @@
+#include "prx/libScePad/include/PadInputTypes.hpp"
 #include <bit>
 #include <chrono>
 #include <cstdlib>
@@ -8,6 +9,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
@@ -174,6 +177,22 @@ public:
 
     void Fail(std::exception_ptr error) noexcept override {
         if (!error) std::terminate();
+        // Diagnostic aid: APS5_CONTINUE_AFTER_FLIP_FAILURE=1 reports the failure and leaves the
+        // queue and the output config usable, so one run lists every feature the title asks for
+        // instead of latching the first one and ending presentation for good. The driver keeps
+        // running after an error it may not have recovered from, which is what the flag is for.
+        static const bool keepPresenting = std::getenv("APS5_CONTINUE_AFTER_FLIP_FAILURE") != nullptr;
+        if (keepPresenting) {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& reported) {
+                std::fprintf(stderr, "[videoout] presentation failed: %s\n", reported.what());
+            } catch (...) {
+                std::fprintf(stderr, "[videoout] presentation failed with a non-standard exception\n");
+            }
+            std::fflush(stderr);
+            return;
+        }
         {
             std::lock_guard lock(queue->mutex);
             if (!queue->failure) queue->failure = error;
@@ -625,6 +644,152 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     timing.Mark("notify_game");
 }
 
+namespace {
+
+// Diagnostic aid: pushes input into the same path real input takes, so a title that stops at a
+// "press a button" screen can be driven through an unattended run.
+//
+// An entry is either a key name or a pad button. Keys go through PadInput and KeyboardInput
+// exactly as an SDL event would, so the user's key bindings apply and libSceKeyboard sees them.
+// Pad buttons are named "pad:<button>" because SDL scancode names cannot express them, and note
+// that the confirm button has no "x" key binding by default: Cross is Return and Space
+// (libScePad/include/InputMapping.hpp), so pressing x does nothing on a screen that wants Cross.
+//
+// APS5_SCRIPT_KEYS=pad:cross,pad:cross presses Cross twice. Names are SDL scancode names
+// ("x", "Return", "Space") or pad:<cross|circle|square|triangle|l1|r1|l2|r2|l3|r3|options|
+// up|down|left|right|touchpad>. APS5_SCRIPT_START_MS (default 20000) delays the first press and
+// APS5_SCRIPT_INTERVAL_MS (default 2500) spaces the rest; APS5_SCRIPT_HOLD_MS (default 120) is
+// how long an input is held.
+class ScriptedKeys {
+public:
+    ScriptedKeys() {
+        const char* keys = std::getenv("APS5_SCRIPT_KEYS");
+        if (keys == nullptr) return;
+        startMs = number("APS5_SCRIPT_START_MS", 20000);
+        intervalMs = number("APS5_SCRIPT_INTERVAL_MS", 2500);
+        holdMs = number("APS5_SCRIPT_HOLD_MS", 120);
+        for (std::string rest(keys); !rest.empty();) {
+            const auto comma = rest.find(',');
+            const auto name = rest.substr(0, comma);
+            if (name.rfind("pad:", 0) == 0) {
+                const auto button = PadButtonFor(name.substr(4));
+                if (button == Pad::PadButton::None) {
+                    std::fprintf(stderr, "[input] scripted pad button \"%s\" is unknown; skipped\n", name.c_str());
+                } else {
+                    presses.push_back({SDL_SCANCODE_UNKNOWN, button, PadButtonName(button)});
+                }
+            } else {
+                const auto code = SDL_GetScancodeFromName(name.c_str());
+                if (code == SDL_SCANCODE_UNKNOWN) {
+                    std::fprintf(stderr, "[input] scripted key \"%s\" is not an SDL scancode name; skipped\n", name.c_str());
+                } else {
+                    presses.push_back({code, Pad::PadButton::None, name});
+                }
+            }
+            if (comma == std::string::npos) break;
+            rest.erase(0, comma + 1);
+        }
+        if (presses.empty()) return;
+        next = std::chrono::steady_clock::now() + std::chrono::milliseconds(startMs);
+        std::fprintf(stderr, "[input] scripted presses: %zu, first in %lld ms, every %lld ms, held %lld ms\n", presses.size(), static_cast<long long>(startMs), static_cast<long long>(intervalMs), static_cast<long long>(holdMs));
+        std::fflush(stderr);
+    }
+
+    void Tick(DisplayWindow& window, PadInput& padInput, KeyboardInput& keyboardInput) {
+        if (presses.empty() || window.Handle() == nullptr) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (held) {
+            if (now < releaseAt) return;
+            send(held->code, held->button, false, window, padInput, keyboardInput);
+            held = nullptr;
+            next = now + std::chrono::milliseconds(intervalMs);
+            return;
+        }
+        if (index >= presses.size() || now < next) return;
+        const auto& press = presses[index++];
+        send(press.code, press.button, true, window, padInput, keyboardInput);
+        held = &press;
+        releaseAt = now + std::chrono::milliseconds(holdMs);
+    }
+
+private:
+    struct Press {
+        SDL_Scancode code;
+        Pad::PadButton button;
+        std::string name;
+    };
+
+    static long long number(const char* name, long long fallback) {
+        const char* text = std::getenv(name);
+        return text != nullptr ? std::strtoll(text, nullptr, 10) : fallback;
+    }
+
+    static const char* PadButtonName(Pad::PadButton button) {
+        switch (button) {
+            case Pad::PadButton::Cross: return "cross";
+            case Pad::PadButton::Circle: return "circle";
+            case Pad::PadButton::Square: return "square";
+            case Pad::PadButton::Triangle: return "triangle";
+            case Pad::PadButton::L1: return "l1";
+            case Pad::PadButton::R1: return "r1";
+            case Pad::PadButton::L2: return "l2";
+            case Pad::PadButton::R2: return "r2";
+            case Pad::PadButton::L3: return "l3";
+            case Pad::PadButton::R3: return "r3";
+            case Pad::PadButton::Options: return "options";
+            case Pad::PadButton::Up: return "up";
+            case Pad::PadButton::Down: return "down";
+            case Pad::PadButton::Left: return "left";
+            case Pad::PadButton::Right: return "right";
+            case Pad::PadButton::TouchPad: return "touchpad";
+            default: return "none";
+        }
+    }
+
+    static Pad::PadButton PadButtonFor(const std::string& name) {
+        static constexpr std::pair<Pad::PadButton, const char*> all[]{
+            {Pad::PadButton::Cross, "cross"}, {Pad::PadButton::Circle, "circle"}, {Pad::PadButton::Square, "square"},
+            {Pad::PadButton::Triangle, "triangle"}, {Pad::PadButton::L1, "l1"}, {Pad::PadButton::R1, "r1"},
+            {Pad::PadButton::L2, "l2"}, {Pad::PadButton::R2, "r2"}, {Pad::PadButton::L3, "l3"},
+            {Pad::PadButton::R3, "r3"}, {Pad::PadButton::Options, "options"}, {Pad::PadButton::Up, "up"},
+            {Pad::PadButton::Down, "down"}, {Pad::PadButton::Left, "left"}, {Pad::PadButton::Right, "right"},
+            {Pad::PadButton::TouchPad, "touchpad"}};
+        for (const auto& [button, spelled] : all) {
+            if (name == spelled) return button;
+        }
+        return Pad::PadButton::None;
+    }
+
+    void send(SDL_Scancode code, Pad::PadButton button, bool down, DisplayWindow& window, PadInput& padInput, KeyboardInput& keyboardInput) {
+        std::fprintf(stderr, "[input] scripted %s %s\n", down ? "press" : "release", button == Pad::PadButton::None ? SDL_GetScancodeName(code) : PadButtonName(button));
+        std::fflush(stderr);
+        if (button != Pad::PadButton::None) {
+            padInput.SetScriptedButton(button, down);
+            return;
+        }
+        SDL_Event event{};
+        event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+        event.key.windowID = SDL_GetWindowID(window.Handle());
+        event.key.repeat = 0;
+        event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+        event.key.keysym.scancode = code;
+        event.key.keysym.sym = SDL_GetKeyFromScancode(code);
+        padInput.HandleEvent(event, window);
+        keyboardInput.HandleEvent(event, event.key.windowID);
+    }
+
+    std::vector<Press> presses;
+    long long startMs = 0;
+    long long intervalMs = 0;
+    long long holdMs = 0;
+    std::chrono::steady_clock::time_point next{};
+    std::chrono::steady_clock::time_point releaseAt{};
+    const Press* held = nullptr;
+    std::size_t index = 0;
+};
+
+}
+
 void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& started) {
     try {
         window.Ensure(VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT);
@@ -651,6 +816,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
         PadInput padInput;
         MouseInput mouseInput;
         KeyboardInput keyboardInput;
+        ScriptedKeys scriptedKeys;
         ImeTextInput imeTextInput;
         while (!token.stop_requested()) {
             {
@@ -681,29 +847,43 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
             updateDisplayRefreshRate();
             pollHostHdr();
             mouseInput.UpdateCapture(!padInput.MouseModeEnabled());
-            if (current) {
-                require(current->timing != nullptr, "missing presentation timing");
-                const auto dequeued = AgcDriver::FrameTiming::Clock::now();
-                current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
-                processFlip(*current);
-                int windowWidth = 0;
-                int windowHeight = 0;
-                if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
-                if (windowWidth > 0 && windowHeight > 0) {
-                    const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
-                    mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+            scriptedKeys.Tick(window, padInput, keyboardInput);
+            try {
+                if (current) {
+                    require(current->timing != nullptr, "missing presentation timing");
+                    const auto dequeued = AgcDriver::FrameTiming::Clock::now();
+                    current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
+                    processFlip(*current);
+                    int windowWidth = 0;
+                    int windowHeight = 0;
+                    if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                    if (windowWidth > 0 && windowHeight > 0) {
+                        const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
+                        mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+                    }
+                    const auto finished = AgcDriver::FrameTiming::Clock::now();
+                    AgcDriver::FrameTiming::Clock::duration interval{};
+                    {
+                        std::lock_guard lock(current->cfg->mutex);
+                        const auto previous = current->cfg->lastTimingFlip;
+                        if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
+                        current->cfg->lastTimingFlip = finished;
+                    }
+    #if APS5_ENABLE_TIMING_LOG
+                    timingLog->Enqueue(current->timing->Capture(current->outputHandle, current->index, current->flipArg, finished, interval));
+    #endif
                 }
-                const auto finished = AgcDriver::FrameTiming::Clock::now();
-                AgcDriver::FrameTiming::Clock::duration interval{};
-                {
-                    std::lock_guard lock(current->cfg->mutex);
-                    const auto previous = current->cfg->lastTimingFlip;
-                    if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
-                    current->cfg->lastTimingFlip = finished;
-                }
-#if APS5_ENABLE_TIMING_LOG
-                timingLog->Enqueue(current->timing->Capture(current->outputHandle, current->index, current->flipArg, finished, interval));
-#endif
+            } catch (const ProcessShutdown&) {
+                throw;
+            } catch (const std::exception& flipError) {
+                // Diagnostic aid: APS5_CONTINUE_AFTER_FLIP_FAILURE=1 drops the flip that threw and
+                // presents the next one instead of ending the presenter, so one run reports every
+                // feature the title asks for rather than only the first. The frame is lost and the
+                // flip's recorded work up to the throw is discarded.
+                static const bool keepPresenting = std::getenv("APS5_CONTINUE_AFTER_FLIP_FAILURE") != nullptr;
+                if (!keepPresenting) throw;
+                std::fprintf(stderr, "[videoout] flip failed, continuing: %s\n", flipError.what());
+                std::fflush(stderr);
             }
             if (current) {
                 current.reset();

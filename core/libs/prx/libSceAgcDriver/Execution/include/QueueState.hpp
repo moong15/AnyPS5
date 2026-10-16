@@ -277,6 +277,23 @@ struct QueueState {
     std::uint32_t instanceCount = 1;
     std::vector<std::string> markers;
     Predication predication;
+    // Bounded, opt-in provenance for the fragment register window. Values are
+    // diagnostic only and never participate in register reads or cache keys.
+    struct ShaderWriteOrigin {
+        std::uint64_t submission = 0;
+        std::uint64_t cursor = 0;
+        std::uint64_t sourceAddress = 0;
+        std::uint32_t opcode = 0;
+        std::uint32_t value = 0;
+    };
+    std::array<ShaderWriteOrigin, 64> fragmentWriteOrigins{};
+    struct ShaderCommandSnapshot {
+        std::uint64_t submission = 0;
+        std::size_t totalWords = 0;
+        std::vector<std::uint32_t> commands;
+        std::map<std::size_t, std::vector<std::uint32_t>> registerLists;
+    };
+    std::array<std::shared_ptr<const ShaderCommandSnapshot>, 8> fragmentCommandHistory{};
 
     void ClearContext() {
         context = InitialContextRegisters();

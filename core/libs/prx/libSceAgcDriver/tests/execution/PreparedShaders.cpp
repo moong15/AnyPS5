@@ -715,6 +715,8 @@ void LazyRegistration() {
     sceAgcDriverSubmitAcb(0x20, &packet);
     ExpectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "s_code_end");
     ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "s_code_end");
+}
+
 void DeferredShaderPrewarmedOnSetShReg(AgcDriver::VulkanDevice& device) {
     const auto testDevice = std::shared_ptr<AgcDriver::VulkanDevice>(&device, [](auto*) {});
     alignas(256) std::array<std::uint32_t, 1> code{0xbf810000u};

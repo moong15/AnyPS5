@@ -933,7 +933,9 @@ class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
         static auto* pool = [] {
-            auto* created = new RegistrationPreparePool(std::max(2u, std::thread::hardware_concurrency() / 2u));
+            const char* text = std::getenv("APS5_PREBUILD_THREADS");
+            const auto threads = text != nullptr ? std::max(1u, static_cast<unsigned>(std::strtoul(text, nullptr, 10))) : std::max(2u, std::thread::hardware_concurrency() / 2u);
+            auto* created = new RegistrationPreparePool(threads);
             PreparationSlot().store(created);
             return created;
         }();

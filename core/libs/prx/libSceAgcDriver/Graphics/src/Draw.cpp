@@ -1098,6 +1098,32 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.nothing = true;
             return inputs;
         }
+        if (!state.stages.mesh) {
+            static int diagCount = 0;
+            for (const auto& attribute : shaders.front().program->vertexAttributes) {
+                const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+                if (NullVertexDescriptor(attribute) || attribute.fetchIndex != 0 || stride == 0) continue;
+                if (VertexBufferOutOfBoundsSelect(attribute) <= 1u || static_cast<std::uint64_t>(*highest) + draw.firstVertex < attribute.resource.fields[2] || diagCount >= 8) continue;
+                ++diagCount;
+                std::fprintf(stderr, "[diag-vfetch] V# %08x %08x %08x %08x stride=%u records=%u select=%u highest=%u firstVertex=%u indexCount=%u indexSize=%u restart=%d skipRestart=%d list=%d\n", attribute.resource.fields[0], attribute.resource.fields[1], attribute.resource.fields[2], attribute.resource.fields[3], stride, attribute.resource.fields[2], VertexBufferOutOfBoundsSelect(attribute), *highest, draw.firstVertex, static_cast<unsigned>(indexBytes / draw.indexSize), draw.indexSize, state.primitiveRestart ? 1 : 0, skipRestart ? 1 : 0, listTopology ? 1 : 0);
+                std::vector<std::byte> raw(static_cast<std::size_t>(indexBytes));
+                GuestMemory::Read(draw.indexAddress, raw, draw.indexSize);
+                std::uint64_t past = 0;
+                std::uint32_t below = 0;
+                std::map<std::uint32_t, std::uint64_t> farValues;
+                for (std::size_t o = 0; o + draw.indexSize <= raw.size(); o += draw.indexSize) {
+                    std::uint32_t v = 0;
+                    std::memcpy(&v, raw.data() + o, draw.indexSize);
+                    if (v >= attribute.resource.fields[2]) { ++past; if (farValues.size() < 6 || farValues.count(v)) ++farValues[v]; }
+                    else below = std::max(below, v);
+                }
+                std::fprintf(stderr, "[diag-vfetch]   indices past records=%llu highest below records=%u far:", static_cast<unsigned long long>(past), below);
+                for (const auto& [v, n] : farValues) std::fprintf(stderr, " %08x x%llu", v, static_cast<unsigned long long>(n));
+                std::fprintf(stderr, "\n");
+                std::fflush(stderr);
+                break;
+            }
+        }
         constexpr std::uint32_t ZeroFetchSlack = 0x10000u;
         if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().program->vertexAttributes)) {
             const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
@@ -1158,6 +1184,23 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         if (NullVertexDescriptor(attribute) || VertexFetchOutOfRange(attribute)) {
             zeroed[i] = zeroVertexBuffer(context, attribute);
             continue;
+        }
+        if (args == nullptr && ((attribute.resource.fields[1] >> 16u) & 0x3fffu) != 0 && VertexBufferOutOfBoundsSelect(attribute) > 1u && (attribute.fetchIndex == 0 ? static_cast<std::uint64_t>(inputs.maxIndex) : static_cast<std::uint64_t>(draw.firstInstance) + draw.instanceCount - 1u) >= attribute.resource.fields[2]) {
+            const auto& f = attribute.resource.fields;
+            std::fprintf(stderr, "[diag-vthrow] attr %zu/%zu V# %08x %08x %08x %08x fetchIndex=%u maxIndex=%u firstVertex=%u indexed=%d indexCount=%u instances=%u firstInstance=%u\n", i, attributes.size(), f[0], f[1], f[2], f[3], static_cast<unsigned>(attribute.fetchIndex), inputs.maxIndex, draw.firstVertex, draw.indexed ? 1 : 0, draw.indexCount, draw.instanceCount, draw.firstInstance);
+            if (draw.indexed) {
+                std::string now;
+                const auto count = std::min<std::uint32_t>(draw.indexCount, 12u);
+                const bool readable = RegisteredReadableCovers(draw.indexAddress, static_cast<std::size_t>(count) * draw.indexSize);
+                for (std::uint32_t k = 0; readable && k < count; ++k) {
+                    std::uint32_t value = 0;
+                    std::memcpy(&value, reinterpret_cast<const std::byte*>(draw.indexAddress) + static_cast<std::size_t>(k) * draw.indexSize, draw.indexSize);
+                    char text[16];
+                    std::snprintf(text, sizeof(text), " %x", value);
+                    now += text;
+                }
+                std::fprintf(stderr, "[diag-vthrow] index buffer 0x%llx size %u imported=%d readable=%d indices now:%s\n", static_cast<unsigned long long>(draw.indexAddress), static_cast<unsigned>(draw.indexSize), inputs.indexHandle != VK_NULL_HANDLE && inputs.indices == nullptr ? 1 : 0, readable ? 1 : 0, now.c_str());
+            }
         }
         // An indirect draw's counts are unknown here: the descriptor's whole range is copied.
         const auto bytes = args != nullptr ? VertexBufferExtent(attribute) : VertexBufferReadSize(attribute, inputs.maxIndex, draw.instanceCount, draw.firstInstance);

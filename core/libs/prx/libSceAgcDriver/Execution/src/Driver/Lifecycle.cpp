@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <system_error>
 #include <thread>
@@ -186,6 +187,22 @@ void Driver::CheckFailure() {
 
 void Driver::ReportFailure(std::exception_ptr error) {
     require(error != nullptr, "null asynchronous failure");
+    // Diagnostic aid: APS5_CONTINUE_AFTER_FLIP_FAILURE=1 reports the failure and leaves the driver
+    // unfailed, so one run lists every feature the title asks for instead of latching the first
+    // one into rethrowFailure and ending the run. The queue that raised it stops at the submission
+    // it was on, and its state after that is not restored.
+    static const bool keepRunning = std::getenv("APS5_CONTINUE_AFTER_FLIP_FAILURE") != nullptr;
+    if (keepRunning) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const std::exception& reported) {
+            std::fprintf(stderr, "[agc] driver failure, continuing: %s\n", reported.what());
+        } catch (...) {
+            std::fprintf(stderr, "[agc] driver failure with a non-standard exception\n");
+        }
+        std::fflush(stderr);
+        return;
+    }
     bool first = false;
     {
         std::lock_guard lock(mutex);

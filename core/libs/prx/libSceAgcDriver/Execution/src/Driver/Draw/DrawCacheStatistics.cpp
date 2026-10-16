@@ -38,6 +38,8 @@ void Driver::reportDrawCache(DrawEntryCounters& counters, bool profile) {
     }
     if (profile) text += profileDrawCacheLines(counters);
     AgcDriver::ProfilePrint_nid_no_patch("%s", text.c_str());
+    AgcDriver::ProfilePrint_nid_no_patch("[draw-cache] target aliases: %llu lookups, %llu hits; refusals: no donor %llu, decode %llu, stages %llu\n", count(counters.targetLookups), count(counters.targetHits), count(counters.targetNoDonor), count(counters.targetDecodeRefused), count(counters.targetStagesRefused));
+    AgcDriver::ProfilePrint_nid_no_patch("[draw-cache] alias shapes: %llu admissions, %llu donors inserted, %llu donor hits\n", count(counters.aliasShapeAdmissions), count(counters.aliasDonorsInserted), count(counters.aliasDonorHits));
     counters = DrawEntryCounters{};
 }
 

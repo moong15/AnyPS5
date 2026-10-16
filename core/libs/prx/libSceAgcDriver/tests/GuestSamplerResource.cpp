@@ -80,7 +80,7 @@ void rejectUnnormalized(const Fields& f, std::string_view reason) {
 }
 
 void requireUnnormalized(const GuestSamplerResource& result, const char* what) {
-    Require(result.unnormalizedCoordinates, std::string(what) + ": unnormalized coordinates were not decoded");
+    Require(result.emulatedUnnormalizedCoordinates && !result.unnormalizedCoordinates, std::string(what) + ": unnormalized coordinates must use normalized native samplers");
     Require(result.mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST && result.minLod == 0.0f && result.maxLod == 0.0f, std::string(what) + ": unnormalized coordinates need nearest mips and a zero LOD range");
     Require(result.lodBias == 0.0f && !result.anisotropyEnable && result.maxAnisotropy == 1.0f, std::string(what) + ": unnormalized coordinates need no LOD bias and no anisotropy");
 }
@@ -94,6 +94,7 @@ struct SamplerCapture {
     const void* next = nullptr;
     VkSamplerReductionMode reductionMode = VK_SAMPLER_REDUCTION_MODE_MAX_ENUM;
     VkSamplerCreateFlags flags = 0;
+    float mipLodBias = 0.0f;
     bool anisotropyEnable = false;
     float maxAnisotropy = 0.0f;
 };
@@ -109,6 +110,7 @@ VKAPI_ATTR VkResult VKAPI_CALL captureCreateSampler(VkDevice, const VkSamplerCre
     samplerCapture.created = true;
     samplerCapture.next = info->pNext;
     samplerCapture.flags = info->flags;
+    samplerCapture.mipLodBias = info->mipLodBias;
     samplerCapture.anisotropyEnable = info->anisotropyEnable == VK_TRUE;
     samplerCapture.maxAnisotropy = info->maxAnisotropy;
     const auto* reduction = static_cast<const VkSamplerReductionModeCreateInfoEXT*>(info->pNext);
@@ -130,6 +132,37 @@ SamplerCapture createSampler(const Context& context, const GuestSamplerResource&
     const Sampler sampler(context, resource);
     Require(sampler.Handle() != VK_NULL_HANDLE, "sampler test did not create a sampler");
     return samplerCapture;
+}
+
+void RunSecondaryLodBiasTests(const Fields& base) {
+    struct BiasCase { std::uint32_t primary; std::uint32_t secondary; float expected; };
+    const std::array cases{
+        BiasCase{0u, 1u, 0.0625f}, BiasCase{0u, 31u, 1.9375f},
+        BiasCase{0u, 32u, -2.0f}, BiasCase{0u, 63u, -0.0625f},
+        BiasCase{0x100u, 16u, 2.0f}, BiasCase{0x3f00u, 48u, -2.0f},
+        BiasCase{0x100u, 48u, 0.0f}, BiasCase{0x3fffu, 1u, 0.05859375f}
+    };
+    Context context{};
+    context.limits.maxSamplerAnisotropy = 1.0f;
+    context.limits.maxSamplerLodBias = 4.0f;
+    context.deviceProc = captureProc;
+    for (const auto& item : cases) {
+        Fields fields = base;
+        fields.lodBiasRaw = item.primary;
+        fields.lodBiasSec = item.secondary;
+        const auto decoded = DecodeSamplerResource(pack(fields));
+        Require(nearlyEqual(decoded.lodBias, item.expected), "combined signed sampler LOD bias is incorrect");
+        Require(nearlyEqual(createSampler(context, decoded).mipLodBias, item.expected), "combined sampler LOD bias did not reach vkCreateSampler");
+    }
+    Fields overLimit = base;
+    overLimit.lodBiasRaw = 0x400u;
+    overLimit.lodBiasSec = 1u;
+    reject([&] { createSampler(context, DecodeSamplerResource(pack(overLimit))); }, "LOD bias beyond the device limit");
+    Fields unnormalized = base;
+    unnormalized.forceUnormCoords = true;
+    unnormalized.lodBiasRaw = 0x100u;
+    unnormalized.lodBiasSec = 31u;
+    requireUnnormalized(DecodeSamplerResource(pack(unnormalized), true), "unnormalized S# with secondary LOD bias");
 }
 
 void RunSamplerReductionTests(const Fields& base) {
@@ -428,12 +461,12 @@ void RunGuestSamplerResourceTests() {
     unnormalizedAniso.xyMagFilter = 2;
     unnormalizedAniso.xyMinFilter = 2;
     rejectUnnormalized(unnormalizedAniso, "unnormalized coordinates with anisotropic filtering");
-    for (const std::uint32_t clamp : {1u, 3u, 4u, 5u, 7u}) {
+    for (const std::uint32_t clamp : {5u, 7u}) {
         Fields clampX = unnormalizedBase;
         clampX.clampX = clamp;
         rejectUnnormalized(clampX, "unnormalized coordinates with clamp mode " + std::to_string(clamp) + " on X");
     }
-    for (const std::uint32_t clamp : {1u, 3u, 4u, 5u, 7u}) {
+    for (const std::uint32_t clamp : {5u, 7u}) {
         Fields clampY = unnormalizedBase;
         clampY.clampY = clamp;
         rejectUnnormalized(clampY, "unnormalized coordinates with clamp mode " + std::to_string(clamp) + " on Y");
@@ -456,6 +489,12 @@ void RunGuestSamplerResourceTests() {
     auto truncatedBlend = pack(unnormalizedBase);
     truncatedBlend[0] |= 1u << 19u;
     reject([&] { DecodeSamplerResource(truncatedBlend, true); }, "unnormalized coordinates with MC_COORD_TRUNC");
+    Fields pointTruncation = unnormalizedBase;
+    pointTruncation.xyMagFilter = 0u;
+    pointTruncation.xyMinFilter = 0u;
+    auto pointWords = pack(pointTruncation);
+    pointWords[0] |= 1u << 19u;
+    requireUnnormalized(DecodeSamplerResource(pointWords, true), "inactive motion-compensation truncation on a point filter");
     rejectUnnormalized(base, "bound as unnormalized without FORCE_UNNORMALIZED");
 
     Fields forcedSrgb = base;
@@ -482,17 +521,7 @@ void RunGuestSamplerResourceTests() {
     badDegamma.disableDegamma = true;
     rejectFields(badDegamma, "disables degamma");
 
-    Fields secLodBias = base;
-    secLodBias.lodBiasSec = 1;
-    const auto secResult = DecodeSamplerResource(pack(secLodBias));
-    Require(nearlyEqual(secResult.lodBias, 0.0f), "secondary LOD bias must not alter host lodBias");
-    secLodBias.lodBiasSec = 0x3f;
-    const auto negSecResult = DecodeSamplerResource(pack(secLodBias));
-    Require(nearlyEqual(negSecResult.lodBias, 0.0f), "negative secondary LOD bias must not alter host lodBias");
-    secLodBias.lodBiasRaw = 256;
-    secLodBias.lodBiasSec = 8;
-    const auto combinedResult = DecodeSamplerResource(pack(secLodBias));
-    Require(nearlyEqual(combinedResult.lodBias, 1.0f), "nonzero secondary LOD bias must leave primary lodBias unaffected");
+    RunSecondaryLodBiasTests(base);
 
     Fields badPreclamp = base;
     badPreclamp.pointPreclamp = true;

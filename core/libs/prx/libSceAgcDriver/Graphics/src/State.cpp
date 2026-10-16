@@ -1423,14 +1423,21 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     const auto slice = view & 0x1fffu;
     const auto lastSlice = (view >> 13u) & 0x1fffu;
     Require(lastSlice >= slice, "the color view ends before its first slice");
-    const auto viewMip = (view >> 26u) & 0xfu;
+    const auto declaredViewMip = (view >> 26u) & 0xfu;
     const auto attrib2 = read(cx, 0x3b0 + slot);
-    const auto maxMip = attrib2 >> 28u;
-    Require(color.samples == 1 || maxMip == 0, "multisampled color mips are unsupported");
-    Require(viewMip <= maxMip, "color view mip exceeds the surface");
+    const auto declaredMaxMip = attrib2 >> 28u;
     const auto attrib3 = read(cx, 0x3b8 + slot);
     color.tileMode = DecodeColorTileMode(attrib3);
     const bool volume = ((attrib3 >> 24u) & 3u) == 2u;
+    // Diagnostic aid: APS5_FLAT_3D_COLOR_TARGET=1 draws a mipmapped or DCC 3D color target as one
+    // unmipped uncompressed level, so a title that renders into a volume keeps presenting. Only the
+    // level the view names is drawn; the other levels and the DCC metadata are left alone.
+    static const bool flat3d = std::getenv("APS5_FLAT_3D_COLOR_TARGET") != nullptr;
+    const auto flatten = flat3d && volume && (declaredMaxMip != 0 || (info & 0x10000000u) != 0);
+    const auto maxMip = flatten ? 0u : declaredMaxMip;
+    const auto viewMip = flatten ? 0u : declaredViewMip;
+    Require(color.samples == 1 || maxMip == 0, "multisampled color mips are unsupported");
+    Require(viewMip <= maxMip, "color view mip exceeds the surface");
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;

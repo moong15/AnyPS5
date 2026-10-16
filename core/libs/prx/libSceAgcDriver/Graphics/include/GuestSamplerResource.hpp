@@ -30,6 +30,7 @@ struct GuestSamplerResource {
     bool compareEnable = false;
     VkCompareOp compareOp = VK_COMPARE_OP_NEVER;
     bool unnormalizedCoordinates = false;
+    bool emulatedUnnormalizedCoordinates = false;
     bool nonSeamlessCube = false;
 };
 

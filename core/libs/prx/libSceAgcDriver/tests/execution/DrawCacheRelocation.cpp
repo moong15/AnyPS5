@@ -106,15 +106,18 @@ void MovedDataHitsTheCache(bool libraries) {
     };
     static std::array<std::array<float, 4>, 8> same{};
     for (auto& entry : same) entry = {1.0f, 0.0f, 0.0f, 0.0f};
+    const bool legacy = std::getenv("APS5_NO_DRAW_ALIAS_ADMISSION") != nullptr;
+    const std::uint64_t warmHits = legacy ? 0 : 2;
+    const std::uint64_t inserts = legacy ? 2 : 1;
     AgcDriver::DriverDetail::DrawEntryCounters counters{};
     for (std::size_t i = 0; i < 4; ++i) counters = draw({same[i].data()});
-    Require(counters.lookups == 4 && counters.hits == 0 && counters.inserts == 2, mode + ": the draws that teach the moved pointer and its contents made " + std::to_string(counters.hits) + " hits and " + std::to_string(counters.inserts) + " inserts, expected 0 and 2");
+    Require(counters.lookups == 4 && counters.hits == warmHits && counters.inserts == inserts, mode + ": the draws that teach the moved pointer and its contents made " + std::to_string(counters.hits) + " hits and " + std::to_string(counters.inserts) + " inserts, expected admitted donor timing");
     for (std::size_t i = 4; i < same.size(); ++i) counters = draw({same[i].data()});
-    Require(counters.lookups == 8 && counters.hits == 4 && counters.inserts == 2, mode + ": draws whose data moved again did not reuse the cached draw (" + std::to_string(counters.hits) + " hits in " + std::to_string(counters.lookups) + " lookups)");
+    Require(counters.lookups == 8 && counters.hits == warmHits + 4 && counters.inserts == inserts, mode + ": draws whose data moved again did not reuse the cached draw (" + std::to_string(counters.hits) + " hits in " + std::to_string(counters.lookups) + " lookups)");
     const auto other = draw({Other.data()});
-    Require(other.lookups == 9 && other.hits == 4, mode + ": a draw whose moved data holds another value reused the cached draw");
+    Require(other.lookups == 9 && other.hits == warmHits + 4, mode + ": a draw whose moved data holds another value reused the cached draw");
     const auto again = draw({same[0].data()});
-    Require(again.lookups == 10 && again.hits == 5, mode + ": a draw at an address seen before did not reuse the cached draw (" + std::to_string(again.hits) + " hits)");
+    Require(again.lookups == 10 && again.hits == warmHits + 5, mode + ": a draw at an address seen before did not reuse the cached draw (" + std::to_string(again.hits) + " hits)");
 }
 
 void UnrelocatedAliasesStayOut(bool libraries) {

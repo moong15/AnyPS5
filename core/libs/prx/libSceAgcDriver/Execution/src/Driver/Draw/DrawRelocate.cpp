@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawRegisterKey.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -125,8 +126,8 @@ std::size_t dropEveryOther(TMap& map) {
 
 }
 
-void Driver::learnPendingRelocation() {
-    const auto pending = drawRelocationPending;
+void Driver::learnPendingRelocation(const QueueState* queue, const ShaderRegistry* registry, std::uint64_t deviceSerial) {
+    auto pending = drawRelocationPending;
     drawRelocationPending = {};
     if (pending.key == 0) return;
     const auto inserted = drawCache.find(pending.key);
@@ -134,6 +135,10 @@ void Driver::learnPendingRelocation() {
     const auto& entry = *inserted->second;
     const auto& programs = entry.decode->programs;
     if (entry.stages.size() != programs.size()) return;
+    if (drawAliasAdmissionEnabled() && !drawRelocations.contains(pending.identity) && drawRelocations.size() >= MaxAliases) {
+        drawRelocations.clear();
+        drawRelocationTrials.clear();
+    }
     const auto known = drawRelocations.find(pending.identity);
     auto shape = std::make_shared<DrawRelocation>();
     if (known != drawRelocations.end()) *shape = *known->second;
@@ -176,6 +181,11 @@ void Driver::learnPendingRelocation() {
         std::sort(shape->words.begin(), shape->words.end(), [](const RelocatableUserWord& a, const RelocatableUserWord& b) { return a.reg < b.reg; });
         drawRelocations[pending.identity] = std::move(shape);
     }
+    if (queue != nullptr && registry != nullptr) {
+        pending.relocation = drawRelocations.at(pending.identity);
+        pending.aliases = {};
+        drawRegisterKey(*queue, *registry, deviceSerial, nullptr, nullptr, pending.relocation.get(), &pending.aliases);
+    }
     if (pending.aliases.structure == 0) return;
     if (drawStageDonors.size() >= MaxAliases) drawRelocationCounters.evicted += dropEveryOther(drawStageDonors);
     if (drawDecodes.size() >= MaxAliases) drawRelocationCounters.evicted += dropEveryOther(drawDecodes);
@@ -206,13 +216,18 @@ void Driver::learnPendingRelocation() {
         }
     }
     drawDecodes[pending.aliases.structure] = std::move(donor);
+    ++drawEntryCounters.aliasDonorsInserted;
 }
 
 void Driver::relocateDrawEntry(const QueueState& queue, const DrawAliasKeys& aliases, std::shared_ptr<DrawEntry>& entry, std::shared_ptr<const DrawDecode>& decode, std::vector<DrawUserPatch>& patches) {
     auto& counters = drawRelocationCounters;
     ++counters.lookups;
+    if (DrawTargetRelocationEnabled()) ++drawEntryCounters.targetLookups;
     const auto known = drawDecodes.find(aliases.structure);
-    if (known == drawDecodes.end() || known->second.decode == nullptr) return;
+    if (known == drawDecodes.end() || known->second.decode == nullptr) {
+        if (DrawTargetRelocationEnabled()) ++drawEntryCounters.targetNoDonor;
+        return;
+    }
     const auto shared = known->second.decode;
     const auto& stageKeys = known->second.stageKeys;
     const auto& programs = shared->programs;

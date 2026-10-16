@@ -295,8 +295,8 @@ public:
             std::lock_guard lock(mutex);
             if (const auto found = splitAliases.find(reinterpret_cast<std::uintptr_t>(alias)); found != splitAliases.end()) {
                 const auto error = releaseAlias(found->first, found->second);
-                splitAliases.erase(found);
                 if (error != ERROR_SUCCESS) throw std::system_error(static_cast<int>(error), std::system_category(), "unmap a run of a shared guest alias");
+                splitAliases.erase(found);
                 return;
             }
         }
@@ -841,6 +841,12 @@ private:
         if (reserved == nullptr) fail("reserve a read-write alias of shared guest memory");
         const auto base = reinterpret_cast<std::uintptr_t>(reserved);
         try {
+            splitAliases.emplace(base, bytes);
+        } catch (...) {
+            VirtualFree(reserved, 0, MEM_RELEASE);
+            throw;
+        }
+        try {
             for (std::size_t done = 0; done < bytes;) {
                 const auto& first = views.at(address + done);
                 auto run = pageBytes;
@@ -854,22 +860,30 @@ private:
                 done += run;
             }
         } catch (...) {
-            releaseAlias(base, bytes);
+            const auto error = releaseAlias(base, bytes);
+            if (error != ERROR_SUCCESS) throw std::system_error(static_cast<int>(error), std::system_category(), "clean up a partial read-write alias of shared guest memory");
+            splitAliases.erase(base);
             throw;
         }
-        splitAliases.emplace(base, bytes);
         return reserved;
     }
 
     DWORD releaseAlias(std::uintptr_t base, std::size_t bytes) {
-        DWORD error = ERROR_SUCCESS;
         for (auto cursor = base; cursor < base + bytes;) {
             const auto memory = query(cursor);
-            const auto released = memory.State == MEM_RESERVE ? VirtualFree(memory.BaseAddress, 0, MEM_RELEASE) : unmap(GetCurrentProcess(), memory.BaseAddress, 0);
-            if (!released && error == ERROR_SUCCESS) error = GetLastError();
-            cursor = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+            const auto regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
+            if (memory.State == MEM_RESERVE) {
+                cursor = regionEnd;
+                continue;
+            }
+            if (memory.State != MEM_COMMIT || memory.Type != MEM_MAPPED) return ERROR_INVALID_ADDRESS;
+            if (!unmap(GetCurrentProcess(), memory.BaseAddress, MEM_PRESERVE_PLACEHOLDER)) return GetLastError();
+            cursor = regionEnd;
         }
-        return error;
+        const auto placeholder = query(base);
+        if (placeholder.RegionSize != bytes && !VirtualFree(reinterpret_cast<void*>(base), bytes, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS)) return GetLastError();
+        if (!VirtualFree(reinterpret_cast<void*>(base), 0, MEM_RELEASE)) return GetLastError();
+        return ERROR_SUCCESS;
     }
 
     Ranges cleanRanges;
