@@ -145,17 +145,27 @@ void ScalarReads(AgcDriver::VulkanDevice& device) {
     for (const auto code : {std::span<const std::uint32_t>(Code), std::span<const std::uint32_t>(mixedCode)}) {
         request.shader.code = code;
         request.shader.codeAddress = reinterpret_cast<std::uintptr_t>(code.data());
-        auto input = BufferDescriptor(Input.data(), InputBytes);
+        const auto plain = BufferDescriptor(Input.data(), InputBytes);
+        std::copy(plain.begin(), plain.end(), userData.begin());
+        Output.fill(Fill);
+        const auto plainResult = ShaderRecompiler::Recompile(request);
+        device.Dispatch(plainResult, 1, 1, 1);
+        device.WaitIdle();
+        const auto plainOutput = Output;
+        auto input = plain;
         input[1] |= 0x40000000u;
         std::copy(input.begin(), input.end(), userData.begin());
+        Output.fill(Fill);
         const auto result = ShaderRecompiler::Recompile(request);
-        try {
-            device.Dispatch(result, 1, 1, 1);
-        } catch (const std::runtime_error& error) {
-            Require(std::string(error.what()).find("buffer descriptor has reserved bits set") != std::string::npos, "vector or mixed buffer descriptor failed for another reason");
-            continue;
-        }
-        throw std::runtime_error("a vector or mixed buffer access accepted reserved descriptor bits");
+        device.Dispatch(result, 1, 1, 1);
+        device.WaitIdle();
+        // Bit 30 of the second V# word is advisory for a shader-resource-table buffer: it falls
+        // between the 14-bit stride (bits 16-29) and SW_ENABLE (bit 31), so ShaderBufferResource
+        // reads neither it nor anything it feeds, and the port binds such a descriptor instead of
+        // refusing it (Graphics.cpp asserts the same acceptance, and for types 1 to 3 as well).
+        // Vector and mixed accesses therefore have to read exactly what they read with the bit
+        // clear, which is a stronger claim than the refusal this loop used to expect.
+        Require(Output == plainOutput, "a vector or mixed buffer access with the advisory V# bit 30 set read " + Hex(Output[0]) + " instead of " + Hex(plainOutput[0]) + ", and reserved buffer bits are supposed to be ignored");
     }
 }
 
