@@ -918,6 +918,75 @@ void CheckCommittedRanges() {
     Require(!UnchangedCommittedSince(first, 0), "an unknown generation was accepted for the committed parts");
 }
 
+// The dirty summary (GuestMemory.cpp): a collect walks only the blocks of its range this ordering
+// point has not already walked clean, and a range it covers whole is not walked at all. The rule is
+// the collect epoch's own: a CPU store made after the walk the summary stands for is seen by the walk
+// the next ordering point makes, and not before it.
+void CheckDirtySummary() {
+    constexpr std::size_t bytes = 4 * Block;
+    const bool summary = std::getenv("APS5_NO_TARGET_DIRTY_SUMMARY") == nullptr;
+    auto* memory = static_cast<volatile std::uint8_t*>(AllocateWatched(bytes));
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    std::memset(const_cast<std::uint8_t*>(memory), 0x11, bytes);
+    const auto walkedBytes = [] { return ThreadSummaryWalkedBytes(); };
+
+    // An ordering point whose walk settles every page of the range.
+    BumpCollectEpoch();
+    Require(CollectWrites(base, bytes) != 0, "the written range was not collected");
+
+    // A walk that finds a CPU store reports it and stands for nothing: the block has to be walked
+    // again until a walk of it finds nothing.
+    BumpCollectEpoch();
+    memory[11] = 0x22;
+    const auto beforeStore = TrackerGeneration();
+    const auto written = CollectWrites(base, Block);
+    Require(written > beforeStore && WrittenSince(base, Block, beforeStore), "the written block was not collected");
+    const auto afterStore = walkedBytes();
+    const auto afterStoreGeneration = TrackerGeneration();
+    // A range no memo entry holds (the entry above is one block): all three of its blocks are walked,
+    // the written one among them.
+    Require(CollectWrites(base, 3 * Block) != 0 && TrackerGeneration() != afterStoreGeneration, "the range beside the written block did not walk");
+    if (summary) Require(walkedBytes() == afterStore + 3 * Block, "a block whose walk found a store was summarised");
+
+    // The next ordering point: its walks find nothing, so they stand clean for the blocks they cover.
+    BumpCollectEpoch();
+    Require(CollectWrites(base, Block) != 0 && CollectWrites(base + Block, Block) != 0, "the first two blocks were not collected");
+    const auto clean = TrackerGeneration();
+    // A range the memo does not hold and whose first two blocks stand clean: only the third is walked.
+    const auto beforePart = walkedBytes();
+    const auto beforePartGeneration = TrackerGeneration();
+    Require(CollectWrites(base, 3 * Block) != 0 && TrackerGeneration() != beforePartGeneration, "the partly summarised range did not walk what was left");
+    if (summary) Require(walkedBytes() == beforePart + Block, "the summary walked a block it had cleared");
+    Require(UnchangedSince(base, bytes, clean), "a partly summarised range reads as written");
+
+    // The last block walked on its own, so every block of the range below stands clean while no memo
+    // entry covers the range itself.
+    Require(CollectWrites(base + 3 * Block, Block) != 0, "the last block was not collected");
+    Require(UnchangedSince(base, bytes, clean), "the block walks reported a store");
+
+    // A raw CPU store into a block the summary covers, then the whole range: with the summary on
+    // nothing is walked and the store waits for the next ordering point, exactly as it does for a
+    // memoized walk. With APS5_NO_TARGET_DIRTY_SUMMARY=1 the walk runs and finds it at once.
+    memory[3 * Block + 11] = 0x22;
+    const auto beforeSkips = ThreadSummarySkips();
+    const auto beforeWhole = TrackerGeneration();
+    const auto beforeWholeWalked = walkedBytes();
+    Require(CollectWrites(base, bytes) != 0, "the summarised range was not collected");
+    if (summary) {
+        Require(ThreadSummarySkips() == beforeSkips + 1, "a range the summary covers was walked");
+        Require(TrackerGeneration() == beforeWhole, "a skipped walk moved the tracker generation");
+        Require(walkedBytes() == beforeWholeWalked, "a skipped walk walked pages");
+        Require(UnchangedSince(base, bytes, clean), "a store made after a summary skip was seen before the next ordering point");
+    } else {
+        Require(TrackerGeneration() != beforeWhole && !UnchangedSince(base, bytes, clean), "APS5_NO_TARGET_DIRTY_SUMMARY=1 did not restore the walk that finds the store");
+    }
+
+    // The next ordering point walks the whole range and finds the store.
+    BumpCollectEpoch();
+    Require(CollectWrites(base, bytes) != 0, "the range was not collected after the store");
+    Require(!UnchangedSince(base, bytes, clean) && WrittenSince(base + 3 * Block, 4, clean), "a CPU store after a summary skip was missed");
+}
+
 int main() {
     try {
         if (!WriteWatched()) {
@@ -929,7 +998,7 @@ int main() {
             CheckHostHole();
             return 0;
         }
-#endif
+        #endif
         CheckSharedBlock();
         CheckStoredAllSince();
         CheckOwnStore();
@@ -943,6 +1012,7 @@ int main() {
 #endif
         CheckVersionRanges();
         CheckCollectBoundaries();
+        CheckDirtySummary();
         CheckImportWindow();
         CheckImportWindowZeroPages();
         CheckImportWindowOtherThread();

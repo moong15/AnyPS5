@@ -451,6 +451,12 @@ public:
                 const auto memory = query(cursor);
                 if (memory.State != MEM_COMMIT || memory.Type != MEM_PRIVATE) return false;
                 const auto stop = std::min(end, reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize);
+                // The region is collectable, and this is the only query its pages cost: the whole run
+                // of private pages a commit made is remembered, so the next collect over any part of
+                // it (the walk of a neighbouring surface, the probe below) asks no query at all until
+                // a commit, a mapping or a release drops it again. Every commit clears the cache, so
+                // a busy arena pays this query once per region per collect instead of twice.
+                remember(collectableRanges, cursor, stop);
                 if (capacity == *count) return true;
                 const auto touched = (((stop + 4095) & ~static_cast<std::uintptr_t>(4095)) - (cursor & ~static_cast<std::uintptr_t>(4095))) / 4096;
                 ULONG_PTR available = std::min<ULONG_PTR>(capacity - *count, touched);

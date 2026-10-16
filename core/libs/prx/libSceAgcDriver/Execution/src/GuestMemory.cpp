@@ -96,6 +96,9 @@ std::atomic<std::uint64_t> collectDirtyRuns{0};
 #endif
 std::atomic<std::uint64_t> trackerWaits{0};
 std::atomic<std::uint64_t> trackerAcquisitions{0};
+// Collects the dirty summary covered whole, and the bytes the walks it left behind covered.
+std::atomic<std::uint64_t> summarySkips{0};
+std::atomic<std::uint64_t> summaryWalkedBytes{0};
 std::uintptr_t PagesBase();
 std::size_t PagesSize();
 std::uintptr_t ImagePagesBase();
@@ -320,6 +323,7 @@ public:
         AgcDriver::ProfilePrint_nid_no_patch(" collect-memo hits %llu, collect epochs %llu", static_cast<unsigned long long>(collectMemoHits.load()), static_cast<unsigned long long>(collectEpochBumps.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" collect scopes %llu", static_cast<unsigned long long>(collectScopeSwitches.load()));
         AgcDriver::ProfilePrint_nid_no_patch(" collect-dirty %llu tracker waits %llu / %llu", static_cast<unsigned long long>(collectDirty.load()), static_cast<unsigned long long>(trackerWaits.load()), static_cast<unsigned long long>(trackerAcquisitions.load()));
+        AgcDriver::ProfilePrint_nid_no_patch(" summary skips %llu, pages walked after summary %llu", static_cast<unsigned long long>(summarySkips.load()), static_cast<unsigned long long>(summaryWalkedBytes.load()) / 4096);
         AgcDriver::ProfilePrint_nid_no_patch(" | arena 0x%llx+0x%llx image 0x%llx+0x%llx forgets %llu (%.0f MiB)", static_cast<unsigned long long>(PagesBase()), static_cast<unsigned long long>(PagesSize()), static_cast<unsigned long long>(ImagePagesBase()), static_cast<unsigned long long>(ImagePagesSize()), static_cast<unsigned long long>(forgetCalls.load()), forgetBytes.load() / 1048576.0);
         {
             std::lock_guard lock(state.callersMutex);
@@ -769,6 +773,9 @@ struct WriteTracker {
     // late label rule asks whether the CPU touched a label's block, and the driver's own GPU label
     // records in the same block (the title's per-job slots are 0x20 apart) must not count.
     std::vector<std::uint32_t> cpuBlocks;
+    // The dirty summary (see cleanSince): per block, the token of the collect that last walked it
+    // and found no CPU store in it, 0 when no such collect is standing.
+    std::vector<std::uint32_t> cleanSummary;
     WriteWatchCoverage coverage;
     std::vector<std::uint32_t> hintBlocks;
 #else
@@ -777,6 +784,7 @@ struct WriteTracker {
     struct Leaf {
         std::array<std::uint32_t, LeafBlocks> blocks{};
         std::array<std::uint32_t, LeafBlocks> cpuBlocks{};
+        std::array<std::uint32_t, LeafBlocks> cleanSummary{};
     };
     std::vector<std::unique_ptr<Leaf>> leaves;
 #endif
@@ -812,6 +820,7 @@ struct WriteTracker {
         if (!watched) return;
         blocks.assign(size / WriteBlockBytes + 1, 0);
         cpuBlocks.assign(size / WriteBlockBytes + 1, 0);
+        cleanSummary.assign(blocks.size(), 0);
         coverage.Initialize(base, size);
         hintBlocks.assign(size / WriteBlockBytes + 1, 0);
         pages.resize(1u << 16);
@@ -1007,17 +1016,53 @@ struct WriteTracker {
 #endif
     }
 
+    // The dirty summary: a block walked clean by a collect that ran under `token` (a value taken at
+    // the walking thread's last ordering point, so it is never the token of another ordering point)
+    // cannot hold a CPU store that walk did not see. A later collect of a range containing it leaves
+    // the block out, which is the same rule the collect memo already gives the ranges it holds: a
+    // store landing after that walk is seen by the next ordering point's walk.
+    bool cleanSince(std::uint64_t block, std::uint32_t token) const {
+        if (token == 0) return false;
+#ifdef _WIN32
+        return !cleanSummary.empty() && cleanSummary[block] == token;
+#else
+        const auto& leaf = leaves[block / LeafBlocks];
+        return leaf != nullptr && leaf->cleanSummary[block % LeafBlocks] == token;
+#endif
+    }
+
+    void setSummary(std::uint64_t block, std::uint32_t token) {
+#ifdef _WIN32
+        if (cleanSummary.empty()) return;
+        cleanSummary[block] = token;
+#else
+        if (token == 0) {
+            const auto& leaf = leaves[block / LeafBlocks];
+            if (leaf != nullptr) leaf->cleanSummary[block % LeafBlocks] = 0;
+            return;
+        }
+        auto& leaf = leaves[block / LeafBlocks];
+        if (leaf == nullptr) leaf = std::make_unique<Leaf>();
+        leaf->cleanSummary[block % LeafBlocks] = token;
+#endif
+    }
+
+    // Every stamp drops the block's summary: a driver store, a remap, an import window or a dirty
+    // page a walk found are all writes the summary's walk has not seen. The clean walk marks its
+    // blocks before it starts, so its own dirty pages drop the mark again (see walkSummary).
     void stamp(std::uint64_t block, std::uint32_t stampGeneration, StampKind kind) {
         const bool cpu = kind == StampKind::Cpu || kind == StampKind::ImportWindow;
         const bool stored = kind != StampKind::ImportWindow;
 #ifdef _WIN32
         if (stored) blocks[block] = stampGeneration;
         if (cpu) cpuBlocks[block] = stampGeneration;
+        if (!cleanSummary.empty()) cleanSummary[block] = 0;
 #else
         auto& leaf = leaves[block / LeafBlocks];
         if (leaf == nullptr) leaf = std::make_unique<Leaf>();
         if (stored) leaf->blocks[block % LeafBlocks] = stampGeneration;
         if (cpu) leaf->cpuBlocks[block % LeafBlocks] = stampGeneration;
+        leaf->cleanSummary[block % LeafBlocks] = 0;
 #endif
     }
 };
@@ -1064,6 +1109,19 @@ void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_
 // presenter, game threads inside the flush hook), as nothing orders the CPU's writes for it.
 std::atomic<std::uint64_t> nextCollectEpoch{1};
 thread_local std::uint64_t threadCollectEpoch = 0;
+
+// The dirty summary's token (see WriteTracker::cleanSince): a value no other scope holds, taken at
+// the calling thread's last ordering point, so a walk made under it can be told from a walk made at
+// any other ordering point. A thread that never bumps one keeps 0 and its collects always walk
+// (nothing orders its CPU writes), exactly as its epochs are never reused.
+std::atomic<std::uint32_t> nextSummaryToken{1};
+thread_local std::uint32_t threadSummaryToken = 0;
+
+// What the dirty summary saved the calling thread, for the [draws] readTarget line: the collects it
+// covered whole and the bytes the walks that did run covered after it. Taken with the profile's
+// other thread counters, and kept unconditionally: two thread-local adds per collect is nothing.
+thread_local std::uint64_t threadSummarySkips = 0;
+thread_local std::uint64_t threadSummaryWalkedBytes = 0;
 
 std::uint64_t currentCollectEpoch() {
     if (threadCollectEpoch != 0) return threadCollectEpoch;
@@ -1204,6 +1262,94 @@ bool walkWrites(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop, 
 #endif
 }
 
+bool dirtySummaryEnabled() {
+    static const bool disabled = std::getenv("APS5_NO_TARGET_DIRTY_SUMMARY") != nullptr;
+    return !disabled;
+}
+
+// The dirty summary of a range (see WriteTracker::cleanSince): the page runs of [first, stop) whose
+// blocks this scope has not already walked clean. A range it covers entirely is not walked at all,
+// and a range it covers in part is walked over what is left, so the summary can only ever save a
+// walk, never a page of one.
+struct DirtySummary {
+    WriteTracker& tracker;
+    std::uint32_t token;
+    std::uint64_t firstBlock = 0;
+    std::uint64_t lastBlock = 0;
+    std::array<std::pair<std::uint64_t, std::uint64_t>, 8> runs{};
+    std::size_t count = 0;
+
+    DirtySummary(WriteTracker& aTracker, std::uint64_t first, std::uint64_t stop, std::uint32_t aToken)
+        : tracker(aTracker), token(aToken), firstBlock(aTracker.blockOf(first)), lastBlock(aTracker.blockOf(stop - 1)) {
+        for (auto block = firstBlock; block <= lastBlock; ++block) {
+            if (tracker.cleanSince(block, token)) continue;
+            const auto begin = std::max(first, tracker.blockBegin(block));
+            const auto end = std::min(stop, tracker.blockBegin(block + 1));
+            if (count == 0 || runs[count - 1].second != begin) {
+                // More runs than the array holds: the whole range is walked, which is what the walk
+                // did before the summary existed.
+                if (count == runs.size()) {
+                    runs[0] = {first, stop};
+                    count = 1;
+                    return;
+                }
+                runs[count++] = {begin, end};
+            } else {
+                runs[count - 1].second = end;
+            }
+        }
+    }
+
+    bool Skips() const { return count == 0; }
+    std::uint64_t Walked() const {
+        std::uint64_t walked = 0;
+        for (std::size_t i = 0; i < count; ++i) walked += runs[i].second - runs[i].first;
+        return walked;
+    }
+};
+
+// Drops the summary marks of every block of [first, stop) unless the walk that made them finished:
+// a failed walk (uncommitted or inaccessible pages) leaves the range no more collected than before.
+struct SummaryMarks {
+    WriteTracker& tracker;
+    std::uint64_t firstBlock;
+    std::uint64_t lastBlock;
+    bool standing = true;
+
+    ~SummaryMarks() {
+        if (!standing) return;
+        for (auto block = firstBlock; block <= lastBlock; ++block) tracker.setSummary(block, 0);
+    }
+};
+
+// A summary with no token (the switch off, or a thread that never reached an ordering point) covers
+// nothing, so its one run is the whole range and it marks nothing.
+
+// The walk of a memoized collect, behind the dirty summary: the blocks the summary clears are left
+// out and marked clean under this scope's token, and a dirty page or any other stamp drops the mark
+// again (WriteTracker::stamp). A range the summary covers entirely is not walked at all. Returns
+// false only for a walk that did not complete (uncommitted or inaccessible pages).
+bool walkSummary(WriteTracker& tracker, const DirtySummary& summary) {
+    SummaryMarks marks{tracker, summary.firstBlock, summary.lastBlock};
+    // The marks go down before the walk: a dirty page it finds stamps its block, and a stamp drops
+    // the mark, so only the blocks the walk found nothing in stand for it. With the summary off
+    // (token 0) there is nothing to mark and nothing to drop.
+    if (summary.token != 0) {
+        for (std::size_t i = 0; i < summary.count; ++i) {
+            const auto [begin, end] = summary.runs[i];
+            for (auto block = tracker.blockOf(begin); block <= tracker.blockOf(end - 1); ++block) {
+                if (tracker.blockBegin(block) < begin || tracker.blockBegin(block + 1) > end) continue;
+                if (!tracker.cleanSince(block, summary.token)) tracker.setSummary(block, summary.token);
+            }
+        }
+    }
+    for (std::size_t i = 0; i < summary.count; ++i) {
+        if (!walkWrites(tracker, summary.runs[i].first, summary.runs[i].second, StampKind::Cpu)) return false;
+    }
+    marks.standing = false;
+    return true;
+}
+
 std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
     auto& tracker = Tracker();
@@ -1251,7 +1397,6 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
             }
         }
     }
-    const TimedAccess timed(CounterCollect, bytes);
 #ifndef _WIN32
     if (useMemo && threadCollectEpoch != 0 && bytes <= WriteBlockBytes) {
         const auto begin = first & ~(WriteBlockBytes - 1);
@@ -1262,7 +1407,21 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         }
     }
 #endif
-    if (!walkWrites(tracker, first, stop, StampKind::Cpu)) return 0;
+    // The dirty summary decides what the walk has to cover: a range it covers entirely is not walked
+    // at all, and a range it covers in part is walked over the blocks that are left. The collect
+    // counter takes the walked bytes, so a skipped walk is not counted as walked pages.
+    const std::uint32_t summaryToken = dirtySummaryEnabled() && useMemo && threadSummaryToken != 0 ? threadSummaryToken : 0;
+    const DirtySummary summary(tracker, first, stop, summaryToken);
+    if (summary.Skips() && summary.token != 0) {
+        ++threadSummarySkips;
+        summarySkips.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        const std::uint64_t walked = summary.Walked();
+        const TimedAccess timed(CounterCollect, walked);
+        threadSummaryWalkedBytes += walked;
+        if (summary.token != 0) summaryWalkedBytes.fetch_add(walked, std::memory_order_relaxed);
+        if (!walkSummary(tracker, summary)) return 0;
+    }
     // Only a completed walk is remembered; a failed one (uncommitted pages) returned 0 above.
     if (collectMemoEnabled()) {
         const auto serial = unwatchSerial.load(std::memory_order_relaxed);
@@ -1290,6 +1449,7 @@ std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
 
 void BumpCollectEpoch() {
     threadCollectEpoch = nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    threadSummaryToken = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
     collectEpochBumps.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1302,6 +1462,7 @@ void SetCollectScope(std::uint32_t queue, std::uint64_t token) {
     constexpr std::uint64_t ScopeBit = std::uint64_t{1} << 63;
     constexpr std::uint64_t TokenMask = 0x00ffffffffffffffull;
     threadCollectEpoch = ScopeBit | ((token & TokenMask) << 8) | std::min<std::uint32_t>(queue, 0xffu);
+    threadSummaryToken = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
     collectScopeSwitches.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2099,6 +2260,14 @@ void NoteLockedGpuWait(double ms) {
 std::uint64_t ThreadCollectedBytes() {
     if (!MemoryProfiled()) return 0;
     return CounterFor(CounterCollect).bytes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ThreadSummarySkips() {
+    return threadSummarySkips;
+}
+
+std::uint64_t ThreadSummaryWalkedBytes() {
+    return threadSummaryWalkedBytes;
 }
 
 std::uint64_t ThreadSkippedWalks() {

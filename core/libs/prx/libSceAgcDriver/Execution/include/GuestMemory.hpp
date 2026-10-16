@@ -63,6 +63,15 @@ void Unwatch(std::uint64_t address, std::size_t bytes);
 bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched = true);
 void SetUnwatchHook(void (*hook)(std::uint64_t address, std::size_t bytes));
 bool Watched(std::uint64_t address, std::size_t bytes);
+// The dirty summary: a collect walks only the blocks of its range that this thread's current
+// ordering point has not already walked clean, and a range the summary covers whole is not walked at
+// all. A walk marks the blocks it covered whole as clean under the token of that ordering point, and
+// any stamp drops the mark (a dirty page the walk found, a driver store, a remap, an import), so a
+// CPU store into the target is still seen by the walk the next ordering point makes: the same rule
+// the collect memo below already gives the ranges it holds. APS5_NO_TARGET_DIRTY_SUMMARY=1 turns it
+// off and every collect walks its whole range, as before. CollectWritesUncached always walks: the
+// decisions that ask for a fresh walk (which blocks the CPU wrote while a GPU result was pending)
+// must not read a summary standing from an earlier collect in the same ordering point.
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes);
 bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation);
 // UnchangedSince for several ranges under one tracker lock: true only when every one holds.
@@ -201,6 +210,11 @@ std::uint64_t ThreadCollectedBytes();
 // ThreadCollectedBytes (0 without the memory profile).
 std::uint64_t ThreadSkippedWalks();
 std::uint64_t ThreadSkippedBytes();
+// Collects the dirty summary covered whole, and the bytes the walks it left behind covered: what the
+// summary saved the caller of a target lookup, sampled beside the two above for the [draws] readTarget
+// line. Unlike them these are kept without the memory profile (two thread-local adds per collect).
+std::uint64_t ThreadSummarySkips();
+std::uint64_t ThreadSummaryWalkedBytes();
 // A code address (a return address) as an offset into its module, in the form of the [guestmem]
 // callers (symbolized with nm against the driver's image). Takes the loader lock: for reports only.
 unsigned long long CodeOffset(const void* address);

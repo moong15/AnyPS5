@@ -516,8 +516,11 @@ if(BUILD_TESTING)
     set_target_properties(agc_write_tracking_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_write_tracking COMMAND agc_write_tracking_tests)
     set_tests_properties(agc_write_tracking PROPERTIES SKIP_RETURN_CODE 77)
+    # The dirty summary's off switch: the same binary, every collect walking its whole range again.
+    add_test(NAME agc_write_tracking_no_summary COMMAND agc_write_tracking_tests)
+    set_tests_properties(agc_write_tracking_no_summary PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_NO_TARGET_DIRTY_SUMMARY=1")
     if(WIN32)
-        set_tests_properties(agc_write_tracking PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_write_tracking agc_write_tracking_no_summary PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
@@ -536,10 +539,12 @@ if(BUILD_TESTING)
     set_tests_properties(agc_target_walk_skip PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_PROFILE_DRAW=1")
     add_test(NAME agc_target_walk_skip_off COMMAND agc_target_walk_skip_tests)
     set_tests_properties(agc_target_walk_skip_off PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_PROFILE_DRAW=1;APS5_NO_TARGET_WALK_SKIP=1")
+    add_test(NAME agc_target_walk_skip_no_summary COMMAND agc_target_walk_skip_tests)
+    set_tests_properties(agc_target_walk_skip_no_summary PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "APS5_PROFILE_DRAW=1;APS5_NO_TARGET_DIRTY_SUMMARY=1")
     if(WIN32)
         set_tests_properties(agc_target_walk_skip PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-        set_tests_properties(agc_target_walk_skip_off PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_target_walk_skip_off agc_target_walk_skip_no_summary PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
