@@ -26,6 +26,20 @@ namespace AgcDriver::Graphics {
 
 class Buffer;
 
+struct PassDrawState {
+    bool known = false;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkViewport viewport{};
+    VkRect2D scissor{};
+    VkCullModeFlags cullMode = 0;
+    VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    std::array<float, 3> depthBias{};
+    std::array<float, 2> depthBounds{};
+    VkBool32 depthTest = VK_FALSE, depthWrite = VK_FALSE, depthBoundsTest = VK_FALSE, stencilTest = VK_FALSE;
+    VkCompareOp depthCompare = VK_COMPARE_OP_ALWAYS;
+    std::array<VkStencilOpState, 2> stencil{};
+};
+
 // Accumulates GPU work across guest commands so the CPU does not wait for each one. Dispatches and the
 // copies that feed them record into one open batch; Submit sends it to the queue without waiting and
 // Sync waits for every batch, then runs its completion actions (write-backs) in order. Objects handed
@@ -65,6 +79,7 @@ public:
         VkCommandBuffer commands = VK_NULL_HANDLE;
         bool continued = false;
         bool barrier = true;
+        PassDrawState* drawState = nullptr;
     };
     DrawPassStart StartDrawPass(std::uint64_t key, bool forced, bool fenced, const PassAccess& access);
     void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass = {});
@@ -639,6 +654,7 @@ private:
             std::uint64_t key = 0;
             std::uint32_t timing = NoTiming;
             std::function<void(VkCommandBuffer)> afterPass;
+            PassDrawState drawState;
         } renderPass;
         PassHazards passHazards;
         // A pass ended in this batch: Submit records the host-read barrier its draws left out.

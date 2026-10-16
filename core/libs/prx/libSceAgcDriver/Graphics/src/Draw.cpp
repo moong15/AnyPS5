@@ -1792,7 +1792,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     bool rewritten = false;
     if (!meshIndirect && !inputs.restartTable.empty()) meshArguments = directMeshArguments(context, draw, inputs.restartTable);
     if (continued) {
-        record.pipeline->Continue(commands, state);
+        record.pipeline->Continue(commands, state, start.drawState);
     } else {
         for (const auto& proxy : record.proxies) {
             proxy->RecordAttachmentProxyLoad(commands, VK_IMAGE_LAYOUT_GENERAL);
@@ -1817,7 +1817,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         // Earlier recorded work (dispatches, the previous draw) wrote the images in the general
         // layout, which a lean draw renders in: no transitions.
         APS5_LOG_OUT_DEBUG("Beginning pipeline renderExtent=%ux%u", state.renderExtent.width, state.renderExtent.height);
-        record.pipeline->Begin(commands, *record.framebuffer, state.renderExtent, state);
+        record.pipeline->Begin(commands, *record.framebuffer, state.renderExtent, state, start.drawState);
     }
     APS5_LOG_CHARS_OUT_DEBUG("Pipeline Begin OK");
     if (drawBindings != nullptr) {
@@ -1834,14 +1834,15 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     if (record.stencilReplay.empty()) recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     else {
         recordStencilReplay(context, commands, state, draw, inputs, record.stencilReplay, shaders, resources, record.pushBytes, record.pushStages);
+        if (start.drawState != nullptr) start.drawState->known = false;
         for (const auto& [reference, pipeline] : record.stencilReplay) recorder->Keep(pipeline);
     }
     if (record.pipeline->SplitsFaces()) {
-        record.pipeline->ContinueBackFaces(commands, state);
+        record.pipeline->ContinueBackFaces(commands, state, start.drawState);
         recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     }
     if (record.pipeline->SplitsSecondChannel()) {
-        record.pipeline->ContinueSecondChannel(commands);
+        record.pipeline->ContinueSecondChannel(commands, start.drawState);
         recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     }
     if (meshArguments != nullptr) recorder->Keep(meshArguments);

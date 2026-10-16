@@ -198,6 +198,7 @@ private:
     EvaluatedValues _cache;
     std::vector<IrValue*> _visiting;
     DenseValues _dense;
+    int _nested = 0;
 };
 
 using Evaluator = BasicEvaluator<IrNode>;

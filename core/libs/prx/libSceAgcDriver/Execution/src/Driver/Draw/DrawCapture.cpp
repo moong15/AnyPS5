@@ -57,6 +57,8 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
 
     stageCapture.regions = shaderMemory.TakeRecentRegions();
     stageCapture.userDataUse = capture->userDataUse;
+    stageCapture.prepared = invocation.Handle();
+    stageCapture.bufferBaseWords = capture->bufferBaseWords;
     recompiled[i] = true;
     memory = shaderMemory.Regions();
 
@@ -156,6 +158,7 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
             variant->shader = programs[i].snapshot;
             variant->forgetSerial = stageCapture.forgetSerial;
             variant->pushOffset = stageCapture.pushOffset;
+            variant->prepared = stageCapture.prepared;
             if (vertexInfos[i]) variant->vertexInfo = std::make_shared<const ShaderRecompiler::ShaderVertexStageInfo>(*vertexInfos[i]);
 
             std::vector<ShaderRecompiler::MemoryRegion> regions(stageCapture.regions.begin(), stageCapture.regions.end());
@@ -163,6 +166,7 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
             std::stable_sort(regions.begin(), regions.end(), [](const ShaderRecompiler::MemoryRegion& a, const ShaderRecompiler::MemoryRegion& b) { return a.guestAddress < b.guestAddress; });
             tagVariantRuns(*variant, regions, stageCapture.userDataUse, decodeReads[i].empty() && (!vertexInfos[i] || vertexInfos[i]->resourcesNum == 0), programs[i].hiddenUserWords);
             if (drawStageDataHits() && stageCapture.capture != nullptr && !stageCapture.capture->readTrace.leaves.empty()) recordStageDataPositions(*variant, *stageCapture.capture, decodeReads[i]);
+            tagBufferWords(*variant, stageCapture.bufferBaseWords);
             if (traceDrawCache() && entry != nullptr && matched[i] == nullptr && i < entry->stages.size()) {
                 const auto& variants = entry->stages[i];
                 const auto front = std::find_if(variants.begin(), variants.end(), [&](const std::shared_ptr<DispatchVariant>& kept) { return kept->pushOffset == variant->pushOffset; });
@@ -185,14 +189,22 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
                 };
                 return (a.runs == b.runs && a.words == b.words) || flatten(a) == flatten(b);
             };
-            const auto sameForwardedWords = [](const ShaderRecompiler::RecompileResult& a, const ShaderRecompiler::RecompileResult& b, std::uint32_t hidden) {
-                if (a.pushConstants.size() != b.pushConstants.size() || a.shaderDataUserWords != b.shaderDataUserWords) return false;
-                for (std::size_t slot = 0; slot < a.shaderDataUserWords.size() && (slot + 1) * sizeof(std::uint32_t) <= a.pushConstants.size(); ++slot) {
-                    if (a.shaderDataUserWords[slot] >= hidden && std::memcmp(a.pushConstants.data() + slot * sizeof(std::uint32_t), b.pushConstants.data() + slot * sizeof(std::uint32_t), sizeof(std::uint32_t)) != 0) return false;
+            const auto sameBindings = [&](const ShaderRecompiler::RecompileResult& a, const ShaderRecompiler::RecompileResult& b) {
+                if (a.bindings.size() != b.bindings.size()) return false;
+                for (std::size_t binding = 0; binding < a.bindings.size(); ++binding) {
+                    if (a.bindings[binding].role == ShaderRecompiler::DescriptorRole::ShaderData) continue;
+                    if (a.bindings[binding].guestDescriptor != b.bindings[binding].guestDescriptor) return false;
                 }
                 return true;
             };
-            if (verifyHit && matched[i] != nullptr && (!sameContent(*matched[i], *variant) || !sameForwardedWords(*matched[i]->compiled, *variant->compiled, programs[i].hiddenUserWords))) {
+            const auto sameForwardedWords = [](const ShaderRecompiler::RecompileResult& a, const std::vector<std::byte>& push, const ShaderRecompiler::RecompileResult& b, std::uint32_t hidden) {
+                if (push.size() != b.pushConstants.size() || a.shaderDataUserWords != b.shaderDataUserWords) return false;
+                for (std::size_t slot = 0; slot < a.shaderDataUserWords.size() && (slot + 1) * sizeof(std::uint32_t) <= push.size(); ++slot) {
+                    if (a.shaderDataUserWords[slot] >= hidden && std::memcmp(push.data() + slot * sizeof(std::uint32_t), b.pushConstants.data() + slot * sizeof(std::uint32_t), sizeof(std::uint32_t)) != 0) return false;
+                }
+                return true;
+            };
+            if (verifyHit && matched[i] != nullptr && (!sameContent(*matched[i], *variant) || (programs[i].hiddenUserWords == 0 && !sameBindings(*matched[i]->compiled, *variant->compiled)) || !sameForwardedWords(*matched[i]->compiled, matched[i]->patchedPushConstants.empty() ? matched[i]->compiled->pushConstants : matched[i]->patchedPushConstants, *variant->compiled, programs[i].hiddenUserWords))) {
                 ++mismatches;
                 static std::atomic<std::uint64_t> reports{0};
                 if (reports.fetch_add(1) < 20) std::fprintf(stderr, "[draw-cache] verify: stage %zu (program 0x%llx) of a hit captured differently: %zu runs / %zu words matched, %zu / %zu fresh\n", i, static_cast<unsigned long long>(programs[i].binary.codeAddress), matched[i]->runs.size(), matched[i]->words.size(), variant->runs.size(), variant->words.size());

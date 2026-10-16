@@ -1382,17 +1382,19 @@ Recorder::DrawPassStart Recorder::StartDrawPass(std::uint64_t key, bool forced, 
         const auto commands = Commands();
         open->passHazards.Clear();
         open->passHazards.BeginPass();
-        return {commands, false, true};
+        open->renderPass.drawState = {};
+        return {commands, false, true, &open->renderPass.drawState};
     }
     const auto hazard = open->passHazards.Check(access, pass.key == key);
-    if (hazard == PassHazard::None && pass.key == key) return {open->commands, true, false};
+    if (hazard == PassHazard::None && pass.key == key) return {open->commands, true, false, &pass.drawState};
     const bool merge = MergeBarriers() && !fenced && !pass.fenced && !pass.afterPass;
     const bool elide = merge && hazard == PassHazard::None;
     endOpenRenderPass(!merge);
     const auto commands = Commands();
     if (!elide) open->passHazards.Clear();
     open->passHazards.BeginPass();
-    return {commands, false, !elide};
+    open->renderPass.drawState = {};
+    return {commands, false, !elide, &open->renderPass.drawState};
 }
 
 void Recorder::LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass) {
