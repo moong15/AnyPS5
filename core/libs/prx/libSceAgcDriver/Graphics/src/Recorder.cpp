@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/shaders/SampleCounter_spv.h"
 #include "prx/libSceAgcDriver/Graphics/shaders/SampleDumps_spv.h"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4Opcodes.hpp"
 #include "prx/libc/include/CpuTopology.hpp"
@@ -677,6 +678,14 @@ using WriteRanges = Recorder::WriteRanges;
 // reader that sees no overlap either precedes the note (the queues are unordered then, as on the
 // GPU) or follows the write-back.
 AtomicSharedPtr<const WriteRanges> pendingWrites;
+std::atomic<std::uint64_t> hookPrewaitLocks{0}, hookPrewaitWaits{0}, hookPrewaitUs{0}, hookCommitLockedWaits{0};
+thread_local bool hookPrewaiting = false;
+thread_local std::uint32_t hookAccessDepth = 0;
+
+bool HookPrewaitEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_HOOK_PREWAIT") == nullptr;
+    return enabled;
+}
 
 bool HookSnapshotEnabled() {
     // Debug aid: APS5_NO_HOOK_SNAPSHOT=1 takes the GpuMutex on every access as before.
@@ -1102,6 +1111,10 @@ void OrderHostWrite(std::uintptr_t address, std::size_t bytes) {
 // work first; then storage image results pending for the range are stored. The recorder is only
 // dereferenced under the GpuMutex (it is destroyed with its device under that lock).
 void FlushForAccess(std::uint64_t address, std::size_t bytes) {
+    struct Access {
+        Access() { ++hookAccessDepth; }
+        ~Access() { --hookAccessDepth; }
+    } access;
     hookCalls.fetch_add(1, std::memory_order_relaxed);
     // A label this worker queued but has not recorded writes the range: in queue order the label
     // precedes this access, so the group is recorded first (it then notes the range as a pending
@@ -1486,6 +1499,53 @@ bool Recorder::UnlockedCommitWaits() {
 
 Recorder::CommitWaitStatistics Recorder::CommitUnlockedWaits() {
     return CommitWaitStatistics{holdCounters.commitUnlockedWaits, holdCounters.commitUnlockedWaitMs, holdCounters.commitRelockMs};
+}
+
+bool Recorder::HookPrewaitNeeded() {
+    if (!HookPrewaitEnabled()) return false;
+    const auto snapshot = PendingWriteSnapshot();
+    return snapshot != nullptr && !snapshot->empty();
+}
+
+void Recorder::PrewaitHookReads(std::span<const std::pair<std::uint64_t, std::uint64_t>> reads, std::span<const std::pair<std::uint64_t, std::uint64_t>> extraReads) {
+    if (!HookPrewaitEnabled() || GuestMemory::GpuMutex().HeldByThisThread()) return;
+    const auto snapshot = PendingWriteSnapshot();
+    if (snapshot == nullptr || snapshot->empty()) return;
+    WriteRanges overlaps;
+    const auto collect = [&](auto ranges) {
+        for (const auto& range : ranges) {
+            if (range.first >= range.second || !SnapshotOverlaps(snapshot.get(), range.first, static_cast<std::size_t>(range.second - range.first))) continue;
+            overlaps.push_back(range);
+        }
+    };
+    collect(reads);
+    collect(extraReads);
+    if (overlaps.empty()) return;
+    std::sort(overlaps.begin(), overlaps.end());
+    std::size_t merged = 0;
+    for (const auto range : overlaps) {
+        if (merged != 0 && range.first <= overlaps[merged - 1].second) overlaps[merged - 1].second = std::max(overlaps[merged - 1].second, range.second);
+        else overlaps[merged++] = range;
+    }
+    overlaps.resize(merged);
+    const bool profile = DrawProfiled();
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Hook);
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    if (profile) hookPrewaitLocks.fetch_add(1, std::memory_order_relaxed);
+    struct Prewaiting {
+        Prewaiting() { hookPrewaiting = true; }
+        ~Prewaiting() { hookPrewaiting = false; }
+    } prewaiting;
+    for (const auto& [begin, end] : overlaps) {
+        auto* recorder = Active();
+        if (recorder == nullptr || !recorder->PendingWriteOverlaps(begin, static_cast<std::size_t>(end - begin))) continue;
+        CountSync(1);
+        recorder->SyncThrough(begin, static_cast<std::size_t>(end - begin), true);
+    }
+}
+
+Recorder::HookPrewaitStatistics Recorder::HookPrewaitCounts() {
+    return {hookPrewaitLocks.load(std::memory_order_relaxed), hookPrewaitWaits.load(std::memory_order_relaxed), hookPrewaitUs.load(std::memory_order_relaxed) / 1000.0, hookCommitLockedWaits.load(std::memory_order_relaxed)};
 }
 
 bool Recorder::SnapshotWriteOverlaps(std::uint64_t address, std::size_t bytes) {
@@ -3917,6 +3977,10 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
             holdCounters.commitUnlockedWaitMs += ms;
             holdCounters.commitRelockMs += relockMs;
         } else {
+            if (hookPrewaiting) {
+                hookPrewaitWaits.fetch_add(1, std::memory_order_relaxed);
+                hookPrewaitUs.fetch_add(static_cast<std::uint64_t>(ms * 1000), std::memory_order_relaxed);
+            }
             ++holdCounters.hookUnlockedWaits;
             holdCounters.hookUnlockedWaitMs += ms;
             if (source >= 0 && source < 5) {
@@ -4010,7 +4074,10 @@ void Recorder::waitFence(Batch& batch, int source) {
             ++waits;
             CountThreadSync(source, ms);
             CountSiteWait(ms);
-            if (!signaledAtStart) GuestMemory::NoteLockedGpuWait(ms);
+            if (!signaledAtStart) {
+                GuestMemory::NoteLockedGpuWait(ms);
+                if (!hookPrewaiting && hookAccessDepth != 0 && completionDepth == 0 && DriverDetail::DrawPipeline::Committing()) hookCommitLockedWaits.fetch_add(1, std::memory_order_relaxed);
+            }
             if (now - lastReport > std::chrono::seconds(10)) {
                 lastReport = now;
                 const auto& h = holdCounters;

@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawProgramTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "Optimization/ResourceProgram.hpp"
@@ -671,6 +672,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             DrawPipeline::FollowEpoch(commitQueue, epoch, queueEpoch);
             GuestMemory::SetCurrentPacket(commitPacket, commitQueue);
             try {
+                if (Graphics::Recorder::HookPrewaitNeeded()) {
+                    const auto hookReads = DrawHookReadRanges(decode->state, stages);
+                    Graphics::Recorder::PrewaitHookReads(DrawPipeline::CommitReads(), hookReads);
+                }
                 commitDraw(localDevice, commitQueue, decode->state, drawParameters, stages, snapshots, recipe, recipeStages, drawKey);
             } catch (const std::exception& error) {
                 if (traceIndex) AgcDriver::indexTrace("[index-base] pipeline-failure serial=%llu queue=0x%x cursor=%zu address=0x%llx count=%u elementBytes=%u error=%s\n", static_cast<unsigned long long>(commitSerial), commitQueue, commitCursor, static_cast<unsigned long long>(drawParameters.indexAddress), drawParameters.indexCount, drawParameters.indexSize, error.what());

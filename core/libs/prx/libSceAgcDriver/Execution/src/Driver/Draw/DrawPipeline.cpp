@@ -23,6 +23,7 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point since) {
 // HeldReads: the read ranges the queue holds, and how often a store asked about one (hits are
 // deferred write-backs that waited for a queued index read).
 thread_local const std::vector<DrawPipeline::Range>* committingOrderedReads = nullptr;
+thread_local const std::vector<DrawPipeline::Range>* committingReads = nullptr;
 std::atomic<std::uint64_t> heldReadRanges{0};
 std::atomic<std::uint64_t> heldReadQueries{0};
 std::atomic<std::uint64_t> heldReadHits{0};
@@ -169,6 +170,12 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
     char commitText[96];
     std::snprintf(commitText, sizeof(commitText), "; commit waits outside the lock %llu / %.1f ms (+ %.1f ms relocking)", static_cast<unsigned long long>(commitWaits.waits - previousWaits.waits), commitWaits.waitedMs - previousWaits.waitedMs, commitWaits.relockMs - previousWaits.relockMs);
     previousWaits = commitWaits;
+    static AgcDriver::Graphics::Recorder::HookPrewaitStatistics previousPrewaits{};
+    const auto prewaits = AgcDriver::Graphics::Recorder::HookPrewaitCounts();
+    char prewaitText[160];
+    std::snprintf(prewaitText, sizeof(prewaitText), "; hook pre-waits %llu / %.1f ms unlocked, hook waits still locked inside commits %llu", static_cast<unsigned long long>(prewaits.waits - previousPrewaits.waits), prewaits.waitedMs - previousPrewaits.waitedMs, static_cast<unsigned long long>(prewaits.lockedCommitWaits - previousPrewaits.lockedCommitWaits));
+    previousPrewaits = prewaits;
+    drainText += prewaitText;
     std::fprintf(stderr, "[draw] pipelined (10 s, depth %zu): %llu commits at %.1f us each on the committer, %llu failed; %llu enqueued behind %.2f on average, waiting %.1f us per draw for room;%s%s; drains:%s\n", Depth(), static_cast<unsigned long long>(commits), perCommit, static_cast<unsigned long long>(commitErrors), static_cast<unsigned long long>(enqueued), queued, perDraw, reads, commitText, drainText.c_str());
     commits = commitNs = commitErrors = enqueued = fullWaitNs = depthSum = 0;
     drains = {};
@@ -184,6 +191,7 @@ void DrawPipeline::run() {
             wake.wait(lock, [&] { return !items.empty(); });
             committerWaiting = false;
             commit = stopped ? nullptr : &items.front().commit;
+            committingReads = &items.front().reads;
             committingOrderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
         }
         const auto start = std::chrono::steady_clock::now();
@@ -202,6 +210,7 @@ void DrawPipeline::run() {
             fatal = std::current_exception();
         }
         committingOrderedReads = nullptr;
+        committingReads = nullptr;
         const auto spent = elapsedNs(start);
         if (fatal != nullptr && !stopped) {
             stopped = true;
@@ -309,6 +318,14 @@ void DrawPipeline::drain(DrainReason reason, std::uint32_t opcode) {
 
 std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
     return Queue0().drainRequests[std::min<std::uint32_t>(opcode, 0x100)].load(std::memory_order_relaxed);
+}
+
+std::span<const DrawPipeline::Range> DrawPipeline::CommitReads() {
+    return committingReads != nullptr ? std::span<const Range>(*committingReads) : std::span<const Range>{};
+}
+
+bool DrawPipeline::Committing() {
+    return committingReads != nullptr;
 }
 
 // The index range of a commit that has been decoded but has not run yet is still a guest read at

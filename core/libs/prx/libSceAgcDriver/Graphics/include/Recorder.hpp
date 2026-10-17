@@ -231,6 +231,14 @@ public:
         double relockMs;
     };
     static CommitWaitStatistics CommitUnlockedWaits();
+    struct HookPrewaitStatistics {
+        std::uint64_t locks, waits;
+        double waitedMs;
+        std::uint64_t lockedCommitWaits;
+    };
+    static bool HookPrewaitNeeded();
+    static void PrewaitHookReads(std::span<const std::pair<std::uint64_t, std::uint64_t>> reads, std::span<const std::pair<std::uint64_t, std::uint64_t>> extraReads = {});
+    static HookPrewaitStatistics HookPrewaitCounts();
     void CountSamples();
     bool RecordMeshArguments(VkCommandBuffer commands, VkDeviceAddress record, VkDeviceAddress arguments, std::span<const std::uint32_t, 7> rules);
     std::uint64_t SamplesTotal();

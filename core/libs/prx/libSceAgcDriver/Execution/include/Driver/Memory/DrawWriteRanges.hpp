@@ -15,6 +15,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawWriteRanges(const Graph
 std::vector<std::pair<std::uint64_t, std::uint64_t>> DispatchWriteRanges(const ShaderRecompiler::RecompileResult& compiled, bool& bounded);
 std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawReadRanges(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> stages, bool& bounded);
 std::vector<std::pair<std::uint64_t, std::uint64_t>> DispatchReadRanges(const ShaderRecompiler::RecompileResult& compiled);
+std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawHookReadRanges(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> stages);
 bool ExactDrawWrites();
 std::vector<std::pair<std::uint64_t, std::uint64_t>> QueuedDrawReadRanges(const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> stages);
 
