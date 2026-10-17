@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstddef>
 #include <cstring>
 #include <new>
@@ -146,6 +147,8 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     const bool swapRedBlue = param->pixel_format == PIXEL_FORMAT_B8G8R8A8;
     const bool fillAlpha = !hasAlpha(*header);
     const auto alpha = static_cast<std::uint8_t>(param->alpha_value);
+    const GuestArena::HostWrite destination(param->image_mem_addr, static_cast<std::size_t>((header->height - 1) * pitch + rowSize));
+    if (!destination.Open()) return SCE_PNG_DEC_ERROR_INVALID_ADDR;
     auto* output = static_cast<std::uint8_t*>(param->image_mem_addr);
     for (std::uint32_t y = 0; y < image->height; ++y) {
         const std::uint8_t* in = image->pixels.data() + y * rowSize;

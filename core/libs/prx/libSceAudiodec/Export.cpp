@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstddef>
 #include <array>
 #include <memory>
@@ -222,6 +223,8 @@ int32_t APS5_VABI sceAudiodecDecode(int32_t handle, AudiodecCtrl* ctrl) {
     if (const std::int32_t result = validateCtrl(ctrl, instance->codecType); result != 0) return result;
     if (const std::int32_t result = validateBuffers(ctrl); result != 0) return result;
 
+    const GuestArena::HostWrite destination(ctrl->pPcmItem->p_pcm_addr, ctrl->pPcmItem->ui_pcm_size);
+    if (!destination.Open()) return ERROR_INVALID_PCM_POINTER;
     const Audiodec::DecodeResult decoded = instance->decoder->Decode(static_cast<const std::uint8_t*>(ctrl->pAuInfo->p_au_addr), ctrl->pAuInfo->ui_au_size,
                                                                      static_cast<std::uint8_t*>(ctrl->pPcmItem->p_pcm_addr), ctrl->pPcmItem->ui_pcm_size);
     if (instance->codecType == TYPE_M4AAC) {

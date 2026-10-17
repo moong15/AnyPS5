@@ -1598,7 +1598,7 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     bool imported = false;
     {
 #ifdef __APPLE__
-        const GuestArena::HostWrite open(reinterpret_cast<void*>(first), static_cast<std::size_t>(stop - first));
+        const GuestArena::HostWrite open(reinterpret_cast<void*>(first), static_cast<std::size_t>(stop - first), false);
 #endif
         imported = import();
     }

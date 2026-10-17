@@ -194,6 +194,7 @@ public:
     // with a pending unit inside the range are stored (APS5_NO_FLUSH_PRETEST=1 lists every
     // overlapping pending image, as before).
     static bool FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr, const char* reason = "memory access", PublishScope scope = PublishScope::Whole, bool* published = nullptr);
+    static bool FlushForHostWrite(std::uint64_t address, std::size_t bytes);
     static void FlushAllPending(const char* reason);
     static void SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes);
     static constexpr std::uint64_t SmallStoreBytes = 64 * 1024;
@@ -454,6 +455,7 @@ private:
     // layer generation (the whole-surface fast check), `dirty` whether any layer is pending.
     std::uint64_t layerBegin(std::uint32_t layer) const { return descriptor.baseAddress + static_cast<std::uint64_t>(layer) * trackedLayerBytes; }
     bool anyLayerPending() const;
+    void setHostWritePending(bool value);
     void refreshGeneration();
     bool refreshProved();
     void takeRefreshProof(bool aliased);
@@ -556,6 +558,7 @@ private:
     std::uint64_t trackedLayerBytes = 0;
     std::vector<std::uint64_t> layerGeneration;
     std::vector<bool> layerPending;
+    bool hostWritePending = false;
     bool blockUnits = false;
     // Write-back hysteresis (block units, see writeBack): partial stores in the current window of
     // presents, its first present, and the present until which every pending unit is stored.

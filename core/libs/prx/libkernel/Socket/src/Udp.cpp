@@ -1229,6 +1229,8 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     std::size_t offset = 0;
     for (int i = 0; i < message->iovLength && offset < static_cast<std::size_t>(received); ++i) {
         const auto count = std::min<std::size_t>(message->iov[i].length, static_cast<std::size_t>(received) - offset);
+        const GuestArena::HostWrite destination(message->iov[i].base, count);
+        if (!destination.Open()) return Fail(14);
         std::memcpy(message->iov[i].base, buffer.data() + offset, count);
         offset += count;
     }
@@ -1468,6 +1470,8 @@ std::int64_t GuestSockets::Readv(int descriptor, const Iovec* iov, int iovcnt) {
     std::size_t copied = 0;
     for (int i = 0; i < iovcnt && copied < static_cast<std::size_t>(result); ++i) {
         const auto amount = std::min(iov[i].length, static_cast<std::size_t>(result) - copied);
+        const GuestArena::HostWrite destination(iov[i].base, amount);
+        if (!destination.Open()) return Fail(14);
         if (amount != 0) std::memcpy(iov[i].base, buffer.data() + copied, amount);
         copied += amount;
     }

@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+#include "prx/libc/include/GuestArena.hpp"
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
@@ -959,6 +960,8 @@ private:
         }
         std::uint8_t* buffer = nullptr;
         if (const auto acquired = acquireBuffer(decoder, epoch, buffer); acquired != Acquire::Buffer) return acquired == Acquire::Stale;
+        const GuestArena::HostWrite destination(buffer, static_cast<std::size_t>(pitch) * bufferHeight * 3 / 2);
+        if (!destination.Open()) throw std::runtime_error("AvPlayer: video output is not writable");
         auto* chroma = buffer + static_cast<std::size_t>(pitch) * bufferHeight;
         scaler = sws_getCachedContext(scaler, frame.width, frame.height, static_cast<AVPixelFormat>(frame.format), frame.width, frame.height, AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr, nullptr);
         std::uint8_t* planes[4] = {buffer, chroma, nullptr, nullptr};
@@ -1036,6 +1039,8 @@ private:
             std::uint8_t* buffer = nullptr;
             if (const auto acquired = acquireBuffer(decoder, epoch, buffer); acquired != Acquire::Buffer) return acquired == Acquire::Stale;
             const auto size = static_cast<std::uint32_t>(samples * channels * static_cast<int>(sizeof(std::int16_t)));
+            const GuestArena::HostWrite destination(buffer, size);
+            if (!destination.Open()) throw std::runtime_error("AvPlayer: audio output is not writable");
             std::memcpy(buffer, sampleBuffer.data() + static_cast<std::size_t>(offset) * static_cast<std::size_t>(channels), size);
             Frame chunk{buffer, {}, epoch, false};
             chunk.info.p_data = buffer;

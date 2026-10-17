@@ -83,6 +83,8 @@ struct UnitShadow {
     std::vector<std::uint64_t> slabFailedUntil;
     std::uint32_t liveUnits = 0;
 
+    ~UnitShadow() { if (liveUnits != 0) Recorder::RemoveHostWritePending(); }
+
     std::uint64_t Units() const { return generation.size(); }
     std::uint64_t UnitBegin(std::uint64_t unit) const { return base + unit * UnitBytes; }
     std::uint64_t UnitOf(std::uint64_t address) const { return (address - base) / UnitBytes; }
@@ -93,6 +95,8 @@ struct UnitShadow {
     void Recount() {
         std::uint32_t live = 0;
         for (std::uint64_t unit = 0; unit < Units(); ++unit) live += Live(unit) ? 1u : 0u;
+        if (liveUnits == 0 && live != 0) Recorder::AddHostWritePending();
+        if (liveUnits != 0 && live == 0) Recorder::RemoveHostWritePending();
         liveUnits = live;
     }
 };
@@ -292,6 +296,10 @@ void verifyPublished(const UnitShadow& shadow, const std::vector<SlabCopies>& co
 
 // The publish of one shadow: `selected[k]` (k = unit - first) names the units the scope chose.
 std::size_t publishUnits(const std::shared_ptr<UnitShadow>& shadow, std::uint64_t first, std::uint64_t last, const std::vector<std::uint8_t>& selected, PublishReason reason) {
+    struct PendingHostWrite {
+        PendingHostWrite() { Recorder::AddHostWritePending(); }
+        ~PendingHostWrite() { Recorder::RemoveHostWritePending(); }
+    } pendingHostWrite;
     auto& registry = Registry();
     std::vector<SlabCopies> copies;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
