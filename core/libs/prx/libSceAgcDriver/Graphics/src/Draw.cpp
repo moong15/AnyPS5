@@ -148,7 +148,7 @@ void materializeRegisterClear(const Context& context, const ColorTarget& color, 
     if (!cleared && keyBytes != 0) {
         if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(color.dccAddress, keyBytes)) {
             Recorder::CountSync(2);
-            recorder->SyncThrough(color.dccAddress, keyBytes);
+            recorder->SyncThrough(color.dccAddress, keyBytes, Recorder::UnlockedCommitWaits());
             if (CurrentDccKeys(color.dccAddress, color.bytes) != DccKeys::ClearRegister) return;
             cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
         }
@@ -202,14 +202,14 @@ CmaskState readCmask(const ColorTarget& color, const CmaskLayout& layout, std::v
     auto* recorder = Recorder::Active();
     if (locked && recorder != nullptr && recorder->PendingWriteOverlaps(address, bytes)) {
         Recorder::CountSync(2);
-        recorder->SyncThrough(address, bytes);
+        recorder->SyncThrough(address, bytes, Recorder::UnlockedCommitWaits());
     }
     if (AnyShadowedOverlaps(address, bytes)) {
         Require(locked, "a CMASK under a unit shadow must be read under the device lock");
         PublishShadow(address, bytes, PublishScope::Whole, PublishReason::Keys);
         if (recorder != nullptr) {
             Recorder::CountSync(2);
-            recorder->Sync();
+            recorder->Sync(Recorder::UnlockedCommitWaits());
         }
     }
     std::vector<std::byte> mask(bytes);
@@ -2009,7 +2009,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         // touches a leased allocation before they landed.
         Recorder::CountSync(3);
         const auto ownBefore = timer.profile ? Recorder::ThreadWaitedMs() : 0.0;
-        recorder->Sync();
+        recorder->Sync(Recorder::UnlockedCommitWaits());
         if (timer.profile) ownWaitedMs += Recorder::ThreadWaitedMs() - ownBefore;
         timer.phase(PhaseSync);
     }
@@ -2283,7 +2283,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             if (StorageTexture::FlushPending(address, bytes, nullptr, "indirect draw arguments")) {
                 if (recorder != nullptr) {
                     Recorder::CountSync(2);
-                    recorder->Sync();
+                    recorder->Sync(Recorder::UnlockedCommitWaits());
                 }
                 return IndirectDrawPath::PendingImage;
             }
@@ -2648,7 +2648,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             // touches a leased allocation before they landed.
             Recorder::CountSync(3);
             const auto ownBefore = profile ? Recorder::ThreadWaitedMs() : 0.0;
-            recorder->Sync();
+            recorder->Sync(Recorder::UnlockedCommitWaits());
             if (profile) ownWaitedMs += Recorder::ThreadWaitedMs() - ownBefore;
             timer.phase(PhaseSync);
         }

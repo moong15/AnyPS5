@@ -300,6 +300,13 @@ bool HookFullSync() {
     return hookFullSync;
 }
 
+// APS5_NO_UNLOCKED_COMMIT_WAITS=1: a commit's own sync (Sync(waitUnlocked) on the draw commit
+// path) waits under the GpuMutex as before.
+bool UnlockedCommitWaitsEnabled() {
+    static const bool unlocked = std::getenv("APS5_NO_UNLOCKED_COMMIT_WAITS") == nullptr;
+    return unlocked;
+}
+
 // APS5_HOOK_FLUSH_CPU_BLOCKS=0: an access whose every 64 KiB block the CPU wrote since the
 // overlapping pending images' generations flushes them as before, instead of the C4 skip (H2:
 // StorageTexture::AccessKeptByCpu).
@@ -339,6 +346,12 @@ struct HoldCounters {
     std::uint64_t hookUnlockedTornDown = 0;
     // Genuine nested hooks (depth >= 2 outside a completion action) that had to wait locked.
     std::uint64_t hookLockedWaits = 0;
+    // A commit's own sync (a draw commit's Sync(waitUnlocked)) that waited with the mutex released,
+    // its GPU time and the relock's own wait, apart from the hook's above: the commit is not an
+    // access the hook made, and its relock is a 'wait' acquisition, not 'hook'.
+    std::uint64_t commitUnlockedWaits = 0;
+    double commitUnlockedWaitMs = 0;
+    double commitRelockMs = 0;
 };
 HoldCounters holdCounters;
 
@@ -1465,6 +1478,14 @@ Recorder::StoreStatistics Recorder::StoreCounts() {
 
 std::uint64_t Recorder::ThreadHookWaits() {
     return hookRealWaits;
+}
+
+bool Recorder::UnlockedCommitWaits() {
+    return UnlockedCommitWaitsEnabled();
+}
+
+Recorder::CommitWaitStatistics Recorder::CommitUnlockedWaits() {
+    return CommitWaitStatistics{holdCounters.commitUnlockedWaits, holdCounters.commitUnlockedWaitMs, holdCounters.commitRelockMs};
 }
 
 bool Recorder::SnapshotWriteOverlaps(std::uint64_t address, std::size_t bytes) {
@@ -3642,14 +3663,18 @@ void Recorder::FinishUpTo(std::uint64_t serial) {
     }
 }
 
-void Recorder::Sync() {
+void Recorder::Sync(bool waitUnlocked) {
     PerformanceTimer frameTiming("Recorder.Sync");
     const auto source = std::exchange(announcedSource, 4);
     const void* site = std::exchange(announcedSite, nullptr);
+    const void* caller = site != nullptr ? site : __builtin_return_address(0);
+    // A commit's own sync waits for the whole recorded backlog, so the unbounded range names the same
+    // target the loop below would finish: the open batch (submitted here) or the newest in flight.
+    if (waitUnlocked && syncThroughUnlocked(0, ~std::uint64_t{0}, source, caller, true)) return;
     Submit();
     // Counted only when something is waited for: an idle recorder's Sync is free and would only
     // swamp the site table with the callers that check nothing first.
-    const RestoreSyncSite restoreSite{inFlight.empty() ? SyncSiteState{activeSyncSite, activeSyncTargeted} : BeginSyncSite(source, site != nullptr ? site : __builtin_return_address(0), false)};
+    const RestoreSyncSite restoreSite{inFlight.empty() ? SyncSiteState{activeSyncSite, activeSyncTargeted} : BeginSyncSite(source, caller, false)};
     while (!inFlight.empty()) {
         auto batch = std::move(inFlight.front());
         inFlight.pop_front();
@@ -3797,11 +3822,11 @@ void ReportSyncWaits(SyncWaitStats& stats) {
 
 }
 
-bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int source, const void* site) {
+bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int source, const void* site, bool commit) {
     // Only for the outermost acquisition: a nested hook (inside a dispatch's hold) must not give
     // up the caller's mutex, and a thread that waits here holds nothing the relock could invert
     // (the hook took the mutex from a depth of 0 with the same locks held).
-    if (HookLockedWait() || timeline == VK_NULL_HANDLE || GuestMemory::GpuMutex().DepthOnThisThread() != 1) return false;
+    if (HookLockedWait() || commit && !UnlockedCommitWaitsEnabled() || timeline == VK_NULL_HANDLE || GuestMemory::GpuMutex().DepthOnThisThread() != 1) return false;
     // The target as SyncThrough chooses it: the open batch (submitted here, so the GPU can reach
     // it) makes everything the target, else the newest overlapping in-flight batch; with
     // SyncThrough disabled everything is the target as well.
@@ -3832,16 +3857,20 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
     const auto waitSemaphores = context.Function<PFN_vkWaitSemaphoresKHR>("vkWaitSemaphoresKHR");
     // The site entry is taken under the mutex (the table is only touched under it; entries are
     // appended, never removed, so the index stays valid across the release).
-    const RestoreSyncSite restoreSite{BeginSyncSite(source, site, true)};
+    const RestoreSyncSite restoreSite{BeginSyncSite(source, site, !commit)};
     const bool profile = DrawProfiled();
     const bool trace = TraceCapSync();
+    // The per-target columns feed the hook's by-read-site table; a commit's wait is not broken down
+    // by access site, so it collects them for the trace alone (never paying the status polls).
+    const bool timed = profile || trace;
+    const bool targetDetail = trace || profile && !commit;
     const auto readSite = GuestMemory::CurrentReadSite();
     const auto newestSerial = submissions;
     std::size_t batchesToTarget = 0, unsignaledAtStart = 0, targetRanges = 0;
     std::pair<std::uint64_t, std::uint64_t> hit{0, 0};
     std::chrono::steady_clock::time_point targetSubmittedAt{};
     std::map<std::uint32_t, std::uint64_t> aheadByQueue;
-    if (profile || trace) {
+    if (targetDetail) {
         const auto status = context.Function<PFN_vkGetFenceStatus>("vkGetFenceStatus");
         for (const auto& batch : inFlight) {
             if (batch->serial > targetSerial) break;
@@ -3859,7 +3888,7 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
             }
         }
     }
-    const auto start = profile || trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto start = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     auto waited = start;
     auto& mutex = GuestMemory::GpuMutex();
     VkResult result = VK_SUCCESS;
@@ -3869,9 +3898,9 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
         mutex.unlock();
         result = WaitTimeline(device, semaphore, waitSemaphores, targetSerial);
         // Read before the relock: the GPU wait, not the wait for the mutex behind it.
-        if (profile || trace) waited = std::chrono::steady_clock::now();
+        if (timed) waited = std::chrono::steady_clock::now();
     }
-    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Hook);
+    GuestMemory::TagGpuLockSite(commit ? GuestMemory::GpuLockSite::Wait : GuestMemory::GpuLockSite::Hook);
     mutex.lock();
     const auto ms = std::chrono::duration<double, std::milli>(waited - start).count();
     if (profile) {
@@ -3882,23 +3911,32 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
         syncWaitedMs[source] += ms;
         CountThreadSync(source, ms);
         CountSiteWait(ms);
-        ++holdCounters.hookUnlockedWaits;
-        holdCounters.hookUnlockedWaitMs += ms;
-        if (source >= 0 && source < 5) {
-            ++holdCounters.hookUnlockedWaitsBySource[source];
-            holdCounters.hookUnlockedWaitMsBySource[source] += ms;
+        const auto relockMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited).count();
+        if (commit) {
+            ++holdCounters.commitUnlockedWaits;
+            holdCounters.commitUnlockedWaitMs += ms;
+            holdCounters.commitRelockMs += relockMs;
+        } else {
+            ++holdCounters.hookUnlockedWaits;
+            holdCounters.hookUnlockedWaitMs += ms;
+            if (source >= 0 && source < 5) {
+                ++holdCounters.hookUnlockedWaitsBySource[source];
+                holdCounters.hookUnlockedWaitMsBySource[source] += ms;
+            }
+            holdCounters.hookRelockMs += relockMs;
         }
-        holdCounters.hookRelockMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited).count();
-        auto& stats = SyncWaits();
-        auto& siteStats = stats.bySite[static_cast<std::size_t>(readSite)];
-        ++siteStats.count;
-        siteStats.waitedMs += ms;
-        siteStats.batchesToTarget += batchesToTarget;
-        siteStats.unsignaledAtStart += unsignaledAtStart;
-        if (targetSerial == newestSerial) ++siteStats.newest;
-        if (targetSubmittedAt != std::chrono::steady_clock::time_point{}) siteStats.targetAgeMs += std::chrono::duration<double, std::milli>(waited - targetSubmittedAt).count();
-        for (const auto& [queue, count] : aheadByQueue) stats.aheadByQueue[queue] += count;
-        if (std::chrono::steady_clock::now() - stats.lastReport > std::chrono::seconds(10)) ReportSyncWaits(stats);
+        if (!commit) {
+            auto& stats = SyncWaits();
+            auto& siteStats = stats.bySite[static_cast<std::size_t>(readSite)];
+            ++siteStats.count;
+            siteStats.waitedMs += ms;
+            siteStats.batchesToTarget += batchesToTarget;
+            siteStats.unsignaledAtStart += unsignaledAtStart;
+            if (targetSerial == newestSerial) ++siteStats.newest;
+            if (targetSubmittedAt != std::chrono::steady_clock::time_point{}) siteStats.targetAgeMs += std::chrono::duration<double, std::milli>(waited - targetSubmittedAt).count();
+            for (const auto& [queue, count] : aheadByQueue) stats.aheadByQueue[queue] += count;
+            if (std::chrono::steady_clock::now() - stats.lastReport > std::chrono::seconds(10)) ReportSyncWaits(stats);
+        }
     }
     if (trace) {
         static std::atomic<int> lines{0};
@@ -3977,7 +4015,7 @@ void Recorder::waitFence(Batch& batch, int source) {
                 lastReport = now;
                 const auto& h = holdCounters;
                 AgcDriver::ProfilePrint_nid_no_patch("[host-write] %llu host writes ordered against pending GPU writes (cumulative)\n", static_cast<unsigned long long>(orderedHostWrites.load(std::memory_order_relaxed)));
-                AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs waited %llu fences and left %llu batches in flight, %llu full syncs waited %llu fences; snapshot %llu rebuilds %.0f ms, %llu notes covered; pending-write tests %llu, %llu answered by the snapshot (%.0f%%); %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait t-targeted/full):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(targetedFenceWaits.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(fullSyncCount.load()), static_cast<unsigned long long>(fullFenceWaits.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(pendingWriteTests.load()), static_cast<unsigned long long>(pendingWriteSnapshotAnswers.load()), pendingWriteTests.load() != 0 ? 100.0 * static_cast<double>(pendingWriteSnapshotAnswers.load()) / static_cast<double>(pendingWriteTests.load()) : 0.0, static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()));
+                AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs waited %llu fences and left %llu batches in flight, %llu full syncs waited %llu fences; snapshot %llu rebuilds %.0f ms, %llu notes covered; pending-write tests %llu, %llu answered by the snapshot (%.0f%%); %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait t-targeted/full):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu, commit waits unlocked %llu / %.0f ms GPU + %.0f ms relock; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(targetedFenceWaits.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(fullSyncCount.load()), static_cast<unsigned long long>(fullFenceWaits.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(pendingWriteTests.load()), static_cast<unsigned long long>(pendingWriteSnapshotAnswers.load()), pendingWriteTests.load() != 0 ? 100.0 * static_cast<double>(pendingWriteSnapshotAnswers.load()) / static_cast<double>(pendingWriteTests.load()) : 0.0, static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(h.commitUnlockedWaits), h.commitUnlockedWaitMs, h.commitRelockMs, static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()));
                 AgcDriver::ProfilePrint_nid_no_patch("[recorder] completion label stores: %llu run, %llu skipped (no CPU write-back overlapped them); %llu counted pending at a write-back; %llu write-backs over a tracked label; %llu write-back completions pending\n", static_cast<unsigned long long>(completionStoresRun.load()), static_cast<unsigned long long>(completionStoresSkipped.load()), static_cast<unsigned long long>(completionLabelsCountedLate.load()), static_cast<unsigned long long>(writeBacksOverLabels.load()), static_cast<unsigned long long>(writeBackCompletions.load()));
                 AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs);
                 const auto reads = Recorder::ReadCounts();
