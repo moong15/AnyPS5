@@ -342,6 +342,16 @@ public:
     static std::optional<LabelHit> LookupLabel(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp, LabelRefusal* refusal = nullptr);
     // The value alone, for callers asking whether any label is pending in a dword (afterStamp 0).
     static std::optional<std::uint64_t> LookupLabelValue(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp);
+    struct WaitProducer {
+        std::uint32_t queue;
+        std::uint64_t serial;
+        std::uint64_t stamp;
+        bool submitted;
+        bool signaled;
+        bool completion;
+    };
+    static std::vector<WaitProducer> DescribeWaitLabels(std::uint64_t address, std::size_t bytes);
+    std::optional<WaitProducer> DescribeWaitWrite(std::uint64_t address, std::size_t bytes) const;
     static bool WideLabelIn(std::uint64_t address, std::size_t bytes);
     // A label a queue worker decoded but has not recorded yet (Driver.cpp DeferredLabels): it
     // enters the table with no batch, and only a lookup made on the noting thread (a WAIT_REG_MEM
@@ -554,6 +564,7 @@ private:
         std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
         std::vector<std::uint64_t> writeNotes;
         std::vector<std::int16_t> writeValues;
+        std::vector<std::uint32_t> writeQueues;
         // In-place reads (see NotePendingRead), dying with the batch: a finished batch's reads are done.
         struct Read {
             std::uint64_t begin;
@@ -571,6 +582,8 @@ private:
         std::uint64_t serial = 0;
         std::uint64_t traceId = 0;
         bool submitted = false;
+        std::atomic<bool> diagnosticSubmitted{false};
+        std::uint64_t recordingSerial = 0;
         // The GpuMutex queue tag of the thread that opened the batch, and when it was submitted
         // (the [syncwait] line reports what a wait's target and the batches ahead of it were).
         std::uint32_t queue = 0xffffffffu;
