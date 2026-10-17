@@ -483,6 +483,43 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+add_test_executable(agc_driver_cross_queue_wait_flush_tests EXCLUDE_FROM_ALL tests/CrossQueueWaitFlush.cpp)
+target_include_directories(agc_driver_cross_queue_wait_flush_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+        ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR}
+)
+target_link_libraries(agc_driver_cross_queue_wait_flush_tests PRIVATE libSceAgcDriver libkernel libc)
+set_target_properties(agc_driver_cross_queue_wait_flush_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_cross_queue_wait_flush_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_driver_cross_queue_wait_flush_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_driver_cross_queue_wait_flush COMMAND agc_driver_cross_queue_wait_flush_tests)
+    add_test(NAME agc_driver_cross_queue_wait_flush_poll COMMAND agc_driver_cross_queue_wait_flush_tests --poll)
+    add_test(NAME agc_driver_cross_queue_wait_flush_64 COMMAND agc_driver_cross_queue_wait_flush_tests --wide)
+    add_test(NAME agc_driver_cross_queue_wait_flush_write COMMAND agc_driver_cross_queue_wait_flush_tests --write)
+    add_test(NAME agc_driver_cross_queue_wait_flush_disabled COMMAND agc_driver_cross_queue_wait_flush_tests --disabled)
+    set(crossQueueWaitFlushTests
+            agc_driver_cross_queue_wait_flush agc_driver_cross_queue_wait_flush_poll
+            agc_driver_cross_queue_wait_flush_64 agc_driver_cross_queue_wait_flush_write
+            agc_driver_cross_queue_wait_flush_disabled)
+    set_tests_properties(${crossQueueWaitFlushTests} PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_LABEL_FLUSH_US=5000000;APS5_BATCH_CAP=0;APS5_GPU_WAIT_TIMEOUT_MS=10000"
+            ENVIRONMENT_MODIFICATION "APS5_NO_CROSS_QUEUE_WAIT_FLUSH=unset:;APS5_NO_LABEL_SHORTCUT=unset:;APS5_NO_LABEL_BATCHING=unset:;APS5_NO_LABEL_BATCH_SUBMIT=unset:;APS5_PROFILE_DRAW=unset:;APS5_TRACE_LONG_WAITS=unset:"
+            SKIP_RETURN_CODE 77 TIMEOUT 30 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_property(TEST agc_driver_cross_queue_wait_flush_64 APPEND PROPERTY ENVIRONMENT "APS5_TRACE_LONG_WAITS=200;APS5_PROFILE_DRAW=1")
+    set_property(TEST agc_driver_cross_queue_wait_flush_64 PROPERTY ENVIRONMENT_MODIFICATION
+            "APS5_NO_CROSS_QUEUE_WAIT_FLUSH=unset:;APS5_NO_LABEL_SHORTCUT=unset:;APS5_NO_LABEL_BATCHING=unset:;APS5_NO_LABEL_BATCH_SUBMIT=unset:")
+    set_property(TEST agc_driver_cross_queue_wait_flush_disabled APPEND PROPERTY ENVIRONMENT "APS5_NO_CROSS_QUEUE_WAIT_FLUSH=1")
+    set_property(TEST agc_driver_cross_queue_wait_flush_disabled PROPERTY ENVIRONMENT_MODIFICATION
+            "APS5_NO_LABEL_SHORTCUT=unset:;APS5_NO_LABEL_BATCHING=unset:;APS5_NO_LABEL_BATCH_SUBMIT=unset:;APS5_PROFILE_DRAW=unset:;APS5_TRACE_LONG_WAITS=unset:")
+    if(WIN32)
+        set_property(TEST ${crossQueueWaitFlushTests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_driver_wait_shutdown_tests EXCLUDE_FROM_ALL tests/WaitShutdown.cpp)
 target_include_directories(agc_driver_wait_shutdown_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_driver_wait_shutdown_tests PRIVATE libSceAgcDriver libkernel libc)

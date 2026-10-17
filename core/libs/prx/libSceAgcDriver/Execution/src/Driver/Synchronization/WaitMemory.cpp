@@ -39,26 +39,41 @@ std::optional<std::uint64_t> LongWaitThreshold() {
     return threshold;
 }
 
-void ProfileLongWait(std::uint32_t queue, double ms) {
+bool CrossQueueWaitFlush() {
+    static const bool enabled = std::getenv("APS5_NO_CROSS_QUEUE_WAIT_FLUSH") == nullptr;
+    return enabled;
+}
+
+void ProfileLongWait(std::uint32_t queue, double ms, bool crossQueueFlushed = false) {
     struct Totals {
-        std::atomic<std::uint64_t> count{0}, microseconds{0};
+        std::uint64_t count = 0, microseconds = 0, crossQueueFlushes = 0;
     };
     static std::array<Totals, SubmissionQueueEnd> totals;
+    static std::mutex totalsMutex;
     static std::atomic<std::int64_t> reported{std::chrono::steady_clock::now().time_since_epoch().count()};
-    if (ms >= 100.0 && queue < totals.size()) {
-        totals[queue].count.fetch_add(1, std::memory_order_relaxed);
-        totals[queue].microseconds.fetch_add(static_cast<std::uint64_t>(ms * 1000.0), std::memory_order_relaxed);
+    if ((ms >= 100.0 || crossQueueFlushed) && queue < totals.size()) {
+        const std::lock_guard lock(totalsMutex);
+        if (ms >= 100.0) {
+            ++totals[queue].count;
+            totals[queue].microseconds += static_cast<std::uint64_t>(ms * 1000.0);
+        }
+        if (crossQueueFlushed) ++totals[queue].crossQueueFlushes;
     }
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     auto previous = reported.load(std::memory_order_relaxed);
     if (now - std::chrono::steady_clock::duration(previous) < std::chrono::seconds(10) || !reported.compare_exchange_strong(previous, now.count(), std::memory_order_relaxed)) return;
+    std::array<Totals, SubmissionQueueEnd> interval;
+    {
+        const std::lock_guard lock(totalsMutex);
+        interval = totals;
+        totals = {};
+    }
     std::string line = "[long-wait] (10 s):";
     for (std::size_t index = 0; index < totals.size(); ++index) {
-        const auto count = totals[index].count.exchange(0, std::memory_order_relaxed);
-        const auto us = totals[index].microseconds.exchange(0, std::memory_order_relaxed);
-        if (count == 0 && us == 0 && index != 0 && index != 0x20) continue;
-        char part[160];
-        std::snprintf(part, sizeof(part), " queue 0x%x: %llu waits >= 100 ms, %.1f ms;", static_cast<unsigned>(index), static_cast<unsigned long long>(count), static_cast<double>(us) / 1000.0);
+        const auto& item = interval[index];
+        if (item.count == 0 && item.microseconds == 0 && item.crossQueueFlushes == 0 && index != 0 && index != 0x20) continue;
+        char part[192];
+        std::snprintf(part, sizeof(part), " queue 0x%x: %llu waits >= 100 ms, %.1f ms, %llu waits triggered cross-queue flush;", static_cast<unsigned>(index), static_cast<unsigned long long>(item.count), static_cast<double>(item.microseconds) / 1000.0, static_cast<unsigned long long>(item.crossQueueFlushes));
         line += part;
     }
     line.back() = '\n';
@@ -82,7 +97,7 @@ struct LongMemoryWait {
     std::optional<Graphics::Recorder::LabelHit> resolvingLabel;
     std::optional<Graphics::Recorder::WaitProducer> write;
     std::chrono::steady_clock::time_point writeObserved{};
-    bool openWrite = false;
+    bool openWrite = false, crossQueueFlushed = false;
     std::chrono::steady_clock::time_point nextObservation{};
 
     std::uint64_t Address() const { return packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u); }
@@ -154,7 +169,7 @@ struct LongMemoryWait {
     }
     void Finish(std::size_t pending) {
         const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-        if (profile) ProfileLongWait(queue, ms);
+        if (profile) ProfileLongWait(queue, ms, crossQueueFlushed);
         if (checked && threshold.has_value() && ms >= static_cast<double>(*threshold)) Print(ms, false, pending);
     }
 };
@@ -304,7 +319,28 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
         if constexpr (Diagnose) diagnostic->resolved = "held at submit";
         return;
     }
-    if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr)) {
+    const bool crossQueueFlush = CrossQueueWaitFlush();
+    bool crossQueueRetry = false;
+    const auto submitCrossQueue = [&](const std::shared_ptr<VulkanDevice>& localDevice, bool labelProducer = false) {
+        if (!crossQueueFlush || localDevice == nullptr) return false;
+        const auto* recorder = Graphics::Recorder::Active();
+        if (recorder == nullptr || !(labelProducer ? recorder->OpenWriteOverlaps(awaited, awaitedBytes) : recorder->OpenCrossQueueWriteOverlaps(awaited, awaitedBytes, queue))) return false;
+        localDevice->SubmitRecorded(false);
+        if constexpr (Diagnose) diagnostic->crossQueueFlushed = true;
+        return true;
+    };
+    const auto serviceCrossQueue = [&](bool labelProducer = false) {
+        if (!crossQueueFlush || (!labelProducer && !Graphics::Recorder::SnapshotWriteOverlaps(awaited, awaitedBytes))) return true;
+        std::unique_lock gpuLock(GuestMemory::GpuMutex(), std::defer_lock);
+        if (!GuestMemory::GpuMutex().HeldByThisThread() && !gpuLock.try_lock()) {
+            crossQueueRetry = true;
+            return false;
+        }
+        submitCrossQueue(device.Load(), labelProducer);
+        crossQueueRetry = false;
+        return true;
+    };
+    if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
         if constexpr (Diagnose) {
             diagnostic->resolved = "label history";
             diagnostic->historyQueue = writer;
@@ -347,6 +383,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             ++outcomes.fromRecorderLate;
             if (trace) traceLate("trusted", hit, refusal);
         }
+        if (hit->crossQueueUnsubmitted && !serviceCrossQueue(true)) return false;
         if constexpr (Diagnose) {
             diagnostic->resolved = polling ? "recorder polling" : "recorder label";
             diagnostic->resolvingLabel = hit;
@@ -392,12 +429,13 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
         if (const auto localDevice = gpuLock.owns_lock() ? device.Load() : std::shared_ptr<VulkanDevice>{}) {
             if constexpr (Diagnose) diagnostic->Observe(localDevice);
 
+            const bool submitted = submitCrossQueue(localDevice);
             if (labelTable) {
                 Graphics::Recorder::LabelRefusal refusal{};
                 if (takeLabel(localDevice->PendingLabel(awaited, awaitedBytes, received, &refusal), refusal, false, false)) return;
             }
 
-            if (!overlapSubmit || localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) localDevice->SubmitRecorded(false);
+            if (!submitted && (!overlapSubmit || localDevice->OpenWriteOverlaps(awaited, awaitedBytes))) localDevice->SubmitRecorded(false);
         }
     }
 
@@ -412,7 +450,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
     const auto pollService = [&](bool sleeping) {
         if (pollProfile) ++poll.ticks;
         const auto generation = Graphics::Recorder::WriteGeneration();
-        const bool changed = generation != seenGeneration || recheck;
+        const bool changed = generation != seenGeneration || recheck || crossQueueRetry;
         const bool labelDue = labelFlushDue();
         const bool reap = sleeping && (behindCompletion || ((reapAll || queue0Dormant.load(std::memory_order_relaxed)) && completionsPending()));
         if (!changed && !labelDue && !reap) return false;
@@ -457,7 +495,8 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             return false;
         }
         if constexpr (Diagnose) diagnostic->Observe(localDevice);
-        bool submitted = false;
+        bool submitted = submitCrossQueue(localDevice);
+        crossQueueRetry = false;
         if (changed) {
             seenGeneration = generation;
             recheck = false;
@@ -469,7 +508,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
                 }
                 pollRefused(refusal);
             }
-            if (localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) {
+            if (!submitted && localDevice->OpenWriteOverlaps(awaited, awaitedBytes)) {
                 localDevice->SubmitRecorded(false);
                 submitted = true;
             }
@@ -510,7 +549,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
     std::uint32_t polls = 0;
     StallWatch stall(queue);
     while (!Pm4::WaitSatisfiedUnchecked(packet)) {
-        if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr)) {
+        if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
             if constexpr (Diagnose) {
                 diagnostic->resolved = "label history";
                 diagnostic->historyQueue = writer;
