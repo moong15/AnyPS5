@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <exception>
@@ -130,6 +131,8 @@ int APS5_VABI scePngEncEncode(void* handle, const PngEncEncodeParam* param, PngE
     const bool overflow = png.size() > param->png_mem_size;
     if (outputInfo) *outputInfo = {overflow ? 0 : static_cast<std::uint32_t>(png.size()), overflow ? 0 : height};
     if (overflow) return PNG_ENC_ERROR_DATA_OVERFLOW;
+    const GuestArena::HostWrite destination(param->png_mem_addr, png.size());
+    if (!destination.Open()) return PNG_ENC_ERROR_INVALID_ADDR;
     std::copy(png.begin(), png.end(), param->png_mem_addr);
     return static_cast<int>(png.size());
 }

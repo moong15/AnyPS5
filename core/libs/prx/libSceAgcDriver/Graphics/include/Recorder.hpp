@@ -130,7 +130,7 @@ public:
     void NotePendingFill(std::uint64_t address, std::size_t bytes, std::uint8_t value);
     // Notes several [begin, end) ranges and publishes the snapshot once (a dispatch writes many buffers).
     void NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
-    bool PendingWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
+    bool PendingWriteOverlaps(std::uint64_t address, std::size_t bytes, bool useSnapshot = true) const;
     static std::uint64_t PendingWriteTests();
     static std::uint64_t PendingWriteSnapshotAnswers();
     static bool PendingWriteSnapshotFilter();
@@ -431,6 +431,8 @@ public:
     // there must not have a publish recorded for it (UnitShadow), see SyncThrough.
     static bool InCompletion();
     void Activate();
+    static void AddHostWritePending();
+    static void RemoveHostWritePending();
     // APS5_PROFILE_DRAW: syncs by source (0 device idle, 1 CPU access to pending writes, 2 CPU read
     // after a recorded store, 3 address-based dispatch, 4 other). Contract: the call announces the
     // source for the Sync/SyncThrough this thread makes NEXT, which consumes it (a sync without a

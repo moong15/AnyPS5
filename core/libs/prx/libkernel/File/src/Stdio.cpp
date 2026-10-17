@@ -971,6 +971,8 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     File::RefuseArchivedFile(fd, "getdirentries");
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
+    if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (basep != nullptr) *basep = 0;
     return File::ReadDirectoryDescriptor(fd, buf, nbytes);
 }
@@ -988,6 +990,8 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     constexpr std::size_t GuestMaxName = 255;
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
+    if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     const off_t base = ::lseek(fd, 0, SEEK_CUR);
     if (base < 0) return SceErrorFromErrno(errno);
     if (basep != nullptr) *basep = static_cast<int64_t>(base);

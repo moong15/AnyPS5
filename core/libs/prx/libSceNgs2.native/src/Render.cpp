@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -321,6 +322,8 @@ void Ngs2RenderSystem(Ngs2System& system, const Ngs2RenderBufferInfo* bufferInfo
         }
     }
     for (std::uint32_t i = 0; i < numBufferInfo; i++) {
+        const GuestArena::HostWrite destination(bufferInfo[i].buffer, outputBytes[i]);
+        if (!destination.Open()) throw std::runtime_error("NGS2: output is not writable");
         if (!mixes[i].empty()) WriteOutput(bufferInfo[i], mixes[i]);
         else if (outputBytes[i] != 0) std::memset(bufferInfo[i].buffer, 0, outputBytes[i]);
     }

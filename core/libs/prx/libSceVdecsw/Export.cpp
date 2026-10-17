@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -337,6 +338,8 @@ int APS5_VABI sceVdecswTrySyncDecodeOutput(std::uint64_t handle, OutputInfo* out
     auto picture = std::move(decoder->pictures.front());
     decoder->pictures.pop_front();
     if (target.frameBufferSize < picture.output.frameBufferSize) throw std::runtime_error("Vdecsw: output buffer is smaller than the decoded picture");
+    const GuestArena::HostWrite destination(target.frameBuffer, static_cast<std::size_t>(picture.output.frameBufferSize));
+    if (!destination.Open()) throw std::runtime_error("Vdecsw: output is not writable");
     std::memcpy(target.frameBuffer, picture.pixels.data(), picture.output.frameBufferSize);
     decoder->outputs.pop_front();
     output->isValid = true;

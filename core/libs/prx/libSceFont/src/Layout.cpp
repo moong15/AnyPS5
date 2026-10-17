@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "prx/libc/include/GuestArena.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -178,6 +180,10 @@ int RenderGlyphIndexToSurface(FontObj& obj, std::uint32_t glyphIndex, FontRender
         updateY = startRow;
         updateW = std::max(0, endColumn - startColumn);
         updateH = std::max(0, endRow - startRow);
+        if (updateW != 0 && updateH != 0) {
+            GuestArena::GuestArenaOrderHostWrite_nid_no_patch(targetBase + static_cast<std::size_t>(startRow) * surface->widthByte + static_cast<std::size_t>(startColumn) * bytesPerPixel,
+                static_cast<std::size_t>(endRow - startRow - 1) * surface->widthByte + static_cast<std::size_t>(updateW) * bytesPerPixel);
+        }
         for (int row = startRow; row < endRow; ++row) {
             const std::uint8_t* sourceRow = bitmap.data() + static_cast<std::size_t>(row - destY) * static_cast<std::size_t>(glyphW);
             std::uint8_t* targetRow = targetBase + static_cast<std::size_t>(row) * static_cast<std::size_t>(surface->widthByte);

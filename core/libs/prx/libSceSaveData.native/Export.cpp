@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <atomic>
 #include <cstddef>
 #include <deque>
@@ -473,6 +474,8 @@ static int getSaveDataMemory2(SaveDataMemoryGet2* get_param) {
             return SAVE_DATA_ERROR_INTERNAL;
         }
         f.seekg(static_cast<std::streamoff>(d->offset));
+        const GuestArena::HostWrite destination(d->buf, static_cast<std::size_t>(d->buf_size));
+        if (!destination.Open()) return SAVE_DATA_ERROR_PARAMETER;
         f.read(static_cast<char*>(d->buf), static_cast<std::streamsize>(d->buf_size));
         if (!f) {
             return SAVE_DATA_ERROR_INTERNAL;

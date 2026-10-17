@@ -3118,6 +3118,13 @@ void StorageTexture::refreshGeneration() {
     generation = *std::min_element(layerGeneration.begin(), layerGeneration.end());
 }
 
+void StorageTexture::setHostWritePending(bool value) {
+    if (hostWritePending == value) return;
+    if (value) Recorder::AddHostWritePending();
+    else Recorder::RemoveHostWritePending();
+    hostWritePending = value;
+}
+
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
     CaptureTrace::Log("image-write image=%llx first=%u count=%u generation=%llu", static_cast<unsigned long long>(descriptor.baseAddress), first, count, static_cast<unsigned long long>(generation));
     static const bool eager = std::getenv("APS5_EAGER_WRITEBACK") != nullptr || std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
@@ -3129,6 +3136,7 @@ void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count)
     }
     if (anyUnsaved && !GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) captureGuestBytes(&unsaved);
     for (std::uint32_t layer = first; layer < first + count; ++layer) layerPending[layer] = true;
+    setHostWritePending(anyLayerPending());
     // Results of this image now cover the alias's results borrowed into these units: this image
     // stores them, the alias no longer has to (its results, unchanged since the borrow, are in
     // this image's content). An alias written since keeps its own newer results pending.
@@ -3174,6 +3182,7 @@ void StorageTexture::reconcilePending() {
     auto& pending = Pending();
     std::lock_guard lock(pending.mutex);
     const bool any = anyLayerPending();
+    setHostWritePending(any);
     if (any == dirty) return;
     dirty = any;
     if (any) pending.textures.push_back(this);
@@ -3299,6 +3308,51 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         if (published != nullptr) *published = units != 0;
     }
     return true;
+}
+
+bool StorageTexture::FlushForHostWrite(std::uint64_t address, std::size_t bytes) {
+    std::vector<std::shared_ptr<StorageTexture>> flush;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        const auto take = [&](StorageTexture* texture) {
+            if (!texture->overlaps(address, bytes)) return;
+            if (auto alive = texture->weak_from_this().lock(); alive && std::find(flush.begin(), flush.end(), alive) == flush.end()) flush.push_back(std::move(alive));
+        };
+        if (pending.textures.MayOverlap(address, bytes)) {
+            for (auto* texture : pending.textures) take(texture);
+        }
+        for (auto* texture : pending.flushing) take(texture);
+        for (const auto& texture : flush) {
+            texture->dirty = false;
+            pending.textures.remove(texture.get());
+            pending.flushing.push_back(texture.get());
+        }
+        if (!flush.empty()) BumpPendingSerial();
+    }
+    struct Unregister {
+        const std::vector<std::shared_ptr<StorageTexture>>& flush;
+        ~Unregister() {
+            auto& pending = Pending();
+            std::lock_guard lock(pending.mutex);
+            for (const auto& texture : flush) {
+                const auto found = std::find(pending.flushing.begin(), pending.flushing.end(), texture.get());
+                if (found != pending.flushing.end()) pending.flushing.erase(found);
+            }
+            if (!flush.empty()) BumpPendingSerial();
+        }
+    } unregister{flush};
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    const auto previousReason = std::exchange(flushReason, "host write");
+    try {
+        for (const auto& texture : flush) texture->writeBack(address, bytes);
+    } catch (...) {
+        flushReason = previousReason;
+        throw;
+    }
+    flushReason = previousReason;
+    const bool published = PublishShadow(address, bytes, PublishScope::Whole, PublishReasonFor("memory access")) != 0;
+    return !flush.empty() || published;
 }
 
 void StorageTexture::SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes) {
@@ -3809,6 +3863,7 @@ std::size_t StorageTexture::DiscardPendingInside(std::uint64_t address, std::siz
             // touched the bytes a CPU-path upload copied).
             texture->dirty = false;
             texture->layerPending.assign(texture->trackedLayers, false);
+            texture->setHostWritePending(false);
             texture->layerOriginal.assign(texture->trackedLayers, false);
             texture->cancelStoredSaves();
             it = pending.textures.erase(it);
@@ -3829,6 +3884,7 @@ std::size_t StorageTexture::DiscardPendingInside(std::uint64_t address, std::siz
             }
             if (dropped) ++discarded;
             if (dropped && !texture->anyLayerPending()) {
+                texture->setHostWritePending(false);
                 texture->dirty = false;
                 it = pending.textures.erase(it);
                 continue;
@@ -3993,6 +4049,7 @@ bool StorageTexture::clearByKeysFill(DccKeys keys, std::uint8_t key) {
         std::lock_guard lock(pending.mutex);
         droppedUnits = static_cast<std::size_t>(std::count(layerPending.begin(), layerPending.end(), true));
         layerPending.assign(trackedLayers, false);
+        setHostWritePending(false);
         if (dirty) {
             dirty = false;
             pending.textures.remove(this);
@@ -4982,6 +5039,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
 }
 
 StorageTexture::~StorageTexture() {
+    setHostWritePending(false);
     {
         auto& live = Live();
         std::lock_guard lock(live.mutex);

@@ -1,6 +1,8 @@
 #ifndef CORE_LIBS_PRX_LIBSCEOPUSDEC_INCLUDE_OPUSDECODER_HPP
 #define CORE_LIBS_PRX_LIBSCEOPUSDEC_INCLUDE_OPUSDECODER_HPP
 
+#include "prx/libc/include/GuestArena.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -101,6 +103,8 @@ public:
         }
         const auto count = static_cast<std::size_t>(samples) * decoder.channels;
         if (decoder.pending.size() < count) decoder.pending.insert(decoder.pending.begin(), count - decoder.pending.size(), 0.0f);
+        const GuestArena::HostWrite destination(pcm, static_cast<std::size_t>(outputBytes));
+        if (!destination.Open()) fail("output is not writable");
         for (std::size_t index = 0; index < count; ++index) {
             const auto converted = static_cast<std::int16_t>(std::lrint(std::clamp(decoder.pending[index] * 32768.0f, -32768.0f, 32767.0f)));
             std::memcpy(reinterpret_cast<std::uint8_t*>(pcm) + index * 2, &converted, 2);

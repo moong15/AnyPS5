@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstdarg>
 #include <cstdint>
 #include <cstddef>
@@ -121,6 +122,8 @@ int GuestError(const std::error_code& error) {
 std::int64_t CopyLinkTarget(const std::string& target, char* buffer, std::size_t size) {
     const auto count = std::min(size, target.size());
     if (count != 0 && buffer == nullptr) return Fail(GuestEfault);
+    const GuestArena::HostWrite destination(buffer, count);
+    if (!destination.Open()) return Fail(GuestEfault);
     if (count != 0) std::memcpy(buffer, target.data(), count);
     return static_cast<std::int64_t>(count);
 }
