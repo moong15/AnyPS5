@@ -3831,7 +3831,7 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
     // it) makes everything the target, else the newest overlapping in-flight batch; with
     // SyncThrough disabled everything is the target as well.
     std::uint64_t targetSerial = 0;
-    if (!SyncThroughEnabled() || (open != nullptr && overlaps(*open, address, end))) {
+    if (commit || !SyncThroughEnabled() || (open != nullptr && overlaps(*open, address, end))) {
         Submit();
         targetSerial = submissions;
     } else {
