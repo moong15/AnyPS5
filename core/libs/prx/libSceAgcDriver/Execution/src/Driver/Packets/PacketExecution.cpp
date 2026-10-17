@@ -68,6 +68,8 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
             const auto bytes = Pm4::DmaBytes(packet);
             if (bytes == 0) return true;
             const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
+            const auto source = Pm4::DmaSource(packet);
+            if ((source == 0 || source == 3) && DrawPipeline::Queue0().Overlaps(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), bytes)) return false;
             return !DrawPipeline::Queue0().Overlaps(address, bytes);
         }
         case 0x10: {

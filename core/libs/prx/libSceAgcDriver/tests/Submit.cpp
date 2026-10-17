@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libc/include/GuestHeap.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -540,6 +541,82 @@ void testCopyIntoHostMemory() {
     GuestHeap::GuestHeapFree_nid_postfix(produced);
 }
 
+void testSmallCopyBehindPendingSource() {
+    alignas(64) static volatile std::uint32_t copied = 0, settledCopied = 0, hostCopied = 0;
+    constexpr std::size_t words = 32768;
+    constexpr auto bytes = static_cast<std::uint32_t>(words * 4);
+    constexpr std::size_t smallWords = 1024;
+    constexpr auto smallBytes = static_cast<std::uint32_t>(smallWords * 4);
+    auto* produced = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
+    auto* source = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, bytes));
+    auto* destination = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, smallBytes));
+    for (std::size_t i = 0; i < words; ++i) {
+        produced[i] = 0xc3000000u | static_cast<std::uint32_t>(i);
+        source[i] = 0x3c000000u | static_cast<std::uint32_t>(i);
+    }
+    std::fill(destination, destination + smallWords, 0u);
+    const auto before = AgcDriver::DriverDetail::copiesBehindPendingSources.load();
+    submit(0, commands(memoryCopy(source, produced, bytes), memoryCopy(destination, source, smallBytes), writeData(&copied, 1)));
+    waitFor(&copied, 1, "the label after a small copy behind a pending source never landed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::equal(destination, destination + smallWords, produced), "a small copy did not see the GPU copy into its source before it");
+    if (std::getenv("APS5_COPY_SYNC") != nullptr) check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == before, "a small copy that has to wait for a completion store over its source went through the GPU copy");
+    else check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == before + 1, "a small copy whose source the GPU still stores into was not recorded on the GPU");
+    std::fill(destination, destination + smallWords, 0u);
+    const auto settled = AgcDriver::DriverDetail::copiesBehindPendingSources.load();
+    submit(0, commands(memoryCopy(destination, produced, smallBytes), writeData(&settledCopied, 1)));
+    waitFor(&settledCopied, 1, "the label after a small copy of a settled source never landed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::equal(destination, destination + smallWords, produced), "a small copy of a settled source lost bytes");
+    check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == settled, "a small copy of a settled source was recorded on the GPU");
+    std::vector<std::uint32_t> hostDestination(smallWords);
+    for (std::size_t i = 0; i < words; ++i) source[i] = 0x3c000000u | static_cast<std::uint32_t>(i);
+    const auto hostCopies = AgcDriver::DriverDetail::copiesBehindPendingSources.load();
+    const auto aliasChecks = AgcDriver::VulkanDevice::CopyAliasCounts().noSource;
+    submit(0, commands(memoryCopy(source, produced, bytes), memoryCopy(hostDestination.data(), source, smallBytes), writeData(&hostCopied, 1)));
+    waitFor(&hostCopied, 1, "the label after a small copy into memory that is not imported never landed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::equal(hostDestination.begin(), hostDestination.end(), produced), "a small copy into memory that is not imported did not see the GPU copy into its source");
+    check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == hostCopies, "a small copy into memory that is not imported was recorded on the GPU");
+    check(AgcDriver::VulkanDevice::CopyAliasCounts().noSource == aliasChecks + 1, "a small copy into memory that is not imported went through the GPU copy before its CPU path");
+    GuestHeap::GuestHeapFree_nid_postfix(destination);
+    GuestHeap::GuestHeapFree_nid_postfix(source);
+    GuestHeap::GuestHeapFree_nid_postfix(produced);
+}
+
+void testSmallCopyOrdering() {
+    alignas(64) static volatile std::uint32_t done = 0;
+    constexpr std::uint32_t allocationBytes = 131072;
+    auto* produced = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, allocationBytes));
+    auto* source = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, allocationBytes));
+    auto* destination = static_cast<std::uint32_t*>(GuestHeap::GuestHeapAlignForGpu_nid_postfix(65536, allocationBytes));
+    for (std::size_t i = 0; i < allocationBytes / 4; ++i) produced[i] = 0xa5000000u | static_cast<std::uint32_t>(i);
+    std::uint32_t iteration = 0;
+    for (const auto [offset, bytes] : {std::pair{4u, 45056u}, {0u, 65536u}, {1u, 45055u}, {0u, 45055u}}) {
+        std::fill(source, source + allocationBytes / 4, 0u);
+        std::fill(destination, destination + allocationBytes / 4, 0u);
+        auto* from = reinterpret_cast<std::byte*>(source) + offset;
+        auto* to = reinterpret_cast<std::byte*>(destination) + offset;
+        const auto before = AgcDriver::DriverDetail::copiesBehindPendingSources.load();
+        submit(0, commands(memoryCopy(source, produced, allocationBytes), memoryCopy(to, from, bytes), waitEqual(destination + 1, produced[1]), writeData(&done, ++iteration)));
+        waitFor(&done, iteration, "WAIT_REG_MEM did not see the small copy's destination");
+        check(std::memcmp(to, reinterpret_cast<const std::byte*>(produced) + offset, bytes) == 0, "a small copy exposed stale bytes before its following label");
+        AgcDriverWaitIdle_nid_postfix();
+        const bool gpu = offset % 4 == 0 && bytes % 4 == 0 && std::getenv("APS5_COPY_SYNC") == nullptr;
+        check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == before + (gpu ? 1 : 0), "small copy alignment selected the wrong path");
+    }
+    std::fill(source, source + allocationBytes / 4, 0u);
+    const auto before = AgcDriver::DriverDetail::copiesBehindPendingSources.load();
+    submit(0, commands(memoryCopy(source, produced, allocationBytes), memoryCopy(source + 1, source, 45056), writeData(&done, ++iteration)));
+    waitFor(&done, iteration, "the label after an overlapping small copy never landed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::equal(source + 1, source + 1 + 45056 / 4, produced), "an overlapping small copy lost its snapshot");
+    check(AgcDriver::DriverDetail::copiesBehindPendingSources.load() == before, "an overlapping small copy was recorded as a GPU transfer");
+    GuestHeap::GuestHeapFree_nid_postfix(destination);
+    GuestHeap::GuestHeapFree_nid_postfix(source);
+    GuestHeap::GuestHeapFree_nid_postfix(produced);
+}
+
 void testShaderHeaderAlignment() {
     alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
     struct Header {
@@ -812,6 +889,14 @@ int main(int argc, char** argv) {
         }
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && (std::string_view(argv[1]) == "--small-copy-sync" || std::string_view(argv[1]) == "--small-copy")) {
+            testHeaderWithoutProgramAddress();
+            testSmallCopyBehindPendingSource();
+            testSmallCopyOrdering();
+            LibcRunShutdown_nid_postfix();
+            std::puts("Small copy ordering passed");
+            return 0;
+        }
         alignas(256) std::array<std::uint32_t, 64> rawCode{};
         rawCode.fill(0xbf800000);
         rawCode[0] = 0xbe8003ff;
@@ -905,6 +990,8 @@ int main(int argc, char** argv) {
         testHeaderWithoutProgramAddress();
         testCopyIntoHostMemory();
         testLargeDataFill();
+        testSmallCopyBehindPendingSource();
+        testSmallCopyOrdering();
         testRegisteredFloatMode();
         testDispatchFloatMode();
         testReadOnlyResummarize();
