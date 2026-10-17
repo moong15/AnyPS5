@@ -275,6 +275,10 @@ function(add_shader_recompiler target runtimeTarget)
             FindTableCalls
             LinkCalls
             WriteFileAtomically
+            ProgramDiagnosticsEnabled
+            ProgramProfile
+            SetProgramCopy
+            SetProgramDispatch
     )
     set(shaderCacheManifest)
     foreach(section IN ITEMS sources guard submodules includes reviewed)
