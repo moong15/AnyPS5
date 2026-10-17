@@ -129,6 +129,8 @@ void StoreSpecialized(std::vector<std::byte> key, std::shared_ptr<const Speciali
 [[nodiscard]] bool LoadBindingPlan(std::span<const std::byte> key, DescriptorBindingPlan& plan);
 void StoreBindingPlan(std::vector<std::byte> key, std::shared_ptr<const DescriptorBindingPlan> plan);
 void Flush();
+void Shutdown();
+[[nodiscard]] unsigned Writers();
 [[nodiscard]] Counters Totals();
 
 }

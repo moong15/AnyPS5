@@ -41,6 +41,7 @@ public:
     // otherwise one scope per queue, so a walk made for a queue's item is reused for that queue's
     // later items and never for another queue's.
     static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
+    static unsigned Committers();
 
     // `reads` are guest ranges the commit reads at its own place in the command stream (the draw's
     // index range, known from the packets): a write the guest ordered after the item must not be
@@ -50,6 +51,7 @@ public:
     static bool PreciseDrains();
     bool DrainPacket(std::span<const std::uint32_t> packet);
     bool DrainPacket(std::uint32_t opcode, std::span<const Range> reads, std::span<const Range> writes, bool bounded);
+    void Stop();
     static std::uint64_t DrainRequestsByOpcode(std::uint32_t opcode);
     bool Busy() const { return outstanding.load(std::memory_order_acquire) != 0; }
     std::size_t Outstanding() const { return outstanding.load(std::memory_order_acquire); }
@@ -85,6 +87,7 @@ private:
     std::uint32_t idleWaiters = 0;
     bool committerWaiting = false;
     bool stopped = false;
+    bool closing = false;
     std::thread thread;
     std::uint64_t commits = 0;
     std::uint64_t commitNs = 0;
