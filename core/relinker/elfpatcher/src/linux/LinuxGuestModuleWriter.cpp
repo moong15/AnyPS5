@@ -55,7 +55,6 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
             Io::WriteU32(symbols, index * 24, addString("__tls_get_addr"));
             needsTlsResolver = true;
         }
-        if (symbol.Section == 0 && (symbol.Info >> 4) == 2) symbols[index * 24 + 4] = static_cast<std::uint8_t>(0x10 | (symbol.Info & 15));
     }
     std::vector<std::uint64_t> needed;
     for (const auto& dependency : dependencies) needed.push_back(addString(dependency));

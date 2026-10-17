@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -312,6 +313,14 @@ int APS5_VABI sceVdecswTrySyncDecodeInput(std::uint64_t handle, InputResult* res
     return decoder->inputs.empty() ? VdecswErrorInputQueueEmpty : VdecswErrorDecodePending;
 }
 
+int APS5_VABI sceVdecswSyncDecodeInput(std::uint64_t handle, InputResult* result) {
+    for (;;) {
+        const auto status = sceVdecswTrySyncDecodeInput(handle, result);
+        if (status != VdecswErrorDecodePending) return status;
+        std::this_thread::yield();
+    }
+}
+
 int APS5_VABI sceVdecswSetDecodeOutput(std::uint64_t handle, const FrameBuffer* frame) {
     if (frame == nullptr || frame->thisSize < sizeof(FrameBuffer) || frame->frameBuffer == nullptr) throw std::runtime_error("Vdecsw: invalid decode output");
     const auto decoder = findDecoder(handle);
@@ -359,6 +368,14 @@ int APS5_VABI sceVdecswTrySyncDecodeOutput(std::uint64_t handle, OutputInfo* out
     return 0;
 }
 
+int APS5_VABI sceVdecswSyncDecodeOutput(std::uint64_t handle, OutputInfo* output) {
+    for (;;) {
+        const auto status = sceVdecswTrySyncDecodeOutput(handle, output);
+        if (status != VdecswErrorOutputPending) return status;
+        std::this_thread::yield();
+    }
+}
+
 int APS5_VABI sceVdecswGetAvcPictureInfo(const OutputInfo* output, AvcPictureInfo* first, AvcPictureInfo* second) {
     if (output == nullptr || first == nullptr || first->thisSize < sizeof(std::uint64_t)) throw std::runtime_error("Vdecsw: invalid argument pointer");
     if (output->pictureCount > 1) throw std::runtime_error("Vdecsw: second field picture info is not implemented");
@@ -378,6 +395,13 @@ int APS5_VABI sceVdecswGetAvcPictureInfo(const OutputInfo* output, AvcPictureInf
         return 0;
     }
     throw std::runtime_error("Vdecsw: picture info requested for a frame buffer no decoder returned");
+}
+
+int APS5_VABI sceVdecswGetHevcPictureInfo(const OutputInfo* output, void* picture) {
+    (void)output;
+    (void)picture;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 int APS5_VABI sceVdecswFinalizeDecodeSequence(std::uint64_t handle) {

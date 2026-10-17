@@ -41,6 +41,7 @@ struct PathAliases {
     std::mutex mutex;
     std::vector<std::pair<std::string, std::string>> entries;
     std::vector<std::string> blocked;
+    std::vector<std::pair<std::string, PathProvider>> providers;
 };
 
 PathAliases& Aliases() {
@@ -170,8 +171,27 @@ WorkingDirectory& Directories() {
     static auto* state = new WorkingDirectory;
     return *state;
 }
+std::optional<std::filesystem::path> ProvidedPath(const WorkingDirectory& state, const std::filesystem::path& guest) {
+    const auto relative = TrimSlashes(guest.relative_path().generic_string().c_str());
+    PathProvider provide = nullptr;
+    {
+        auto& aliases = Aliases();
+        std::lock_guard lock(aliases.mutex);
+        for (const auto& [path, provider] : aliases.providers) {
+            if (SameName(relative, path)) provide = provider;
+        }
+    }
+    if (provide == nullptr) return std::nullopt;
+    const auto supplied = ResolveHostPath(state.root, guest.relative_path());
+    std::error_code error;
+    if (std::filesystem::exists(supplied, error) || error) return supplied;
+    auto provided = provide(state.root);
+    if (provided.empty()) return std::nullopt;
+    return provided.make_preferred();
+}
 std::filesystem::path HostPath(WorkingDirectory& state, const std::filesystem::path& guest, bool module = false) {
     if (auto aliased = ResolveAlias(guest.relative_path().generic_string(), module)) return *aliased;
+    if (auto provided = ProvidedPath(state, guest)) return *provided;
     return ResolveHostPath(state.root, guest.relative_path(), module).make_preferred();
 }
 void RequireHostDirectory(WorkingDirectory& state, const std::filesystem::path& guest) {
@@ -353,6 +373,23 @@ extern "C" void AddPathAlias_nid_no_patch(const char* guestPrefix, const char* h
         }
     }
     aliases.entries.emplace_back(prefix, hostPath);
+}
+
+extern "C" void AddPathProvider_nid_no_patch(const char* guestPath, PathProvider provide) {
+    if (guestPath == nullptr || provide == nullptr) {
+        APS5_INVALID_ARG_EX;
+    }
+    const auto path = TrimSlashes(guestPath);
+    if (path.empty()) { APS5_INVALID_ARG_EX; }
+    auto& aliases = Aliases();
+    std::lock_guard lock(aliases.mutex);
+    for (auto& entry : aliases.providers) {
+        if (SameName(entry.first, path)) {
+            entry.second = provide;
+            return;
+        }
+    }
+    aliases.providers.emplace_back(path, provide);
 }
 
 extern "C" void RemovePathAlias_nid_no_patch(const char* guestPrefix) {

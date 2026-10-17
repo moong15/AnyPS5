@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DeviceFault.hpp"
@@ -2060,6 +2061,7 @@ void VulkanDevice::PrepareForReplacement() {
         state->journalReplay->Wait();
         state->journalReplay.reset();
     }
+    DriverDetail::AwaitLibraryPrebuilds();
     Graphics::FlushCachedTextures(state->device);
     Graphics::PublishAllShadows(state->context, Graphics::PublishReason::Teardown);
     WaitIdle();

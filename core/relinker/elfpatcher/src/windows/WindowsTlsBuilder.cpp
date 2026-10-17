@@ -149,7 +149,7 @@ PeDirectory WindowsTlsBuilder::Build(const std::vector<std::uint8_t>& source, co
                 const bool wide = (info.RexPrefix & 8) != 0;
                 const bool isAlu = isAluReadOpcode(bytes[position]);
                 const auto address = supportedPrefixes && !loadValue && !aluRead && (bytes[position] == 0x8b || isAlu) && (wide || !hasOperandSizePrefix) ? registerAddress(bytes, position, info.Length, info.RexPrefix) : std::nullopt;
-                const auto addressRegister = static_cast<std::uint8_t>(((bytes[position + 1] >> 3) & 7) | ((info.RexPrefix & 4) << 1));
+                const auto addressRegister = address ? static_cast<std::uint8_t>(((bytes[position + 1] >> 3) & 7) | ((info.RexPrefix & 4) << 1)) : std::uint8_t{4};
                 if (address && addressRegister != 4) {
                     std::vector<MovedInstruction> moved;
                     auto length = info.Length;

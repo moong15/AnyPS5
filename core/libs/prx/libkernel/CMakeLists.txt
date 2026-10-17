@@ -16,6 +16,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/SharedMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/RandomDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/HostStreams.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/File/src/SandboxCertificates.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Stdio.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../libc/src/Rename.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Semaphore.cpp
@@ -82,7 +83,8 @@ target_include_directories(libkernel PRIVATE ${LIBS_INCLUDE_DIR}/nid/include)
 target_link_libraries(libkernel PRIVATE ${CMAKE_DL_LIBS})
 target_link_libraries(libkernel PRIVATE libc)
 if(WIN32)
-    target_link_libraries(libkernel PRIVATE ws2_32 shell32 advapi32 wbemuuid ole32 oleaut32)
+    target_sources(libkernel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/File/src/TrustedRoots.cpp)
+    target_link_libraries(libkernel PRIVATE ws2_32 shell32 advapi32 crypt32 wbemuuid ole32 oleaut32)
     target_link_libraries(libkernel PRIVATE iphlpapi)
     target_compile_definitions(libkernel PRIVATE _WIN32_WINNT=0x0602)
 endif()
@@ -296,6 +298,25 @@ if(BUILD_TESTING)
     add_test(NAME guest_kernel_sync COMMAND guest_kernel_sync_tests)
     if(WIN32)
         set_tests_properties(guest_kernel_sync PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_sandbox_certificates_tests ${LIBS_INCLUDE_DIR}/tests/GuestSandboxCertificates.cpp)
+    target_include_directories(guest_sandbox_certificates_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sandbox_certificates_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sandbox_certificates_tests)
+    set(sandboxCertificatesRun ${CMAKE_CURRENT_BINARY_DIR}/guest_sandbox_certificates)
+    file(MAKE_DIRECTORY ${sandboxCertificatesRun})
+    add_test(NAME guest_sandbox_certificates COMMAND guest_sandbox_certificates_tests WORKING_DIRECTORY ${sandboxCertificatesRun})
+    set_tests_properties(guest_sandbox_certificates PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        add_test_executable(guest_sandbox_certificate_trust_tests ${LIBS_INCLUDE_DIR}/tests/GuestSandboxCertificateTrust.cpp)
+        target_include_directories(guest_sandbox_certificate_trust_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_sandbox_certificate_trust_tests PRIVATE libkernel libc crypt32)
+        configure_windows_unwind(guest_sandbox_certificate_trust_tests)
+        add_test(NAME guest_sandbox_certificate_trust COMMAND guest_sandbox_certificate_trust_tests)
+        set_tests_properties(guest_sandbox_certificate_trust PROPERTIES TIMEOUT 10 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        set_tests_properties(guest_sandbox_certificates PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_kernel_rename_tests ${LIBS_INCLUDE_DIR}/tests/GuestKernelRename.cpp)
@@ -1243,6 +1264,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_socket_events PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_socket_events PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_socket_connect_listening_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketConnectListening.cpp)
+    target_include_directories(guest_socket_connect_listening_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_socket_connect_listening_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_socket_connect_listening_tests)
+    add_test(NAME guest_socket_connect_listening COMMAND guest_socket_connect_listening_tests)
+    set_tests_properties(guest_socket_connect_listening PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_socket_connect_listening PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_elf_phdr_match_tests ${LIBS_INCLUDE_DIR}/tests/GuestElfPhdrMatch.cpp)

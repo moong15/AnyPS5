@@ -296,6 +296,7 @@ int main() {
         return 77;
     }
     setenv("APS5_WRITE_WATCH_IMPORTS", "unwatch", 1);
+    SetHostImportBudget(~std::uint64_t{0});
     GuestArena::GuestArenaSetSharedBacking_nid_postfix(Resolve);
     try {
         ImportsALargeRangeAsOneSparseBuffer();

@@ -104,6 +104,11 @@ int APS5_VABI sceCoredumpWriteUserString() {
     return 0;
 }
 
+int APS5_VABI sceCoredumpConfigDumpMode() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceCoredumpAttachUserMemoryFile(uint32_t userValue, const void* mem, size_t size) {
     (void)userValue;
     return attachOutsideCoredumpHandler(__func__, mem, size);

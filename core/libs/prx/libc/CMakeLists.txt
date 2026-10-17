@@ -743,6 +743,7 @@ if(MINGW)
         target_link_libraries(guest_message_destructor_abi_tests PRIVATE libc)
         configure_windows_unwind(guest_message_destructor_abi_tests)
         foreach(mode IN ITEMS control decoy zero release regex-decoy regex-zero
+                runtime-decoy runtime-zero doraise-decoy doraise-zero
                 unshared-decoy unshared-zero regex-unshared-decoy regex-unshared-zero)
             add_test(NAME guest_message_destructor_${mode} COMMAND guest_message_destructor_abi_tests ${mode})
             set_tests_properties(guest_message_destructor_${mode} PROPERTIES TIMEOUT 10

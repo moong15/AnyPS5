@@ -6,10 +6,15 @@ endif()
 project(Relinker CXX)
 
 set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+set(ANYPS5_WINDOWS_TEST_EXIT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/WindowsTestExit.cpp")
 
 function(add_test_executable target)
     add_executable(${target} ${ARGN})
     set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<1:${ANYPS5_TEST_OUTPUT_DIRECTORY}>")
+    if(MINGW)
+        target_sources(${target} PRIVATE "${ANYPS5_WINDOWS_TEST_EXIT}")
+        target_link_options(${target} PRIVATE LINKER:--wrap=main)
+    endif()
 endfunction()
 
 option(BUILD_TESTING "Build and register relinker tests" OFF)

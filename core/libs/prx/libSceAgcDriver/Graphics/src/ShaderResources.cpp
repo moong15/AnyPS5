@@ -1498,6 +1498,10 @@ std::string HexText(std::uint64_t value) {
     return text;
 }
 
+std::string DescriptorLimitError(std::string_view description, std::uint64_t required, std::uint64_t limit) {
+    return std::string(description) + ": required " + std::to_string(required) + ", device limit " + std::to_string(limit);
+}
+
 void ValidateDescriptorLayout(const Context& context, std::span<const VkDescriptorSetLayoutBinding> bindings, bool updateAfterBind) {
     const auto maxStageResources = updateAfterBind ? context.descriptorIndexingLimits.maxPerStageUpdateAfterBindResources : context.limits.maxPerStageResources;
     std::map<VkDescriptorType, std::uint64_t> heapTotals;
@@ -1513,10 +1517,11 @@ void ValidateDescriptorLayout(const Context& context, std::span<const VkDescript
             Require(all <= maxStageResources, "typed heaps exceed per-stage resource capacity");
             if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) Require(count <= context.limits.maxPerStageDescriptorSampledImages, "typed heaps exceed per-stage sampled image capacity");
             if (layout.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) Require(count <= context.limits.maxPerStageDescriptorStorageImages, "typed heaps exceed per-stage storage image capacity");
-            if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) Require(count <= context.limits.maxPerStageDescriptorSamplers, "typed heaps exceed per-stage sampler capacity");
+            if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER && count > context.limits.maxPerStageDescriptorSamplers) throw std::runtime_error(DescriptorLimitError("typed heaps exceed per-stage sampler capacity", count, context.limits.maxPerStageDescriptorSamplers));
         }
     }
-    Require(heapTotals[VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE] <= context.limits.maxDescriptorSetSampledImages && heapTotals[VK_DESCRIPTOR_TYPE_STORAGE_IMAGE] <= context.limits.maxDescriptorSetStorageImages && heapTotals[VK_DESCRIPTOR_TYPE_SAMPLER] <= context.limits.maxDescriptorSetSamplers, "typed heaps exceed descriptor set capacity");
+    Require(heapTotals[VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE] <= context.limits.maxDescriptorSetSampledImages && heapTotals[VK_DESCRIPTOR_TYPE_STORAGE_IMAGE] <= context.limits.maxDescriptorSetStorageImages, "typed heaps exceed descriptor set capacity");
+    if (heapTotals[VK_DESCRIPTOR_TYPE_SAMPLER] > context.limits.maxDescriptorSetSamplers) throw std::runtime_error(DescriptorLimitError("typed heaps exceed descriptor set sampler capacity", heapTotals[VK_DESCRIPTOR_TYPE_SAMPLER], context.limits.maxDescriptorSetSamplers));
 }
 
 void ValidateRuntimeResources(const CompiledShader& shader, std::span<const std::uint32_t> words) {
@@ -3956,7 +3961,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(plannedSampledImages <= context.limits.maxDescriptorSetSampledImages, "pipeline sampled-image descriptors exceed device limits");
     } else {
         Require(elementWords == 4, "guest sampler descriptor must contain 4 dwords");
-        Require(capacity <= context.limits.maxPerStageDescriptorSamplers, "shader sampler descriptors exceed per-stage limits");
+        if (capacity > context.limits.maxPerStageDescriptorSamplers) throw std::runtime_error(DescriptorLimitError("shader sampler descriptors exceed per-stage limits", capacity, context.limits.maxPerStageDescriptorSamplers));
         Require(binding.samplerDepthCompare.size() == binding.count, "guest sampler binding is missing depth comparison metadata");
         Require(binding.samplerUnnormalized.empty() || binding.samplerUnnormalized.size() == binding.count, "guest sampler binding has unnormalized coordinate metadata of another size");
         for (std::uint32_t element = 0; element < binding.count; ++element) {

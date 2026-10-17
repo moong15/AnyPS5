@@ -888,6 +888,12 @@ void CountIndirectDraw(IndirectDrawPath path, double readMs, bool rewritten) {
     stats.indirectReadUs += readMs * 1000.0;
 }
 
+std::array<std::uint64_t, IndirectPathCount> IndirectDrawCounts() {
+    auto& stats = Profile();
+    std::lock_guard lock(stats.mutex);
+    return stats.indirect;
+}
+
 void CountDrawSkip(DrawSkip kind, double us) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;
@@ -1088,7 +1094,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.nothing = true;
             return inputs;
         }
-    } else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation && !state.rectList, "indirect draw on a non-vertex path must be resolved by the driver");
+    } else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation, "indirect draw on a non-vertex path must be resolved by the driver");
     inputs.indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
     const auto indexBytes = inputs.indexBytes;
     APS5_LOG_OUT_DEBUG("Index buffer bytes=%llu", static_cast<unsigned long long>(indexBytes));
@@ -1677,6 +1683,10 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
         if (index < slices.size()) residents[index]->MarkSliceDirty(slices[index]);
         else residents[index]->MarkDirty();
     }
+    for (const auto& resident : residents) {
+        if (resident == nullptr || resident->Descriptor().tileMode != TextureTileMode::kLinear) continue;
+        StorageTexture::FlushPending(resident->Descriptor().baseAddress, static_cast<std::size_t>(resident->GuestBytes()), nullptr, "linear target");
+    }
 }
 
 // What recordDraw records from: the recorder, the resources, the pipeline and framebuffer, the
@@ -2149,7 +2159,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         timer.phase(PhaseSetup);
         // Debug aid: APS5_NO_RESIDENT_TARGETS=1 copies every target in and out again.
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
-        if ((binding.gpuTiling || (color.tileMode != ColorTileMode::Linear && context.detiler != nullptr)) && residentTargets) {
+        static const bool residentLinear = std::getenv("APS5_NO_RESIDENT_LINEAR") == nullptr;
+        const bool linearResident = residentLinear && color.tileMode == ColorTileMode::Linear && ExistingHostImportFor(context, color.address, colorLayout.Bytes()) != nullptr;
+        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets) {
             // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
             // CollectWrites over the target's pages, the DCC key scan of TextureClearKeys, then
             // UnchangedSince). The page walk is skipped while the committing worker's collect
