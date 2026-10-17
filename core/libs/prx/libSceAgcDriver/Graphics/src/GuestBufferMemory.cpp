@@ -839,11 +839,7 @@ bool continuesRun(const GuestAllocations::Range& before, const GuestAllocations:
 }
 
 std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uint64_t address) {
-    const auto found = std::upper_bound(lease.begin(), lease.end(), address, [](std::uint64_t value, const auto& range) { return value < range->address; });
-    if (found == lease.begin()) return lease.size();
-    const auto index = static_cast<std::size_t>(std::prev(found) - lease.begin());
-    const auto& range = *lease[index];
-    return range.readable && address < range.address + range.bytes ? index : lease.size();
+    return RegisteredRangeIndex(lease, address);
 }
 
 std::atomic<std::uint64_t> importWindow{0};
@@ -851,32 +847,26 @@ std::atomic<std::uint64_t> importWindow{0};
 ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address) {
     const auto index = leasedIndexContaining(lease, address);
     if (index == lease.size()) return {};
-    const auto& containing = *lease[index];
-    std::uint64_t low = 0;
-    std::uint64_t high = std::numeric_limits<std::uint64_t>::max();
-    const auto window = importWindow.load(std::memory_order_relaxed);
-    if (window != 0) {
-        low = address / window * window;
-        high = low + window;
-        if (containing.address < low || containing.address + containing.bytes > high) {
-            low = containing.address;
-            high = containing.address + containing.bytes;
-        }
-    }
-    auto first = index;
-    while (first > 0 && lease[first - 1]->address >= low && continuesRun(*lease[first - 1], *lease[first])) --first;
-    auto last = index;
-    while (last + 1 < lease.size() && lease[last + 1]->address + lease[last + 1]->bytes <= high && continuesRun(*lease[last], *lease[last + 1])) ++last;
-    if (window != 0 && (lease[first]->address != low || lease[last]->address + lease[last]->bytes != high)) first = last = index;
+    const auto [first, last] = RegisteredRunBounds(lease, index, address, importWindow.load(std::memory_order_relaxed));
     if (first != last && Imports().unaliasedSpans.contains(lease[first]->address)) return {lease[index]->address, lease[index]->bytes, {lease[index]}};
     ImportRun run{lease[first]->address, lease[last]->address + lease[last]->bytes - lease[first]->address, {}};
     run.ranges.assign(lease.begin() + static_cast<std::ptrdiff_t>(first), lease.begin() + static_cast<std::ptrdiff_t>(last) + 1);
     return run;
 }
 
+std::atomic<std::uint64_t> coverageOwnerListsAvoided{0};
+
 bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
-    const auto run = importRun(lease, begin);
-    return !run.ranges.empty() && end <= run.base + run.bytes;
+    static const bool disabled = std::getenv("APS5_NO_IMPORT_COVERAGE_PROBE") != nullptr;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (disabled) {
+        const auto run = importRun(lease, begin);
+        return !run.ranges.empty() && end <= run.base + run.bytes;
+    }
+    bool avoided = false;
+    const auto covered = RegisteredRunCovers(lease, begin, end, importWindow.load(std::memory_order_relaxed), Imports().unaliasedSpans, &avoided);
+    if (profile && avoided) coverageOwnerListsAvoided.fetch_add(1, std::memory_order_relaxed);
+    return covered;
 }
 
 ImportRun crossedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
@@ -3827,7 +3817,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
     const auto uploads = uploadsProfiled.fetch_add(1, std::memory_order_relaxed) + 1;
     if (uploads % 2000 == 0) {
         const auto& copies = Copies();
-        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)));
+        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back; %llu coverage owner lists avoided\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)), static_cast<unsigned long long>(coverageOwnerListsAvoided.load(std::memory_order_relaxed)));
     }
     const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (ms > 50) {
