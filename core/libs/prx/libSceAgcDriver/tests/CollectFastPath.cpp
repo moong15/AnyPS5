@@ -32,7 +32,7 @@ struct Mapping {
     Mapping() {
         handler = AddVectoredExceptionHandler(1, HandleWrite);
         Require(handler != nullptr, "cannot install write fault handler");
-        section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, Bytes, nullptr);
+        section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, Bytes, nullptr);
         Require(section != nullptr, "cannot create shared backing");
         memory = GuestArena::GuestArenaAllocate_nid_postfix(Bytes, 65536);
         alias = GuestArena::GuestArenaAllocate_nid_postfix(Bytes, 65536);
@@ -40,8 +40,14 @@ struct Mapping {
         GuestArena::GuestArenaMap_nid_postfix(alias, Bytes, section, 0, PAGE_READWRITE);
     }
     ~Mapping() {
-        if (alias != nullptr) GuestArena::GuestArenaRelease_nid_postfix(alias, Bytes);
-        if (memory != nullptr) GuestArena::GuestArenaRelease_nid_postfix(memory, Bytes);
+        if (alias != nullptr) {
+            GuestArena::GuestArenaReset_nid_postfix(alias, Bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(alias, Bytes);
+        }
+        if (memory != nullptr) {
+            GuestArena::GuestArenaReset_nid_postfix(memory, Bytes);
+            GuestArena::GuestArenaRelease_nid_postfix(memory, Bytes);
+        }
         if (section != nullptr) {
             GuestArena::GuestArenaForgetSection_nid_postfix(section);
             CloseHandle(section);
