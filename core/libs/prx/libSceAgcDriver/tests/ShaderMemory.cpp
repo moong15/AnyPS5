@@ -2428,6 +2428,45 @@ void verifyHalfWaveReduction() {
     expectFailure([&] { static_cast<void>(pixel(umin, 8u, true)); }, "v_permlanex16_b32 from lanes 16-31 is outside the 8-lane host subgroup", "half-wave reduction: the scan built on an 8-lane subgroup");
 }
 
+void verifyEntryLaneProofBudget() {
+    using namespace ShaderRecompiler;
+    static constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic, spv::CapabilityClipDistance};
+    std::vector<std::uint32_t> code{0xbe98047eu, 0x7e160f00u, 0x8786187eu, 0xbeea287eu, 0xd501000du, 0x001a16c1u};
+    for (const auto control : {0xff01110du, 0xff01120du, 0xff01140du, 0xff01180du}) code.insert(code.end(), {0x261a1afau, control});
+    code.insert(code.end(), {0xd778100cu, 0x0305830du, 0x261a190du, 0xbefe046au, 0xd7600006u, 0x00013f0du, 0xd7600007u, 0x00017f0du, 0x83880706u, 0x7e020208u, 0xf800180fu, 0x01010101u, 0xbf810000u});
+    std::vector<std::uint32_t> savedMaskLoops;
+    for (std::uint32_t loop = 0; loop < 3u; ++loop) {
+        std::vector<std::uint32_t> savedMaskLoop{0xbea2047eu, 0xbea40380u};
+        savedMaskLoop.insert(savedMaskLoop.end(), {0xbefe0422u, 0x7c080080u, 0x8aa26a7eu});
+        const auto branch = 0xbf850000u | static_cast<std::uint16_t>(2 - static_cast<int>(savedMaskLoop.size() + 3u));
+        savedMaskLoop.insert(savedMaskLoop.end(), {0x80248124u, 0xbf0a8424u, branch, 0xbefe0422u});
+        savedMaskLoops.insert(savedMaskLoops.end(), savedMaskLoop.begin(), savedMaskLoop.end());
+    }
+    code.insert(code.begin(), savedMaskLoops.begin(), savedMaskLoops.end());
+
+    ShaderPixelStageInfo pixel{};
+    pixel.inputAddr = PixelInputBit(PixelInput::PositionX);
+    pixel.posX = true;
+    pixel.targetOutputMode[0] = 9u;
+    pixel.targetExportMapping.fill(0xe4u);
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64u;
+    request.context.pixel = pixel;
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32u;
+    request.target.supportedCapabilities = capabilities;
+    request.layout.pushConstantSizeBytes = 128u;
+    request.useCache = false;
+    const auto spirv = Recompile(request).spirv;
+    std::uint32_t reductions = 0;
+    for (std::size_t cursor = 5; cursor < spirv.size() && (spirv[cursor] >> 16u) != 0u; cursor += spirv[cursor] >> 16u) {
+        if ((spirv[cursor] & 0xffffu) == static_cast<std::uint32_t>(spv::OpGroupNonUniformUMin) && (spirv[cursor] >> 16u) == 6u && spirv[cursor + 4u] == spv::GroupOperationReduce) ++reductions;
+    }
+    require(reductions == 1u, "a wave64 pixel UMin scan after loop-carried saved EXEC masks did not use a 32-lane subgroup reduction");
+}
+
 void verifyNarrowVertexWave() {
     using namespace ShaderRecompiler;
     static constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic, spv::CapabilityClipDistance};
@@ -5183,6 +5222,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--layout-pair") {
             verifyLayoutPair();
             std::cout << "Both push-constant layouts of a pixel shader compile from one program unchanged\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--entry-lane-proof-budget") {
+            verifyEntryLaneProofBudget();
+            std::cout << "The wave64 pixel entry-lane proof handles loop-carried saved EXEC masks on a 32-lane host\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--bindless") {

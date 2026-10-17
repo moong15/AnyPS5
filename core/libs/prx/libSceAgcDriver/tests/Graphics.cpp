@@ -604,6 +604,15 @@ void hardwareScreenOffsetTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void depthCopyFormatTests() {
+    using AgcDriver::Graphics::Texture;
+    Require(Texture::DepthCopyFormat(VK_FORMAT_R32_SFLOAT) == VK_FORMAT_D32_SFLOAT, "a 32-bit float color format did not map to the 32-bit float depth format");
+    Require(Texture::DepthCopyFormat(VK_FORMAT_R16_UNORM) == VK_FORMAT_D16_UNORM, "a 16-bit unorm color format did not map to the 16-bit unorm depth format");
+    for (const auto format : {VK_FORMAT_UNDEFINED, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_D32_SFLOAT}) {
+        Require(Texture::DepthCopyFormat(format) == VK_FORMAT_UNDEFINED, "a color format without a depth counterpart mapped to a depth format");
+    }
+}
+
 void UnwrittenSampleLocationTests() {
     using AgcDriver::Graphics::DecodeState;
     using AgcDriver::Graphics::DrawRejection;
@@ -3172,6 +3181,103 @@ void multisampleDccStateTests() {
         changed.context[0x3b0] |= 1u << 28u;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "multisampled color mips");
     }
+}
+
+void multisampledDepthTests() {
+    using AgcDriver::Graphics::DecodeState;
+    const auto singleSampleScan = [] {
+        auto queue = makeState();
+        queue.context[0x2f8] = 0;
+        queue.context[0x292] = 2;
+        queue.context[0x31d] = 0x12000;
+        queue.context[0x1b3] = 2;
+        queue.context[0x1b4] = 2;
+        queue.context[0x000] = 0;
+        queue.context[0x002] = 0;
+        queue.context[0x007] = (3u << 16u) | 63u;
+        queue.context[0x00a] = 0;
+        queue.context[0x00b] = 0;
+        queue.context[0x010] = 0x2290098b;
+        queue.context[0x011] = 0x20000180;
+        for (const auto offset : {0x012u, 0x014u}) queue.context[offset] = 0x100;
+        queue.context[0x200] = 0x16;
+        return queue;
+    };
+    const auto requireCentered = [](const AgcDriver::Graphics::State& state, const std::string& what) {
+        Require(state.samples == 4 && state.depth && state.depth->samples == 4 && state.customSampleLocations && !state.sampleLocationGrid && !state.perSampleShading, what + " did not rasterize the depth target's samples");
+        const auto locations = AgcDriver::Graphics::SampleLocations(state);
+        for (std::uint32_t sample = 0; sample < state.samples; ++sample) Require(locations[sample].x == 0.5f && locations[sample].y == 0.5f, what + " did not place every sample at the pixel center");
+    };
+    const auto depthOnly = [&] {
+        auto queue = singleSampleScan();
+        queue.context[0x8e] = 0;
+        queue.context[0x010] = 0xa290098b;
+        queue.context[0x200] = 0x777;
+        queue.context[0x201] = 0;
+        return queue;
+    };
+    auto queue = depthOnly();
+    auto state = DecodeState(queue);
+    Require(state.colors.empty(), "a depth-only single-sample scan decoded a color target");
+    requireCentered(state, "a single-sample scan into a 4x depth target (PPSA18216's registers)");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck refused a single-sample scan into a 4x depth target");
+    for (const auto primitive : {5u, 6u, 7u, 17u}) {
+        queue = depthOnly();
+        queue.userConfig[0x242] = primitive;
+        requireCentered(DecodeState(queue), "a single-sample scan of primitive type " + std::to_string(primitive) + " into a 4x depth target");
+    }
+    queue = depthOnly();
+    queue.context[0x000] = 1;
+    queue.context[0x00b] = std::bit_cast<std::uint32_t>(0.25f);
+    state = DecodeState(queue);
+    requireCentered(state, "a depth clear scanned single-sampled into a 4x depth target");
+    Require(state.depthWrite && state.depthCompare == VK_COMPARE_OP_ALWAYS, "a depth clear into a 4x depth target did not write every covered sample");
+    queue = depthOnly();
+    queue.context[0x1b3] = queue.context[0x1b4] = 2u | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary);
+    requireCentered(DecodeState(queue), "a single-sample scan whose pixel program is skipped");
+    queue = depthOnly();
+    queue.context[0x201] = 0x00040000u;
+    expectFailure([&] { DecodeState(queue); }, "a single-sample scan into a multisampled depth target with Z interpolation or overrasterization (DB_EQAA)");
+    queue = singleSampleScan();
+    state = DecodeState(queue);
+    Require(state.colors.size() == 1 && state.colors[0].samples == 4, "a single-sample scan into 4x depth and color targets lost its color target");
+    requireCentered(state, "a single-sample scan into 4x depth and color targets");
+    queue.context[0x293] = 0x10000u;
+    Require(!DecodeState(queue).perSampleShading, "PS_ITER_SAMPLE requested sample shading for a single-sample scan");
+    queue = singleSampleScan();
+    queue.context[0x31d] = 0;
+    expectFailure([&] { DecodeState(queue); }, "a color target's sample count differs from the rasterizer's");
+    queue = singleSampleScan();
+    queue.context[0x010] = 0x22900983;
+    expectFailure([&] { DecodeState(queue); }, "a color target's sample count differs from the rasterizer's");
+    queue = singleSampleScan();
+    queue.context[0x2dc] = 0x0000aa01u;
+    expectFailure([&] { DecodeState(queue); }, "a single-sample scan into a multisampled depth target with alpha-to-coverage");
+    for (const auto primitive : {2u, 3u}) {
+        queue = singleSampleScan();
+        queue.userConfig[0x242] = primitive;
+        expectFailure([&] { DecodeState(queue); }, "a single-sample scan into a multisampled depth target for primitives other than triangles and rectangles");
+    }
+    queue = singleSampleScan();
+    queue.context[0x1b3] = queue.context[0x1b4] = 2u | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary);
+    expectFailure([&] { DecodeState(queue); }, "a single-sample scan into a multisampled depth target with a pixel program reading the sample index");
+    queue = singleSampleScan();
+    queue.context[0x1b3] = queue.context[0x1b4] = 2u | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveSample);
+    requireCentered(DecodeState(queue), "a single-sample scan with a pixel program reading sample-interpolated inputs");
+    queue = singleSampleScan();
+    queue.context[0x1c4] = 9;
+    queue.context[0x203] |= 0x100u;
+    expectFailure([&] { DecodeState(queue); }, "a single-sample scan into a multisampled depth target with a sample-mask export");
+    queue = singleSampleScan();
+    queue.context[0x292] = 3;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0;
+    expectFailure([&] { DecodeState(queue); }, "the depth target's sample count differs from the rasterizer's");
+    queue = singleSampleScan();
+    queue.context[0x2f8] = 0x00100001;
+    queue.context[0x292] = 3;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0xcc44;
+    queue.context[0x31d] = 0x9000;
+    expectFailure([&] { DecodeState(queue); }, "the depth target's sample count differs from the rasterizer's");
 }
 
 void clipDistanceTests() {
@@ -8106,9 +8212,11 @@ int main(int argc, char** argv) {
         uint8x4TargetTests();
         multisampleTests();
         MsaaEnableSingleSampleTests();
+        multisampledDepthTests();
         clipDistanceTests();
         framebufferLayerTests();
         UnwrittenSampleLocationTests();
+        depthCopyFormatTests();
         quadPixelMaskTests();
         ShaderStageTests();
         NggVertexWorkgroupTests();

@@ -388,7 +388,7 @@ private:
 
     bool everyInvocationEnters;
     std::unordered_set<const IrValue*> phis;
-    std::uint32_t budget = 512u;
+    std::uint32_t budget = 2048u;
 };
 
 bool EveryLaneBit(const IrValue* bit, bool constantTrue) {

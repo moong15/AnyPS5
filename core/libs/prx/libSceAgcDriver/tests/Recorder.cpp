@@ -2027,10 +2027,12 @@ void resourceReadTests(const Device& device, Recorder& recorder) {
         auto first = resources.PrepareDrawBindings(snapshotRecorder);
         Require(first != nullptr && first->snapshots.size() == 1, "read-only draw input was not snapshotted");
         std::memset(reinterpret_cast<void*>(element), 0x22, elementBytes);
+        AgcDriver::GuestMemory::MarkWritten(element, elementBytes);
         auto second = resources.PrepareDrawBindings(snapshotRecorder);
         Require(second != nullptr && second->snapshots.size() == 1, "cached draw input was not snapshotted again");
         Require(first->allocation.set != second->allocation.set, "in-flight draws share mutable descriptor bindings");
         std::memset(reinterpret_cast<void*>(element), 0x33, elementBytes);
+        AgcDriver::GuestMemory::MarkWritten(element, elementBytes);
         auto downloaded = std::make_shared<Buffer>(snapshotContext, elementBytes * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         const auto commands = snapshotRecorder.Commands();
         RecordMemoryBarrier(snapshotContext, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -2388,6 +2390,7 @@ void misalignedRegionTests(const Device& device, Recorder& recorder) {
         };
         check();
         guest[offset + 8] ^= 0xffu;
+        AgcDriver::GuestMemory::MarkWritten(view, elementBytes);
         check();
         regionRecorder.Sync();
     }
@@ -4029,6 +4032,11 @@ void importWatchTests(const Device& device) {
         std::cout << "host imports or write watching unavailable: the Windows import probe not tested\n";
         return;
     }
+    if (context.settleQueue == VK_NULL_HANDLE || context.settleQueueMutex == nullptr) {
+        Require(PrepareImportWatch(context) == ImportWatch::Unwatch, "(w) a device without a settle queue kept host imports watched");
+        std::cout << "no settle queue: the Windows import probe skipped\n";
+        return;
+    }
     const auto probe = ProbeImportWriteProtection(context);
     Require(probe.failure == nullptr, std::string("(w) the Windows import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
     std::cout << "Windows import probe: " << probe.writtenAtImport << " of " << probe.pages << " scratch pages reported written at the import, " << probe.writtenDuringSettle << " by its 4-byte settle read, " << probe.writtenAfterSettle << " after it, " << probe.writtenAfterSubmit << " after a full GPU read, " << probe.writtenAfterSecondSubmit << " after a second, " << probe.writtenAfterFill << " after a GPU write, " << probe.writtenByCpu << " after a CPU store\n";
@@ -5648,35 +5656,37 @@ class CoverPass {
 public:
     explicit CoverPass(const Context& context) : context(context), target(context, ColorTarget{0, {8, 8}, VK_FORMAT_R8G8B8A8_UNORM, 8 * 8 * 4, 0}, false) {
         try {
-            VkAttachmentDescription attachment{};
-            attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
-            attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
-            const VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-            VkSubpassDescription subpass{};
-            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-            subpass.colorAttachmentCount = 1;
-            subpass.pColorAttachments = &color;
-            VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-            passInfo.attachmentCount = 1;
-            passInfo.pAttachments = &attachment;
-            passInfo.subpassCount = 1;
-            passInfo.pSubpasses = &subpass;
-            Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &passInfo, nullptr, &renderPass), "vkCreateRenderPass cover");
-            const auto view = target.View();
-            VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-            framebufferInfo.renderPass = renderPass;
-            framebufferInfo.attachmentCount = 1;
-            framebufferInfo.pAttachments = &view;
-            framebufferInfo.width = 8;
-            framebufferInfo.height = 8;
-            framebufferInfo.layers = 1;
-            Check(context.Function<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(context.device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer cover");
+            if (!context.graphicsPipelineLibrary) {
+                VkAttachmentDescription attachment{};
+                attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+                attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+                const VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+                VkSubpassDescription subpass{};
+                subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+                subpass.colorAttachmentCount = 1;
+                subpass.pColorAttachments = &color;
+                VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+                passInfo.attachmentCount = 1;
+                passInfo.pAttachments = &attachment;
+                passInfo.subpassCount = 1;
+                passInfo.pSubpasses = &subpass;
+                Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &passInfo, nullptr, &renderPass), "vkCreateRenderPass cover");
+                const auto view = target.View();
+                VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+                framebufferInfo.renderPass = renderPass;
+                framebufferInfo.attachmentCount = 1;
+                framebufferInfo.pAttachments = &view;
+                framebufferInfo.width = 8;
+                framebufferInfo.height = 8;
+                framebufferInfo.layers = 1;
+                Check(context.Function<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(context.device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer cover");
+            }
             VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout cover");
             const auto module = [&](const std::uint32_t* code, std::size_t bytes) {
@@ -5723,7 +5733,12 @@ public:
             pipelineInfo.pMultisampleState = &multisample;
             pipelineInfo.pColorBlendState = &blendState;
             pipelineInfo.layout = layout;
-            pipelineInfo.renderPass = renderPass;
+            const VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+            VkPipelineRenderingCreateInfoKHR renderingFormats{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
+            renderingFormats.colorAttachmentCount = 1;
+            renderingFormats.pColorAttachmentFormats = &colorFormat;
+            if (context.graphicsPipelineLibrary) pipelineInfo.pNext = &renderingFormats;
+            else pipelineInfo.renderPass = renderPass;
             Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines cover");
         } catch (...) {
             release();
@@ -5740,11 +5755,35 @@ public:
         const auto commands = start.commands;
         if (!continued) {
             recorder.PrepareSampleSlot();
-            VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-            begin.renderPass = renderPass;
-            begin.framebuffer = framebuffer;
-            begin.renderArea = {{0, 0}, {8, 8}};
-            context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+            if (context.graphicsPipelineLibrary) {
+                if (!transitioned) {
+                    transitioned = true;
+                    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                    barrier.image = target.Image();
+                    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                }
+                VkRenderingAttachmentInfoKHR attachment{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
+                attachment.imageView = target.View();
+                attachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                VkRenderingInfoKHR rendering{VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
+                rendering.renderArea = {{0, 0}, {8, 8}};
+                rendering.layerCount = 1;
+                rendering.colorAttachmentCount = 1;
+                rendering.pColorAttachments = &attachment;
+                context.Resolved(&DeviceFunctions::cmdBeginRendering, "vkCmdBeginRenderingKHR")(commands, &rendering);
+            } else {
+                VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+                begin.renderPass = renderPass;
+                begin.framebuffer = framebuffer;
+                begin.renderArea = {{0, 0}, {8, 8}};
+                context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+            }
         }
         context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         recorder.NoteSampledDraw(commands);
@@ -5773,6 +5812,7 @@ private:
     }
     const Context& context;
     RenderTarget target;
+    mutable bool transitioned = false;
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;

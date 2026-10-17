@@ -384,6 +384,29 @@ constexpr std::array<std::array<std::int8_t, 2>, 2> StandardLocations2{{{4, 4}, 
 constexpr std::array<std::array<std::int8_t, 2>, 4> StandardLocations4{{{-2, -6}, {6, -2}, {-6, 2}, {2, 6}}};
 constexpr std::array<std::array<std::int8_t, 2>, 8> StandardLocations8{{{1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7}}};
 
+std::string nonTriangleRejection(const QueueState& queue, const char* message, bool rectangles = false) {
+    const auto word = [](const Registers& registers, std::uint32_t offset, RegisterBank bank = RegisterBank::Context) -> std::optional<std::uint32_t> {
+        const auto it = find(registers, offset, bank);
+        if (it == registers.end()) return std::nullopt;
+        return it->second;
+    };
+    const auto& cx = queue.context;
+    const auto stages = word(cx, 0x2d5);
+    if (!stages) return {};
+    if ((*stages & 0x20u) != 0) {
+        if (const auto output = word(cx, 0x29b); output && ((*output & 0x80000000u) != 0 || (*output & 0x3fu) != 2u)) return zeroMessage(0x29b, *output, message);
+    } else if ((*stages & 4u) != 0) {
+        if (const auto parameters = word(cx, 0x2db)) {
+            const auto domain = *parameters & 3u;
+            const auto topology = (*parameters >> 5u) & 7u;
+            if ((domain != 1u && domain != 2u) || (topology != 2u && topology != 3u)) return zeroMessage(0x2db, *parameters, message);
+        }
+    } else if (const auto primitive = word(queue.userConfig, 0x242, RegisterBank::UserConfig); primitive && *primitive != 4u && *primitive != 5u && *primitive != 6u && !(rectangles && (*primitive == 7u || *primitive == 17u))) {
+        return zeroMessage(0x242, *primitive, message);
+    }
+    return {};
+}
+
 std::string singleSampleMsaaRejection(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto word = [](const Registers& registers, std::uint32_t offset, RegisterBank bank = RegisterBank::Context) -> std::optional<std::uint32_t> {
@@ -397,20 +420,19 @@ std::string singleSampleMsaaRejection(const QueueState& queue) {
     }
     if (const auto alphaToMask = word(cx, 0x2dc); alphaToMask && (*alphaToMask & 1u) != 0 && !(*alphaToMask == AlphaToCoverageDithered && alphaToCoverageDisabled(cx))) return zeroMessage(0x2dc, *alphaToMask, "MSAA_ENABLE on a single-sample target with alpha-to-coverage");
     if (const auto conservative = word(cx, 0x313); conservative && (*conservative & ~0x001f6000u) != 0) return zeroMessage(0x313, *conservative, "MSAA_ENABLE on a single-sample target with conservative rasterization");
-    constexpr const char* primitives = "MSAA_ENABLE on a single-sample target for primitives other than triangles";
-    const auto stages = word(cx, 0x2d5);
-    if (!stages) return {};
-    if ((*stages & 0x20u) != 0) {
-        if (const auto output = word(cx, 0x29b); output && ((*output & 0x80000000u) != 0 || (*output & 0x3fu) != 2u)) return zeroMessage(0x29b, *output, primitives);
-    } else if ((*stages & 4u) != 0) {
-        if (const auto parameters = word(cx, 0x2db)) {
-            const auto domain = *parameters & 3u;
-            const auto topology = (*parameters >> 5u) & 7u;
-            if ((domain != 1u && domain != 2u) || (topology != 2u && topology != 3u)) return zeroMessage(0x2db, *parameters, primitives);
-        }
-    } else if (const auto primitive = word(queue.userConfig, 0x242, RegisterBank::UserConfig); primitive && *primitive != 4u && *primitive != 5u && *primitive != 6u) {
-        return zeroMessage(0x242, *primitive, primitives);
-    }
+    return nonTriangleRejection(queue, "MSAA_ENABLE on a single-sample target for primitives other than triangles");
+}
+
+std::string singleSampleDepthScanRejection(const QueueState& queue) {
+    if (auto reason = nonTriangleRejection(queue, "a single-sample scan into a multisampled depth target for primitives other than triangles and rectangles", true); !reason.empty()) return reason;
+    const auto& cx = queue.context;
+    if (const auto eqaa = find(cx, 0x201); eqaa != cx.end() && (eqaa->second & 0x0f0c0000u) != 0) return zeroMessage(0x201, eqaa->second, "a single-sample scan into a multisampled depth target with Z interpolation or overrasterization (DB_EQAA)");
+    if (PixelProgramSkipped(queue)) return {};
+    constexpr std::uint32_t sampleIndex = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary);
+    const auto ena = find(cx, 0x1b3);
+    const auto addr = find(cx, 0x1b4);
+    if (ena != cx.end() && addr != cx.end() && (ena->second & addr->second & sampleIndex) != 0) return zeroMessage(0x1b3, ena->second, "a single-sample scan into a multisampled depth target with a pixel program reading the sample index");
+    if (const auto control = find(cx, 0x203); control != cx.end() && (control->second & 0x100u) != 0) return zeroMessage(0x203, control->second, "a single-sample scan into a multisampled depth target with a sample-mask export");
     return {};
 }
 
@@ -1055,7 +1077,6 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         Require(!result.customSampleLocations, "dithered alpha-to-coverage with custom sample locations is unsupported");
     }
     const bool depthKeepsSampleZero = result.depth && result.depth->samples == 1 && result.samples > 1;
-    Require(!result.depth || depthKeepsSampleZero || result.depth->samples == result.samples, "the depth target's sample count differs from the rasterizer's");
     zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
     if (result.samples > 1 && (read(cx, 0x292) & 1u) == 0) {
         const bool filled = result.topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
@@ -1074,6 +1095,14 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         Require(rasterizesSampleZeroOnly(cx, result), "the depth target's sample count differs from the rasterizer's");
         rasterizeSampleZero(result);
     }
+    if (result.depth && result.depth->samples > 1 && result.samples == 1 && (read(cx, 0x292) & 1u) == 0) {
+        Require(!result.alphaToCoverage, "a single-sample scan into a multisampled depth target with alpha-to-coverage is unsupported");
+        if (auto reason = singleSampleDepthScanRejection(queue); !reason.empty()) throw std::runtime_error(reason);
+        result.samples = result.depth->samples;
+        result.customSampleLocations = true;
+        result.sampleLocations.fill(0);
+    }
+    Require(!result.depth || depthKeepsSampleZero || result.depth->samples == result.samples, "the depth target's sample count differs from the rasterizer's");
     zero(cx, 0x80, ~0u, "window offset");
     zero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits");
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");

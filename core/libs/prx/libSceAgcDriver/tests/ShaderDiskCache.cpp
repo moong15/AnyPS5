@@ -67,6 +67,30 @@ std::string hex(std::uint64_t value) {
     return text;
 }
 
+void removeCacheDirectory(const std::filesystem::path& directory) {
+    std::error_code error;
+#ifdef _WIN32
+    std::vector<std::filesystem::path> files;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+        if (!entry.is_directory()) files.push_back(entry.path());
+    }
+    constexpr auto dispositionInfoEx = static_cast<FILE_INFO_BY_HANDLE_CLASS>(21);
+    constexpr DWORD deleteFile = 0x00000001, posixSemantics = 0x00000002;
+    for (const auto& file : files) {
+        const auto handle = CreateFileW(file.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) error.assign(static_cast<int>(GetLastError()), std::system_category());
+        require(!error, "cannot open " + file.string() + " for deletion: " + error.message());
+        struct Close { HANDLE file; ~Close() { CloseHandle(file); } } close{handle};
+        DWORD flags = deleteFile | posixSemantics;
+        if (!SetFileInformationByHandle(handle, dispositionInfoEx, &flags, sizeof(flags))) error.assign(static_cast<int>(GetLastError()), std::system_category());
+        require(!error, "cannot delete " + file.string() + ": " + error.message());
+    }
+#endif
+    std::filesystem::remove_all(directory, error);
+    require(!error, "cannot remove the shader cache test directory: " + error.message());
+}
+
 bool sameBinding(const DescriptorBinding& left, const DescriptorBinding& right) {
     return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.imageShapes == right.imageShapes && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers;
 }
@@ -2722,9 +2746,7 @@ int main(int argc, char** argv) {
         verifySpecializationLiveness();
         verifySpecializationDropsDeadConstants();
         ShaderRecompiler::ShaderDiskCache::Flush();
-        std::error_code error;
-        std::filesystem::remove_all(directory, error);
-        require(!error, "cannot remove the shader cache test directory: " + error.message());
+        removeCacheDirectory(directory);
         std::cout << "shader disk cache tests passed\n";
         return 0;
     } catch (const std::exception& error) {

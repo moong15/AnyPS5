@@ -15,6 +15,21 @@ import nid_names
 
 
 class DatabaseCacheTests(unittest.TestCase):
+    def test_empty_symbol_filters_do_not_open_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for option in ("--name", "--symbol", "--na", "--sym"):
+                for json_output in (False, True):
+                    with self.subTest(option=option, json_output=json_output):
+                        result = subprocess.run(
+                            [sys.executable, str(Path(nid_names.__file__)), option, "--db", directory,
+                             *(["--json"] if json_output else [])], capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stderr, "")
+                        if json_output:
+                            self.assertEqual(json.loads(result.stdout), {"symbols": []})
+                        else:
+                            self.assertEqual(result.stdout.split(), ["NAME", "NID"])
+
     def test_interrupted_download_does_not_publish_a_partial_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "cache" / "aerolib.csv"

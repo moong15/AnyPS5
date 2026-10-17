@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 #ifdef _WIN32
 #include <aclapi.h>
 #include <windows.h>
@@ -539,9 +540,14 @@ static std::string Utf8(const std::wstring& text) {
 }
 
 static PACL DenyListing(const std::wstring& directory, PSECURITY_DESCRIPTOR& owner) {
-    wchar_t account[256]{};
-    DWORD count = static_cast<DWORD>(sizeof(account) / sizeof(account[0]));
-    Require(::GetUserNameW(account, &count) != FALSE);
+    HANDLE token = nullptr;
+    Require(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token) != FALSE);
+    DWORD size = 0;
+    ::GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> user(size);
+    const BOOL queried = ::GetTokenInformation(token, TokenUser, user.data(), size, &size);
+    ::CloseHandle(token);
+    Require(queried != FALSE);
     PACL original = nullptr;
     Require(::GetNamedSecurityInfoW(directory.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
         nullptr, nullptr, &original, nullptr, &owner) == ERROR_SUCCESS);
@@ -549,9 +555,9 @@ static PACL DenyListing(const std::wstring& directory, PSECURITY_DESCRIPTOR& own
     denied.grfAccessPermissions = FILE_LIST_DIRECTORY;
     denied.grfAccessMode = DENY_ACCESS;
     denied.grfInheritance = NO_INHERITANCE;
-    denied.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+    denied.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     denied.Trustee.TrusteeType = TRUSTEE_IS_USER;
-    denied.Trustee.ptstrName = account;
+    denied.Trustee.ptstrName = static_cast<LPWSTR>(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid);
     PACL blocked = nullptr;
     Require(::SetEntriesInAclW(1, &denied, original, &blocked) == ERROR_SUCCESS);
     const DWORD applied = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(directory.c_str()), SE_FILE_OBJECT,
@@ -578,7 +584,24 @@ static void RequireContextInsensitive(std::string message, std::string context) 
     }
 }
 
+static void DropPrivilege(HANDLE token, const wchar_t* name) {
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_REMOVED;
+    Require(::LookupPrivilegeValueW(nullptr, name, &privileges.Privileges[0].Luid) != FALSE);
+    Require(::AdjustTokenPrivileges(token, FALSE, &privileges, 0, nullptr, nullptr) != FALSE);
+}
+
+static void DropBackupPrivileges() {
+    HANDLE token = nullptr;
+    Require(::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) != FALSE);
+    DropPrivilege(token, L"SeBackupPrivilege");
+    DropPrivilege(token, L"SeRestorePrivilege");
+    Require(::CloseHandle(token) != FALSE);
+}
+
 static void DeniedParentWatch() {
+    DropBackupPrivileges();
     const auto path = TemporaryName("denied");
     Require(mkdir_nid_postfix(path.c_str(), 0755) == 0);
     const int file = open_nid_postfix((path + "/watched.bin").c_str(), ReadWrite | Create, 0644);

@@ -271,7 +271,9 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+        if (nbytes != 0) return SceIoErrorFromErrno(EFAULT);
+        char empty = 0;
+        return sceKernelRead(d, &empty, 0);
     }
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) errno = EFAULT;
@@ -288,7 +290,9 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
     }
     if (buf == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+        if (nbytes != 0) return SceIoErrorFromErrno(EFAULT);
+        const char empty = 0;
+        return sceKernelWrite(d, &empty, 0);
     }
     auto n = NativeWrite(d, buf, nbytes);
     if (n < 0) return SceIoErrorFromErrno(errno);
