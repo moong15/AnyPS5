@@ -1,7 +1,3 @@
-// A queued draw still has to read its index buffer from guest memory at its own place in the command
-// stream, so a storage image's deferred results must not be stored into those bytes before it runs.
-// The draw pipeline (depth 8) commits a draw after the packets behind it, which is what lets the
-// write-back overtake the read it belongs behind.
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -56,6 +52,7 @@ constexpr std::uint32_t ImageWidth = 128;
 constexpr std::uint32_t ImageHeight = 120;
 constexpr std::uint8_t Sentinel = 0xc7;
 constexpr std::array<std::uint32_t, 3> Indices{0, 1, 2};
+constexpr std::size_t VertexOffset = 0x2000;
 
 std::byte* ColorMemory = nullptr;
 std::byte* Pool = nullptr;
@@ -78,6 +75,8 @@ struct Vertex {
     std::array<float, 4> position;
     std::array<float, 4> distances;
 };
+
+std::array<Vertex, 3> Vertices{};
 
 constexpr std::array<float, 3> PositionX{-3.0f, 1.0f, 1.0f};
 constexpr std::array<float, 3> PositionY{-1.0f, -1.0f, 3.0f};
@@ -155,8 +154,6 @@ std::array<std::uint32_t, 8> ImageDescriptor(const void* texels) {
     };
 }
 
-// A compute dispatch that writes the image. Its results stay on the host until something asks for
-// them in guest memory.
 std::vector<std::uint32_t> ImageWrite() {
     const auto descriptor = ImageDescriptor(Pool);
     std::vector<std::uint32_t> data(descriptor.begin(), descriptor.end());
@@ -180,9 +177,7 @@ std::vector<std::uint32_t> ImageWrite() {
     return words;
 }
 
-// An indexed draw of a triangle that covers the target, with the index buffer at the pool whose head
-// the image's deferred results also live in.
-std::vector<std::uint32_t> Draw(const std::array<Vertex, 3>& vertices) {
+std::vector<std::uint32_t> Draw(const void* vertices, std::size_t count) {
     const auto colorAddress = reinterpret_cast<std::uintptr_t>(ColorMemory);
     const auto poolAddress = reinterpret_cast<std::uintptr_t>(Pool);
     const auto vertexAddress = reinterpret_cast<std::uintptr_t>(VertexCode.data());
@@ -209,7 +204,7 @@ std::vector<std::uint32_t> Draw(const std::array<Vertex, 3>& vertices) {
     SetRegister(words, SetShReg, 0x0c8, static_cast<std::uint32_t>(vertexAddress >> 8u));
     SetRegister(words, SetShReg, 0x0c9, static_cast<std::uint32_t>(vertexAddress >> 40u));
     SetRegister(words, SetShReg, 0x08b, 4u << 1u);
-    const auto descriptor = BufferDescriptor(vertices.data(), sizeof(Vertex), static_cast<std::uint32_t>(vertices.size()));
+    const auto descriptor = BufferDescriptor(vertices, sizeof(Vertex), static_cast<std::uint32_t>(count));
     for (std::uint32_t i = 0; i < descriptor.size(); ++i) SetRegister(words, SetShReg, 0x08c + i, descriptor[i]);
     words.insert(words.end(), {0xc0012600u, static_cast<std::uint32_t>(poolAddress), static_cast<std::uint32_t>(poolAddress >> 32u)});
     words.insert(words.end(), {0xc0001300u, static_cast<std::uint32_t>(Indices.size())});
@@ -223,12 +218,67 @@ void Submit(const std::vector<std::uint32_t>& words, const char* what) {
     Require(sceAgcDriverSubmitDcb(&packet) == 0, std::string("queued index read: the submission failed for ") + what);
 }
 
+std::vector<std::uint32_t> WaitRegMem(std::uint64_t address, std::uint32_t reference) {
+    return {0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), reference, 0xffffffffu, 0u};
+}
+
 bool IndicesIntact() {
     return std::equal(Indices.begin(), Indices.end(), reinterpret_cast<const std::uint32_t*>(Pool));
 }
 
-// The gate holds the committer until the draw joins the queue, so the draw's commit runs after the
-// packets behind its own, as the pipeline does in a running game.
+bool VerticesIntact() {
+    return std::memcmp(Pool + VertexOffset, Vertices.data(), sizeof(Vertex) * Vertices.size()) == 0;
+}
+
+std::uint32_t PoolWord(std::size_t offset) {
+    return *reinterpret_cast<const std::uint32_t*>(Pool + offset);
+}
+
+void ResetPool() {
+    std::memset(Pool, Sentinel, PoolBytes);
+    std::memcpy(Pool, Indices.data(), Indices.size() * sizeof(std::uint32_t));
+    std::memcpy(Pool + VertexOffset, Vertices.data(), sizeof(Vertex) * Vertices.size());
+}
+
+std::size_t WrittenPixels() {
+    std::vector<std::byte> colors(ColorBytes);
+    AgcDriver::GuestMemory::Read(reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(ColorMemory)), colors);
+    std::size_t written = 0;
+    for (std::uint32_t pixel = 0; pixel < Width * Height; ++pixel) {
+        const auto value = std::to_integer<std::uint8_t>(colors[pixel * 4u]);
+        Require(value == 0u || value == 255u, "queued index read: pixel " + std::to_string(pixel) + " stored " + std::to_string(value));
+        written += value == 255u ? 1u : 0u;
+    }
+    return written;
+}
+
+void RequireTriangle(const char* phase) {
+    const auto written = WrittenPixels();
+    Require(written == Width * Height, std::string("queued index read: ") + phase + ": the draw left " + std::to_string(Width * Height - written) + " pixels cleared, expected the triangle its indices and vertices name");
+}
+
+void LandPool() {
+    const auto landBy = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Pool)), PoolBytes);
+        AgcDriverWaitIdle_nid_postfix();
+    } while (IndicesIntact() && std::chrono::steady_clock::now() < landBy);
+    Require(!IndicesIntact(), "queued index read: the image's results never reached the memory they cover, so the run above proves nothing");
+}
+
+void WaitForWord(std::uint64_t address, std::uint32_t value, const char* what) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::seconds(10);
+    while (*reinterpret_cast<const volatile std::uint32_t*>(address) != value) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            char message[256];
+            std::snprintf(message, sizeof(message), "queued index read: %s: 0x%08llx held 0x%08x after %.1f s, expected 0x%08x", what, static_cast<unsigned long long>(address), *reinterpret_cast<const volatile std::uint32_t*>(address), std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), value);
+            Require(false, message);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 void GateUntilQueued() {
     AgcDriver::DriverDetail::DrawPipeline::Queue0().Enqueue([] {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -245,6 +295,12 @@ void WaitForCommits() {
         Require(std::chrono::steady_clock::now() < deadline, "queued index read: the draw commit never ran");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+}
+
+void WaitForHeldRange(std::uint64_t address, std::size_t bytes, const char* what) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!AgcDriver::DriverDetail::DrawPipeline::HeldReads(address, bytes) && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(AgcDriver::DriverDetail::DrawPipeline::HeldReads(address, bytes), std::string("queued index read: the queued draw holds no read of its ") + what + " range");
 }
 
 }
@@ -267,34 +323,63 @@ int main() {
         Register(PixelShader, PixelCode.data(), sizeof(PixelCode), 1);
         std::memset(Pool, Sentinel, PoolBytes);
         std::memcpy(Pool, Indices.data(), Indices.size() * sizeof(std::uint32_t));
-        std::array<Vertex, 3> vertices{};
-        for (std::size_t i = 0; i < vertices.size(); ++i) vertices[i] = {{PositionX[i], PositionY[i], 0.5f, 1.0f}, {Negative[i], Negative[i], Negative[i], 0.0f}};
+        for (std::size_t i = 0; i < Vertices.size(); ++i) Vertices[i] = {{PositionX[i], PositionY[i], 0.5f, 1.0f}, {Negative[i], Negative[i], Negative[i], 0.0f}};
+        std::memcpy(Pool + VertexOffset, Vertices.data(), sizeof(Vertex) * Vertices.size());
 
+        const auto poolAddress = reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Pool));
+        const auto vertexAddress = poolAddress + VertexOffset;
         const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> poolRange{{
-            {reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Pool)), reinterpret_cast<std::uint64_t>(PoolBytes)}}};
+            {poolAddress, static_cast<std::uint64_t>(PoolBytes)}}};
         Submit(ImageWrite(), "the image write");
         AgcDriverWaitIdle_nid_postfix();
         Require(AgcDriver::Graphics::StorageTexture::AnyPending(), "queued index read: the image write left no pending result to order against");
         Require(IndicesIntact(), "queued index read: the image's results reached guest memory before any consumer asked");
         GateUntilQueued();
         std::fill_n(ColorMemory, ColorBytes, std::byte{0});
-        Submit(Draw(vertices), "the indexed draw");
+        Submit(Draw(Vertices.data(), Vertices.size()), "the indexed draw");
         WaitForCommits();
-        Require(IndicesIntact(), "queued index read: the queued draw's commit stored the image's results over its index buffer");        AgcDriverWaitIdle_nid_postfix();
-        std::vector<std::byte> colors(ColorBytes);
-        AgcDriver::GuestMemory::Read(reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(ColorMemory)), colors);
-        std::size_t written = 0;
-        for (std::uint32_t pixel = 0; pixel < Width * Height; ++pixel) {
-            const auto value = std::to_integer<std::uint8_t>(colors[pixel * 4u]);
-            Require(value == 0u || value == 255u, "queued index read: pixel " + std::to_string(pixel) + " stored " + std::to_string(value));
-            written += value == 255u ? 1u : 0u;
-        }
-        Require(written == Width * Height, "queued index read: the draw left " + std::to_string(Width * Height - written) + " pixels cleared, expected the triangle its indices name");
-
-        // The control: with nothing queued, the same results do reach the bytes they cover.
-        AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Pool)), PoolBytes);
+        Require(IndicesIntact(), "queued index read: the queued draw's commit stored the image's results over its index buffer");
         AgcDriverWaitIdle_nid_postfix();
-        Require(!IndicesIntact(), "queued index read: the image's results never reached the memory they cover, so the run above proves nothing");
+        RequireTriangle("the index read");
+        LandPool();
+
+        ResetPool();
+        Submit(ImageWrite(), "the second image write");
+        AgcDriverWaitIdle_nid_postfix();
+        Require(AgcDriver::Graphics::StorageTexture::AnyPending(), "queued index read: the second image write left no pending result to order against");
+        GateUntilQueued();
+        std::fill_n(ColorMemory, ColorBytes, std::byte{0});
+        Submit(Draw(Pool + VertexOffset, Vertices.size()), "the draw whose vertices the image covers");
+        WaitForHeldRange(vertexAddress, sizeof(Vertex) * Vertices.size(), "vertex");
+        WaitForCommits();
+        AgcDriverWaitIdle_nid_postfix();
+        RequireTriangle("the vertex read");
+        LandPool();
+
+        std::array<std::uint32_t, 3> texels{};
+        for (std::size_t i = 0; i < texels.size(); ++i) texels[i] = PoolWord(i * sizeof(std::uint32_t));
+        const auto sentinelWord = static_cast<std::uint32_t>(Sentinel) * 0x01010101u;
+        std::size_t awaited = texels.size();
+        for (std::size_t i = 0; i < texels.size(); ++i) {
+            if (texels[i] != Indices[i] && texels[i] != sentinelWord) {
+                awaited = i;
+                break;
+            }
+        }
+        Require(awaited != texels.size(), "queued index read: the image's first texels repeat the indices and the sentinel, so a wait on them proves nothing");
+        const auto awaitedAddress = poolAddress + awaited * sizeof(std::uint32_t);
+        ResetPool();
+
+        Submit(ImageWrite(), "the third image write");
+        AgcDriverWaitIdle_nid_postfix();
+        Require(AgcDriver::Graphics::StorageTexture::AnyPending(), "queued index read: the third image write left no pending result to order against");
+        std::fill_n(ColorMemory, ColorBytes, std::byte{0});
+        Submit(Draw(Pool + VertexOffset, Vertices.size()), "the draw a wait behind it reads the held range of");
+        Submit(WaitRegMem(awaitedAddress, texels[awaited]), "the wait over the held range");
+        WaitForWord(awaitedAddress, texels[awaited], "the wait over the held range was not satisfied");
+        AgcDriverWaitIdle_nid_postfix();
+        RequireTriangle("the wait over the held range");
+        Require(!VerticesIntact(), "queued index read: the image's results never reached the memory the wait covered");
         std::puts("queued index read vs. deferred storage write-back tests passed");
         AgcDriverShutdown_nid_postfix();
         return 0;

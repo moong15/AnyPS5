@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/IndexTraceRing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawProgramTrace.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DrawWriteRanges.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -660,6 +661,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         const auto commitCursor = static_cast<std::size_t>(packet.data() - submission.commands.data());
         const auto commitPacket = (packet[0] >> 8u) & 0xffu;
         const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
+        auto reads = QueuedDrawReadRanges(drawParameters, stages);
         const auto queueEpoch = DrawPipeline::QueueEpochToken(commitQueue).load(std::memory_order_relaxed);
         auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, commitQueue, commitSerial, commitCursor, commitPacket, epoch, queueEpoch, programs = std::move(programs), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
             DrawPipeline::FollowEpoch(commitQueue, epoch, queueEpoch);
@@ -672,14 +674,6 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             }
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
-        // The index range the commit reads in place belongs to this draw's place in the command
-        // stream, not to the commit's: hold it against the writes the packets behind this one
-        // record while the commit waits (see DrawPipeline::HeldReads).
-        std::vector<DrawPipeline::Range> reads;
-        if (drawParameters.indexed && drawParameters.indexSize != 0 && drawParameters.indexCount != 0) {
-            const auto bytes = static_cast<std::uint64_t>(drawParameters.indexCount) * drawParameters.indexSize;
-            if (bytes != 0 && drawParameters.indexAddress <= std::numeric_limits<std::uint64_t>::max() - bytes) reads.emplace_back(drawParameters.indexAddress, drawParameters.indexAddress + bytes);
-        }
         DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads));
         phaseTiming.Phase(DrawRowLockWait);
         timing.Mark("draw_enqueued");

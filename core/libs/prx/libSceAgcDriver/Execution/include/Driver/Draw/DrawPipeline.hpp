@@ -41,9 +41,6 @@ public:
     // later items and never for another queue's.
     static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
 
-    // `reads` are guest ranges the commit reads at its own place in the command stream (the draw's
-    // index range, known from the packets): a write the guest ordered after the item must not be
-    // recorded into them before the item runs, or the commit reads what came later. See HeldReads.
     void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {});
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
     static std::uint64_t DrainRequestsByOpcode(std::uint32_t opcode);
@@ -51,10 +48,8 @@ public:
     std::size_t Outstanding() const { return outstanding.load(std::memory_order_acquire); }
     bool Overlaps(std::uint64_t address, std::size_t bytes);
     std::optional<std::uint64_t> PendingLabel(std::uint64_t address, std::size_t bytes);
-    // Whether a queued commit, itself included, still has to read the range from guest memory. The
-    // commit's own read is the point: its commit is the first to run after the packets that came
-    // before it, so a write recorded while it waits is ordered after the read it belongs to.
     static bool HeldReads(std::uint64_t address, std::size_t bytes);
+    static std::uint64_t ReleasedStores();
 
 private:
     struct Item {
@@ -68,11 +63,14 @@ private:
     void run();
     void rethrowFailure();
     void report(std::chrono::steady_clock::time_point now);
+    bool readHeld(std::uint64_t address, std::size_t bytes);
+    void storeDeferred(std::vector<Range>& ranges);
 
     std::mutex mutex;
     std::condition_variable wake;
     std::condition_variable idle;
     std::deque<Item> items;
+    std::vector<Range> deferredStores;
     std::exception_ptr failure;
     std::atomic<std::size_t> outstanding{0};
     std::uint32_t idleWaiters = 0;
