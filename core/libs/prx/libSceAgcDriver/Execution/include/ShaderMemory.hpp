@@ -56,7 +56,8 @@ public:
     // by the driver: the [capture] line charges the waits made inside a capture to it.
     using WaitedMsProvider = double (*)();
     static void SetWaitedMsProvider(WaitedMsProvider provider);
-    explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, PendingWriteQuery pendingWrite = nullptr, PendingWriteObserver observe = nullptr, HookWaitCounter hookWaits = nullptr);
+    using ReadBarrier = void (*)(std::uint64_t address, std::size_t bytes);
+    explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, PendingWriteQuery pendingWrite = nullptr, PendingWriteObserver observe = nullptr, HookWaitCounter hookWaits = nullptr, ReadBarrier readBarrier = nullptr);
     ~ShaderMemory();
     ShaderMemory(const ShaderMemory&) = delete;
     ShaderMemory& operator=(const ShaderMemory&) = delete;
@@ -120,6 +121,7 @@ private:
     std::vector<std::pair<std::uint64_t, Page*>> pages;
     std::uint64_t lastBase = ~std::uint64_t{0};
     Page* lastPage = nullptr;
+    ReadBarrier readBarrier = nullptr;
     PendingWriteQuery pendingWrite = nullptr;
     PendingWriteObserver observe = nullptr;
     HookWaitCounter hookWaits = nullptr;

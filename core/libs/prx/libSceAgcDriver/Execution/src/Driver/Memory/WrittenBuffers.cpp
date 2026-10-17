@@ -79,6 +79,40 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> DispatchWriteRanges(const S
     return ranges;
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> DispatchReadRanges(const ShaderRecompiler::RecompileResult& compiled) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    const auto all = [&] { ranges = {{0, std::numeric_limits<std::uint64_t>::max()}}; };
+    const auto add = [&](std::uint64_t begin, std::uint64_t bytes) {
+        if (begin == 0 || bytes == 0) return;
+        if (begin > std::numeric_limits<std::uint64_t>::max() - 3u || bytes > std::numeric_limits<std::uint64_t>::max() - begin - 3u) all();
+        else ranges.emplace_back(begin & ~std::uint64_t{3}, (begin + bytes + 3u) & ~std::uint64_t{3});
+    };
+    if (compiled.bdaAbiVersion != 0 || !compiled.imageTableRanges.empty()) {
+        all();
+        return ranges;
+    }
+    for (const auto& binding : compiled.bindings) {
+        if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
+            if (binding.guestDescriptor.size() < static_cast<std::size_t>(binding.count) * 4u) {
+                all();
+                return ranges;
+            }
+            for (std::uint32_t element = 0; element < binding.count; ++element) {
+                const auto* words = binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u;
+                const ShaderRecompiler::ShaderBufferResource resource{{words[0], words[1], words[2], words[3]}};
+                add(resource.Base48(), resource.GetSize());
+            }
+        } else if (binding.role == ShaderRecompiler::DescriptorRole::GuestImages) {
+            all();
+            return ranges;
+        } else if (binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers && binding.role != ShaderRecompiler::DescriptorRole::FlattenedSrt && binding.role != ShaderRecompiler::DescriptorRole::ShaderData) {
+            all();
+            return ranges;
+        }
+    }
+    return ranges;
+}
+
 void Driver::noteForeignWriter(std::uint64_t begin, std::uint64_t end, std::uint32_t queue) {
     if (!foreignWriters() || !(writeEvidenceEnabled() || traceCapSync()) || end <= begin) return;
     std::lock_guard lock(writtenBuffersMutex);

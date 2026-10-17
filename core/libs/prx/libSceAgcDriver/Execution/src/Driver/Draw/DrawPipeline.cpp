@@ -21,6 +21,7 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point since) {
 
 // HeldReads: the read ranges the queue holds, and how often a store asked about one (hits are
 // deferred write-backs that waited for a queued index read).
+thread_local const std::vector<DrawPipeline::Range>* committingOrderedReads = nullptr;
 std::atomic<std::uint64_t> heldReadRanges{0};
 std::atomic<std::uint64_t> heldReadQueries{0};
 std::atomic<std::uint64_t> heldReadHits{0};
@@ -103,7 +104,7 @@ void DrawPipeline::rethrowFailure() {
     std::rethrow_exception(error);
 }
 
-void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool bounded) {
+void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool bounded, bool orderedReads) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     std::unique_lock lock(mutex);
     rethrowFailure();
@@ -119,7 +120,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     depthSum += items.size();
     ++enqueued;
     heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
-    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded});
+    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads});
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) thread = std::thread([this] { run(); });
     if (committerWaiting) wake.notify_one();
@@ -176,6 +177,7 @@ void DrawPipeline::run() {
             wake.wait(lock, [&] { return !items.empty(); });
             committerWaiting = false;
             commit = stopped ? nullptr : &items.front().commit;
+            committingOrderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
         }
         const auto start = std::chrono::steady_clock::now();
         std::exception_ptr fatal;
@@ -192,6 +194,7 @@ void DrawPipeline::run() {
         } catch (...) {
             fatal = std::current_exception();
         }
+        committingOrderedReads = nullptr;
         const auto spent = elapsedNs(start);
         if (fatal != nullptr && !stopped) {
             stopped = true;
@@ -310,6 +313,7 @@ std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
 bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") != nullptr) return false;
     const auto end = address + bytes;
+    if (committingOrderedReads != nullptr && std::any_of(committingOrderedReads->begin(), committingOrderedReads->end(), [&](const Range& range) { return range.first <= address && end <= range.second; })) return false;
     auto& pipeline = Queue0();
     std::lock_guard lock(pipeline.mutex);
     heldReadQueries.fetch_add(1, std::memory_order_relaxed);

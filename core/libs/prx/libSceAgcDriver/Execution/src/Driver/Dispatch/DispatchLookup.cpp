@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
@@ -21,7 +22,15 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                 userDataPeer = keyHygiene && dispatchDiagnostics.HasIdentity(identity);
             }
         }
-        if (validateUnlocked) cacheLock.unlock();
+        if (entry != nullptr && pipelineDispatch() && DrawPipeline::Active()) {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> reads;
+            for (const auto& variant : entry->variants) reads.insert(reads.end(), variant->runs.begin(), variant->runs.end());
+            cacheLock.unlock();
+            DrainDispatchCaptureReads(reads);
+            if (!validateUnlocked) cacheLock.lock();
+        } else if (validateUnlocked) {
+            cacheLock.unlock();
+        }
         phaseTiming.Phase(PhaseLookup);
         if (entry != nullptr) {
             validated = true;
