@@ -98,6 +98,8 @@ struct DataMask {
 
 enum class EntryOutcome { Equal, EqualData, Differing, Inaccessible, QueuedLabel, FlushingImage, PublishMoved, PendingMoved, ForgetMoved };
 
+void DrainDispatchCaptureReads(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
+
 bool CacheableResult(const ShaderRecompiler::RecompileResult& compiled);
 
 }

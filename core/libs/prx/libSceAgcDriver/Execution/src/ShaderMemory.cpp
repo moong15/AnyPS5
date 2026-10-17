@@ -104,7 +104,7 @@ void ShaderMemory::SetWaitedMsProvider(WaitedMsProvider provider) {
     waitedMsProvider.store(provider, std::memory_order_release);
 }
 
-ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regions, PendingWriteQuery pendingWrite, PendingWriteObserver observe, HookWaitCounter hookWaits) : pendingWrite(pendingWrite), observe(observe), hookWaits(hookWaits) {
+ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regions, PendingWriteQuery pendingWrite, PendingWriteObserver observe, HookWaitCounter hookWaits, ReadBarrier readBarrier) : readBarrier(readBarrier), pendingWrite(pendingWrite), observe(observe), hookWaits(hookWaits) {
     const ShaderRecompiler::RequestMemoryView validated(regions);
     for (const auto& region : regions) {
         initial.emplace(region.guestAddress, region.bytes);
@@ -180,6 +180,10 @@ ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
     lastBase = base;
     lastPage = &page;
     if (CaptureProfiled()) ++CaptureTotals().pages;
+    if (readBarrier != nullptr) {
+        page.wordwise = true;
+        return page;
+    }
     // A page is either mapped whole or read word by word where the guest mapped less than a page,
     // or where recorded GPU work writes into it (a whole-page read would wait for that work).
     if (GuestMemory::Accessible(reinterpret_cast<const void*>(base), PageBytes)) {
@@ -223,6 +227,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         page.valid.SetBlock(index);
     }
     if (!page.valid.Test(index)) {
+        if (self.readBarrier != nullptr) self.readBarrier(address, sizeof(*value));
         std::uint32_t word = 0;
         auto policy = PendingWrite::Sync;
         if (page.wordwise) {
@@ -338,7 +343,7 @@ bool ShaderMemory::accessible(void* context, std::uint64_t address, std::uint64_
         const auto base = address & ~static_cast<std::uint64_t>(PageBytes - 1);
         const auto pageEnd = std::min<std::uint64_t>(base + PageBytes, end);
         const auto& page = self.page(base);
-        if (!page.wordwise && !page.lazy && !page.valid.All() && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) return false;
+        if ((self.readBarrier != nullptr || (!page.wordwise && !page.lazy && !page.valid.All())) && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) return false;
         address = pageEnd;
     }
     return true;

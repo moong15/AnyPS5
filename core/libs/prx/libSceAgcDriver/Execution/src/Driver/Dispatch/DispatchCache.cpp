@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include <cstdlib>
 #include <cstring>
 
@@ -84,6 +85,17 @@ bool Driver::relocateDispatch(std::uint64_t identity, std::span<const std::uint3
             return false;
         }
         shape = known->second;
+    }
+    if (pipelineDispatch() && DrawPipeline::Active()) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> aliasReads;
+        for (const auto& word : shape->words) {
+            if (word.reg >= userData.size() || userData[word.reg] == 0) continue;
+            for (const auto& [offset, words] : word.reads) {
+                const auto begin = (userData[word.reg] & ~std::uint64_t{3}) + static_cast<std::uint64_t>(offset);
+                aliasReads.emplace_back(begin, begin + static_cast<std::uint64_t>(words) * sizeof(std::uint32_t));
+            }
+        }
+        DrainDispatchCaptureReads(aliasReads);
     }
     const auto alias = dispatchAliasKey(identity, userData, *shape);
     std::unique_lock cacheLock(dispatchCacheMutex);
@@ -178,6 +190,7 @@ bool Driver::relocateDispatch(std::uint64_t identity, std::span<const std::uint3
         }
     }
     cacheLock.unlock();
+    DrainDispatchCaptureReads(copy->runs);
     std::vector<ShaderRecompiler::MemoryRegion> regions;
     appendEntryRegions(*copy, regions);
     std::uint64_t imagesFlushed = 0, runsSynced = 0;
