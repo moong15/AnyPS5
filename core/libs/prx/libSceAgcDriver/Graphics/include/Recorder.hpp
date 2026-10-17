@@ -786,6 +786,7 @@ private:
     // it is the target), the timeline wait with the mutex released, then the completions up to it.
     // Returns false when the locked path must run instead (no timeline, nested acquisition, off).
     bool syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int source, const void* site);
+    void waitFence(Batch& batch, int source);
     // `source` is the CountSync source the wait is attributed to.
     void finish(std::unique_ptr<Batch> batch, bool wait, int source, bool releaseNow = false);
     void discard(std::unique_ptr<Batch> batch) noexcept;
