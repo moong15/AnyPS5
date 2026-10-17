@@ -892,6 +892,10 @@ if(BUILD_TESTING)
     set_target_properties(agc_dispatch_cache_diagnostics_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_dispatch_cache_diagnostics COMMAND agc_dispatch_cache_diagnostics_tests)
     set_tests_properties(agc_dispatch_cache_diagnostics PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_dispatch_cache_diagnostics PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 add_test_executable(agc_buffer_pool_tests EXCLUDE_FROM_ALL tests/BufferPool.cpp)
@@ -1325,6 +1329,10 @@ if(BUILD_TESTING)
     set_target_properties(agc_import_coverage_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_import_coverage COMMAND agc_import_coverage_tests)
     set_tests_properties(agc_import_coverage PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_import_coverage PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 add_test_executable(agc_pending_write_union_tests EXCLUDE_FROM_ALL tests/PendingWriteSnapshot.cpp)
