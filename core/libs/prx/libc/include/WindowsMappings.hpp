@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <map>
 #include <memory>
@@ -314,11 +315,20 @@ public:
         return true;
     }
 
+    std::array<std::uint64_t, 2> CollectStats() {
+        std::lock_guard lock(mutex);
+        return {collectFastHits, collectVisits};
+    }
+
     bool Collect(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear, Collection collection = Collection::All) {
         std::lock_guard lock(mutex);
         const auto capacity = *count;
         *count = 0;
         const auto end = address + bytes;
+        if (collectFastPath() && bytes != 0 && end > address && cleanThrough(address) >= end) {
+            if (collectProfiled()) ++collectFastHits;
+            return true;
+        }
         if (collection == Collection::Fresh) {
             const auto fresh = freshRanges.upper_bound(address);
             if ((fresh == freshRanges.begin() || std::prev(fresh)->second <= address) && (fresh == freshRanges.end() || fresh->first >= end)) return true;
@@ -341,6 +351,7 @@ public:
             cleanStart = cleanEnd = 0;
         };
         for (auto cursor = address; cursor < end;) {
+            if (collectProfiled()) ++collectVisits;
             const auto nextClean = cleanRanges.upper_bound(cursor);
             if (nextClean != cleanRanges.begin()) {
                 const auto clean = std::prev(nextClean);
@@ -472,11 +483,34 @@ public:
     }
 
 private:
+    static bool collectFastPath() {
+        static const bool enabled = std::getenv("APS5_NO_COLLECT_FAST_PATH") == nullptr;
+        return enabled;
+    }
+
+    static bool collectProfiled() {
+        static const bool enabled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+        return enabled;
+    }
+
+    std::uintptr_t cleanThrough(std::uintptr_t address) const {
+        const auto next = cleanRanges.upper_bound(address);
+        return next != cleanRanges.begin() && std::prev(next)->second > address ? std::prev(next)->second : address;
+    }
+
     bool collectable(std::uintptr_t address, std::uintptr_t end) {
         const auto proven = collectableRanges.upper_bound(address);
         if (proven != collectableRanges.begin() && std::prev(proven)->second >= end) return true;
         auto position = views.lower_bound(address & ~(pageBytes - 1));
         for (auto cursor = address; cursor < end;) {
+            if (collectFastPath()) {
+                const auto cleanEnd = cleanThrough(cursor);
+                if (cleanEnd > cursor) {
+                    cursor = std::min(end, cleanEnd);
+                    continue;
+                }
+            }
+            if (collectProfiled()) ++collectVisits;
             const auto base = cursor & ~(pageBytes - 1);
             if (const auto found = viewAt(base, position); found != views.end()) {
                 if (found->second.protection == PAGE_NOACCESS || (found->second.resident && !watchResident)) return false;
@@ -892,6 +926,8 @@ private:
         return ERROR_SUCCESS;
     }
 
+    std::uint64_t collectFastHits = 0;
+    std::uint64_t collectVisits = 0;
     Ranges cleanRanges;
     Ranges collectableRanges;
     Ranges freshRanges;

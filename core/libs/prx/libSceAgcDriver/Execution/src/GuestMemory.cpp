@@ -19,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -141,8 +142,54 @@ struct MemoryCounter {
     }
 };
 
+thread_local std::uint64_t collectedDirtyRuns = 0;
+
+struct MemorySiteCounter {
+    std::atomic<std::uintptr_t> caller{0};
+    MemoryCounter counter;
+    std::atomic<std::uint64_t> empty{0};
+    std::atomic<std::uint64_t> held{0};
+};
+
+constexpr std::size_t MemorySiteSlots = 128;
+using MemorySiteTotals = std::map<std::pair<std::size_t, std::uintptr_t>, std::array<std::uint64_t, 5>>;
+
 struct MemoryCounters {
     std::array<MemoryCounter, MemoryCounterCount> counters;
+    std::array<std::array<MemorySiteCounter, MemorySiteSlots>, 2> sites;
+
+    void AddSite(MemoryCounterKind kind, const void* address, std::uint64_t bytes, std::uint64_t nanoseconds, bool empty, bool held) {
+        const auto caller = reinterpret_cast<std::uintptr_t>(address);
+        auto& slots = sites[kind == CounterRead ? 0 : 1];
+        auto index = (caller >> 4) % (MemorySiteSlots - 1);
+        for (std::size_t probe = 0; probe < MemorySiteSlots - 1; ++probe) {
+            auto& slot = slots[index];
+            const auto key = slot.caller.load(std::memory_order_relaxed);
+            if (key == 0 || key == caller) break;
+            index = (index + 1) % (MemorySiteSlots - 1);
+            if (probe == MemorySiteSlots - 2) index = MemorySiteSlots - 1;
+        }
+        auto& slot = slots[index];
+        slot.caller.store(index == MemorySiteSlots - 1 ? std::numeric_limits<std::uintptr_t>::max() : caller, std::memory_order_relaxed);
+        slot.counter.Add(bytes, nanoseconds, false);
+        slot.empty.store(slot.empty.load(std::memory_order_relaxed) + empty, std::memory_order_relaxed);
+        slot.held.store(slot.held.load(std::memory_order_relaxed) + held, std::memory_order_relaxed);
+    }
+
+    void FoldSites(MemorySiteTotals& totals) const {
+        for (std::size_t kind = 0; kind < sites.size(); ++kind) {
+            for (const auto& slot : sites[kind]) {
+                const auto caller = slot.caller.load(std::memory_order_relaxed);
+                if (caller == 0) continue;
+                auto& total = totals[{kind, caller}];
+                total[0] += slot.counter.calls.load(std::memory_order_relaxed);
+                total[1] += slot.counter.bytes.load(std::memory_order_relaxed);
+                total[2] += slot.counter.nanoseconds.load(std::memory_order_relaxed);
+                total[3] += slot.empty.load(std::memory_order_relaxed);
+                total[4] += slot.held.load(std::memory_order_relaxed);
+            }
+        }
+    }
 
     void FoldInto(std::array<std::array<std::uint64_t, 3>, MemoryCounterCount>& totals) const {
         for (std::size_t i = 0; i < MemoryCounterCount; ++i) {
@@ -166,6 +213,7 @@ struct MemoryProfile {
     std::vector<const MemoryCounters*> threads;
     MemoryCounters retired;
     MemoryCounters shared;
+    MemorySiteTotals retiredSites;
     std::atomic<std::int64_t> lastReport{0};
     // Sampled callers of Read and Write (module offsets), to name what touches guest memory most.
     std::mutex callersMutex;
@@ -198,13 +246,18 @@ struct ThreadMemoryCounters {
         std::lock_guard lock(profile.threadsMutex);
         std::erase(profile.threads, &counters);
         profile.retired.AddFrom(counters);
+        counters.FoldSites(profile.retiredSites);
     }
 };
 
+MemoryCounters& LocalMemoryCounters() {
+    thread_local ThreadMemoryCounters* thread = nullptr;
+    return ShaderRecompiler::ThreadOwned(thread).counters;
+}
+
 MemoryCounter& CounterFor(MemoryCounterKind kind) {
     if (SharedMemoryCounters()) return Profile().shared.counters[kind];
-    thread_local ThreadMemoryCounters* thread = nullptr;
-    return ShaderRecompiler::ThreadOwned(thread).counters.counters[kind];
+    return LocalMemoryCounters().counters[kind];
 }
 
 // Every thread's counters, the retired and the shared ones summed: calls, bytes, nanoseconds per kind.
@@ -315,11 +368,14 @@ bool MemoryProfiled() {
 
 class TimedAccess {
 public:
-    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes) : kind(kind), bytes(bytes), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, const void* caller = nullptr) : kind(kind), bytes(bytes), caller(caller), dirtyBefore(collectedDirtyRuns), held(MemoryProfiled() && GpuMutex().HeldByThisThread()), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    void Completed() const { completed = true; }
     ~TimedAccess() {
         if (!MemoryProfiled()) return;
         const auto now = std::chrono::steady_clock::now();
-        CounterFor(kind).Add(bytes, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count()), SharedMemoryCounters());
+        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+        CounterFor(kind).Add(bytes, elapsed, SharedMemoryCounters());
+        if (caller != nullptr && (kind == CounterRead || kind == CounterCollect)) LocalMemoryCounters().AddSite(kind, caller, bytes, elapsed, kind == CounterCollect && completed && collectedDirtyRuns == dirtyBefore, held);
         auto& state = Profile();
         const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         auto last = state.lastReport.load();
@@ -350,11 +406,39 @@ public:
             const auto count = readSiteSamples[site].load(std::memory_order_relaxed);
             if (count != 0) AgcDriver::ProfilePrint_nid_no_patch(" %s=%llu", ReadSiteName(static_cast<ReadSite>(site)), static_cast<unsigned long long>(count));
         }
+        MemorySiteTotals siteTotals;
+        {
+            std::lock_guard lock(state.threadsMutex);
+            siteTotals = state.retiredSites;
+            for (const auto* thread : state.threads) thread->FoldSites(siteTotals);
+        }
+        AgcDriver::ProfilePrint_nid_no_patch(" | exact callers (calls/MiB/s/empty/held):");
+        std::uint64_t collectCalls = 0, emptyCollects = 0;
+        for (const auto& [key, total] : siteTotals) {
+            if (key.first == 1) {
+                collectCalls += total[0];
+                emptyCollects += total[3];
+            }
+            if (total[0] == 0) continue;
+            const bool overflow = key.second == std::numeric_limits<std::uintptr_t>::max();
+            const auto offset = overflow ? 0 : ModuleOffset(reinterpret_cast<const void*>(key.second));
+            AgcDriver::ProfilePrint_nid_no_patch(" %s%s+0x%llx=%llu/%.1f/%.3f/%llu/%llu", key.first == 0 ? "read" : "collect", overflow ? "-overflow" : "", offset, static_cast<unsigned long long>(total[0]), total[1] / 1048576.0, total[2] / 1e9, static_cast<unsigned long long>(total[3]), static_cast<unsigned long long>(total[4]));
+        }
+        AgcDriver::ProfilePrint_nid_no_patch(" | collect-empty %llu/%llu (%.1f%%)", static_cast<unsigned long long>(emptyCollects), static_cast<unsigned long long>(collectCalls), collectCalls == 0 ? 0.0 : 100.0 * emptyCollects / collectCalls);
+#ifdef _WIN32
+        std::uint64_t fastHits = 0, visits = 0;
+        GuestArena::GuestArenaCollectStats_nid_no_patch(&fastHits, &visits);
+        AgcDriver::ProfilePrint_nid_no_patch(" | collect-clean fast %llu visits %llu", static_cast<unsigned long long>(fastHits), static_cast<unsigned long long>(visits));
+#endif
         AgcDriver::ProfilePrint_nid_no_patch("\n");
     }
 private:
     MemoryCounterKind kind;
     std::uint64_t bytes;
+    const void* caller;
+    std::uint64_t dirtyBefore;
+    bool held;
+    mutable bool completed = false;
     std::chrono::steady_clock::time_point start;
 };
 
@@ -1236,6 +1320,7 @@ void stampWrittenRun(void* context, std::uintptr_t begin, std::uintptr_t end) {
     const auto kind = runs.kind;
     if (end <= begin) return;
     ++runs.stamped;
+    if (MemoryProfiled()) ++collectedDirtyRuns;
     const auto generation = tracker.generation.load(std::memory_order_relaxed);
     if (kind != StampKind::Driver) tracker.noteCpuStore(begin, end, generation);
     if (runs.window != nullptr) {
@@ -1376,7 +1461,7 @@ bool walkSummary(WriteTracker& tracker, const DirtySummary& summary) {
     return true;
 }
 
-std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized) {
+std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoized, const void* caller) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
     auto& tracker = Tracker();
     // Whole pages, so a page shared with the next range is collected with either.
@@ -1443,10 +1528,11 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         summarySkips.fetch_add(1, std::memory_order_relaxed);
     } else {
         const std::uint64_t walked = summary.Walked();
-        const TimedAccess timed(CounterCollect, walked);
+        const TimedAccess timed(CounterCollect, walked, caller);
         threadSummaryWalkedBytes += walked;
         if (summary.token != 0) summaryWalkedBytes.fetch_add(walked, std::memory_order_relaxed);
         if (!walkSummary(tracker, summary)) return 0;
+        timed.Completed();
     }
     // Only a completed walk is remembered; a failed one (uncommitted pages) returned 0 above.
     if (collectMemoEnabled()) {
@@ -1466,11 +1552,11 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
 }
 
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
-    return collectWrites(address, bytes, true);
+    return collectWrites(address, bytes, true, __builtin_return_address(0));
 }
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
-    return collectWrites(address, bytes, false);
+    return collectWrites(address, bytes, false, __builtin_return_address(0));
 }
 
 void BumpCollectEpoch() {
@@ -1846,6 +1932,7 @@ bool walkHints(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop) {
     while (cursor < stop) {
         std::size_t count = tracker.pages.size();
         if (!GuestArena::GuestArenaCollectWrites_nid_postfix(static_cast<std::uintptr_t>(cursor), static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, true)) return false;
+        if (MemoryProfiled() && count != 0) ++collectedDirtyRuns;
         if (count != 0 && !marked) ++tracker.generation;
         marked = marked || count != 0;
         for (std::size_t i = 0; i < count; ++i) tracker.hintBlocks[tracker.blockOf(reinterpret_cast<std::uintptr_t>(tracker.pages[i]))] = tracker.generation;
@@ -1877,8 +1964,9 @@ std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
     if (memoized) {
         collectMemoHits.fetch_add(1, std::memory_order_relaxed);
     } else {
-        const TimedAccess timed(CounterCollect, bytes);
+        const TimedAccess timed(CounterCollect, bytes, __builtin_return_address(0));
         if (!walkHints(tracker, first, stop)) return 0;
+        timed.Completed();
         if (collectMemoEnabled()) threadHintMemo.entries[threadHintMemo.next++ % threadHintMemo.entries.size()] = {first, stop, epoch, unwatched};
     }
     return tracker.newestHint(first, stop);
@@ -2343,7 +2431,7 @@ void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t a
     if (destination.empty()) return;
     if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
     FlushGpuWrites(address, destination.size());
-    const TimedAccess timed(CounterRead, destination.size());
+    const TimedAccess timed(CounterRead, destination.size(), __builtin_return_address(0));
     CountReadCaller(__builtin_return_address(0));
     const auto* source = reinterpret_cast<const void*>(address);
     try {
@@ -2373,7 +2461,7 @@ void ReadCommitted(std::uint64_t address, std::span<std::byte> destination) {
     if (destination.empty()) return;
     if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
     FlushGpuWrites(address, destination.size());
-    const TimedAccess timed(CounterRead, destination.size());
+    const TimedAccess timed(CounterRead, destination.size(), __builtin_return_address(0));
     CountReadCaller(__builtin_return_address(0));
     copyCommitted(address, destination);
 }
@@ -2381,7 +2469,7 @@ void ReadCommitted(std::uint64_t address, std::span<std::byte> destination) {
 void ReadCommittedUnsynced(std::uint64_t address, std::span<std::byte> destination) {
     if (destination.empty()) return;
     if (const auto guard = readGuard.load(std::memory_order_acquire)) guard(address, destination.size());
-    const TimedAccess timed(CounterRead, destination.size());
+    const TimedAccess timed(CounterRead, destination.size(), __builtin_return_address(0));
     CountReadCaller(__builtin_return_address(0));
     copyCommitted(address, destination);
 }

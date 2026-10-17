@@ -365,6 +365,12 @@ bool GuestArenaProtection_nid_postfix(std::uintptr_t address, std::uint32_t* pro
     return WindowsMappings::Get().Protection(address, protection);
 }
 
+void GuestArenaCollectStats_nid_no_patch(std::uint64_t* fastHits, std::uint64_t* visits) {
+    const auto stats = WindowsMappings::Get().CollectStats();
+    *fastHits = stats[0];
+    *visits = stats[1];
+}
+
 bool GuestArenaCollectWrites_nid_postfix(std::uintptr_t address, std::size_t bytes, void** pages, std::size_t* count, bool clear) {
     return WindowsMappings::Get().Collect(address, bytes, pages, count, clear);
 }
