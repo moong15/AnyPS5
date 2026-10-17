@@ -115,7 +115,7 @@ void MemoryWaitWakeup::HeldAtSubmit() {
     source = MemoryWaitSource::Held;
 }
 
-bool MemoryWaitWakeup::Wait() {
+bool MemoryWaitWakeup::Wait(std::chrono::microseconds fallback) {
     const auto began = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto countFallback = [&] {
         if (!profile) return;
@@ -129,20 +129,11 @@ bool MemoryWaitWakeup::Wait() {
         countFallback();
         return false;
     }
-    {
-        const std::lock_guard lock(memoryWaitMutex);
-        if (generation != seen) {
-            seen = generation;
-            if (profile) ++notifications;
-            return true;
-        }
-    }
-    PollSleep();
-    countFallback();
-    const std::lock_guard lock(memoryWaitMutex);
-    const bool notified = generation != seen;
+    std::unique_lock lock(memoryWaitMutex);
+    const bool notified = changed.wait_for(lock, fallback, [&] { return generation != seen; });
     seen = generation;
-    if (notified && profile) ++notifications;
+    if (!notified) countFallback();
+    else if (profile) ++notifications;
     return notified;
 }
 
@@ -181,6 +172,7 @@ void MemoryWaitWakeup::Notify(std::uint64_t address, std::size_t bytes, MemoryWa
                 waiter->observedExact = true;
             }
         }
+        if (MemoryWaitWakeupEnabled()) waiter->changed.notify_one();
     }
 }
 

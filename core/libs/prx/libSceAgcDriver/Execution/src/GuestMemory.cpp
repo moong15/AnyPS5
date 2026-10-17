@@ -1795,14 +1795,10 @@ std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::func
 }
 
 std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std::function<void()>& store) {
-    const auto generation = storeOwn(address, bytes, [&] {
+    return storeOwn(address, bytes, [&] {
         store();
         return std::pair<std::uint64_t, std::uint64_t>{address, address + bytes};
     });
-    if (bytes != 0) {
-        if (const auto observer = storeObserver.load(std::memory_order_acquire)) observer(address, {reinterpret_cast<const std::byte*>(address), bytes}, false);
-    }
-    return generation;
 }
 
 std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
@@ -2636,7 +2632,6 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
     CheckRange(destination, current.size(), 1, true);
     const auto size = current.size();
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
-    std::pair<std::uint64_t, std::uint64_t> stored{};
     storeOwn(address, size, [&] {
         std::size_t firstChanged = size;
         std::size_t lastChanged = 0;
@@ -2659,12 +2654,8 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
             firstChanged = std::min(firstChanged, at);
             lastChanged = std::max(lastChanged, at + 1);
         }
-        stored = firstChanged < lastChanged ? std::pair<std::uint64_t, std::uint64_t>{address + firstChanged, address + lastChanged} : std::pair<std::uint64_t, std::uint64_t>{0, 0};
-        return stored;
+        return firstChanged < lastChanged ? std::pair<std::uint64_t, std::uint64_t>{address + firstChanged, address + lastChanged} : std::pair<std::uint64_t, std::uint64_t>{0, 0};
     });
-    if (stored.second > stored.first) {
-        if (const auto observer = storeObserver.load(std::memory_order_acquire)) observer(stored.first, {reinterpret_cast<const std::byte*>(stored.first), static_cast<std::size_t>(stored.second - stored.first)}, false);
-    }
 }
 
 void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t alignment) {
@@ -2679,6 +2670,7 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
     if (source.size() >= PageBytes) StoreOwnBytes(address, source);
     else StoreOwnBytes(address, source.size(), [&] { std::memcpy(destination, source.data(), source.size()); });
+    if (const auto observer = storeObserver.load(std::memory_order_acquire)) observer(address, source, false);
 }
 
 void SetStoreObserver(StoreObserver observer) {
