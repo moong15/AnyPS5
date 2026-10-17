@@ -128,7 +128,22 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
             return;
         }
-        if (DrawPipeline::Active() && !pipelineCandidate) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
+        if (DrawPipeline::Active() && !pipelineCandidate) {
+            bool copied = false;
+            if (DrawPipeline::PreciseDrains() && !partialLastGroup && indirectArguments == 0 && (packet[4] & 0x20u) == 0 && packet[2] == 1 && packet[3] == 1 && MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) {
+                if (const auto range = StreamCopyRange(userData, packet[1])) {
+                    const std::array<DrawPipeline::Range, 1> reads{{{range->source, range->source + range->bytes}}};
+                    const std::array<DrawPipeline::Range, 1> writes{{{range->destination, range->destination + range->bytes}}};
+                    DrawPipeline::Queue0().DrainPacket(0x15, reads, writes, true);
+                    copied = copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address);
+                }
+            }
+            if (copied) {
+                pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
+                return;
+            }
+            DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
+        }
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) {
             const auto threads = (packet[4] & 0x20u) != 0 ? static_cast<std::uint64_t>(packet[1]) : static_cast<std::uint64_t>(packet[1]) * compute.numThreads[0];
             const auto nativeBytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
@@ -294,7 +309,13 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             readsClear = std::none_of(reads.begin(), reads.end(), [](const auto& region) { return DrawPipeline::Queue0().Overlaps(region.guestAddress, region.bytes.size()); });
             if (!readsClear) NoteItemFallback(ItemFallback::Reads);
         }
-        if (!readsClear && DrawPipeline::Queue0().Busy()) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
+        if (!readsClear && DrawPipeline::Queue0().Busy()) {
+            std::vector<DrawPipeline::Range> ranges;
+            for (const auto& region : reads) {
+                if (!region.bytes.empty()) ranges.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
+            }
+            DrawPipeline::Queue0().DrainPacket(0x15, ranges, {}, false);
+        }
     }
     if (fromAhead) {
         compiledResult = std::move(ahead.compiledResult);

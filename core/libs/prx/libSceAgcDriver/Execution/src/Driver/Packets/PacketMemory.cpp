@@ -369,7 +369,7 @@ bool Driver::enqueueLabelPacket(std::span<const std::uint32_t> packet, std::uint
     DrawPipeline::Queue0().Enqueue([this, queue, opcode, address, bytes = std::move(bytes), endOfPipeInterrupt] {
         GuestMemory::SetCurrentPacket(opcode, queue);
         commitLabel(queue, address, bytes, endOfPipeInterrupt);
-    }, std::move(writes), address, std::move(stored));
+    }, std::move(writes), address, std::move(stored), {}, !endOfPipeInterrupt);
     return true;
 }
 
