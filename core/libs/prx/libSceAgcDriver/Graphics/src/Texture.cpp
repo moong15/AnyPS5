@@ -4636,6 +4636,13 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             else keep.emplace_back(from, to);
         }
     }
+    static const bool traceLoad = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
+    if (traceLoad) {
+        const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        for (const auto& [from, to] : keep) {
+            std::fprintf(stderr, "[load-storage] t=%lld image=0x%llx generation=%llu reason=%s selected=0x%llx+0x%llx tracked=%d skipped=%zu\n", static_cast<long long>(time), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(generation), flushReason, static_cast<unsigned long long>(from), static_cast<unsigned long long>(to - from), static_cast<int>(tracked), skipped);
+        }
+    }
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
         if (layers[layer]) forgetKeptAtUnwatch(layer);
     }

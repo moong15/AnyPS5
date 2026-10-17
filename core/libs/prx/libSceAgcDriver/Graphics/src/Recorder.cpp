@@ -38,6 +38,13 @@ namespace {
 
 Recorder* activeRecorder = nullptr;
 
+void TraceLoadWrite(const char* operation, const void* recorder, std::uint64_t serial, std::uint64_t address = 0, std::size_t bytes = 0, int value = -1) {
+    static const bool enabled = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
+    if (!enabled) return;
+    const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::fprintf(stderr, "[load-gpu] t=%lld op=%s recorder=%p batch=%llu address=0x%llx bytes=0x%llx value=%d\n", static_cast<long long>(time), operation, recorder, static_cast<unsigned long long>(serial), static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), value);
+}
+
 bool DrawProfiled() {
     static const bool profiled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     return profiled;
@@ -2763,6 +2770,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     open->writes.emplace_back(address, end);
     open->writeNotes.push_back(++writeNoteCount);
     open->writeValues.push_back(static_cast<std::int16_t>(value));
+    if (!ownLabel) TraceLoadWrite("record", this, submissions + 1, address, bytes, value);
     open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, end);
     // A poller waiting on this range learns that the open batch may now hold its producer.
@@ -2791,6 +2799,7 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     batch.writes.emplace_back(address, address + bytes);
     batch.writeNotes.push_back(++writeNoteCount);
     batch.writeValues.push_back(-1);
+    if (!ownLabel) TraceLoadWrite("attach", this, batch.serial, address, bytes);
     batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, address + bytes);
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
@@ -3327,6 +3336,7 @@ void Recorder::NoteWrittenBack(std::uint64_t address, std::size_t bytes) {
     Recorder* recorder = activeRecorder;
     if (recorder == nullptr || bytes == 0) return;
     GuestMemory::AssertGpuLockHeld("Recorder::NoteWrittenBack");
+    TraceLoadWrite("cpu-writeback", recorder, 0, address, bytes);
     const auto end = address + bytes;
     {
         std::lock_guard ringLock(recorder->writtenBackMutex);
@@ -3427,6 +3437,7 @@ void Recorder::Submit() {
     Check(result, "vkQueueSubmit recorder");
     batch->submitted = true;
     batch->serial = ++submissions;
+    TraceLoadWrite("submitted", this, batch->serial);
     batch->diagnosticSubmitted.store(true, std::memory_order_release);
     batch->submittedAt = std::chrono::steady_clock::now();
     if (DrawProfiled()) {
@@ -3926,6 +3937,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
             }
         }
     }
+    TraceLoadWrite("retired", this, batch->serial);
     if (profile) holdCounters.completions += batch->completions.size();
     const auto keptStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // Deferred only from inside a hold: the unlock that releases the list is this thread's own, and

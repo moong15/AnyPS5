@@ -3,6 +3,7 @@
 #include <deque>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdarg>
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -23,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -156,10 +158,23 @@ int _resolveForEach(const char* prefix, const char** paths, uint32_t count, uint
     return static_cast<int>(resolvedCount);
 }
 
+void _traceLoad(const char* format, ...) {
+    static const bool enabled = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
+    if (!enabled) return;
+    char message[2048];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::fprintf(stderr, "[load-apr] t=%lld thread=%zu %s\n", static_cast<long long>(time), std::hash<std::thread::id>{}(std::this_thread::get_id()), message);
+}
+
 void _readFile(const Apr::ReadFileCommand& command) {
     const auto file = _file(command.fileId);
     static const bool trace = std::getenv("APS5_TRACE_APR") != nullptr;
     if (trace) std::fprintf(stderr, "[apr] read %s offset=0x%llx size=0x%llx -> 0x%llx\n", file.path.string().c_str(), static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.destination));
+    _traceLoad("read-begin file=%u offset=0x%llx address=0x%llx bytes=0x%llx", command.fileId, static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.destination), static_cast<unsigned long long>(command.size));
     std::ifstream stream(file.path, std::ios::binary);
     if (!stream) throw std::runtime_error("APR: cannot open " + file.path.string());
     stream.seekg(static_cast<std::streamoff>(command.offset));
@@ -170,6 +185,13 @@ void _readFile(const Apr::ReadFileCommand& command) {
     const auto read = static_cast<std::uint64_t>(stream.gcount());
     if (read != command.size && (!stream.eof() || command.offset + read < std::filesystem::file_size(file.path))) throw std::runtime_error("APR: read of " + file.path.string() + " at offset " + std::to_string(command.offset) + " returned " + std::to_string(read) + " of " + std::to_string(command.size) + " bytes");
     if (read != command.size) std::memset(reinterpret_cast<char*>(command.destination) + read, 0, static_cast<std::size_t>(command.size - read));
+    static const bool traceLoad = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
+    if (traceLoad) {
+        std::array<unsigned long long, 8> head{};
+        const auto sampled = static_cast<std::size_t>(std::min<std::uint64_t>(command.size, sizeof(head)));
+        if (sampled != 0) std::memcpy(head.data(), reinterpret_cast<const void*>(command.destination), sampled);
+        _traceLoad("read-done file=%u offset=0x%llx address=0x%llx bytes=0x%llx actual=0x%llx sampled=%zu head=%016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx", command.fileId, static_cast<unsigned long long>(command.offset), static_cast<unsigned long long>(command.destination), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(read), sampled, head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]);
+    }
 }
 
 void _writeAddress(const Apr::WriteAddressCommand& command) {
@@ -571,12 +593,13 @@ struct Deferred {
     ReadCursor read;
 };
 
-std::optional<Deferred> _execute(const Apr::CommandBufferObject& buffer, std::uint32_t start = 0, ReadCursor read = {}, bool defer = false) {
+std::optional<Deferred> _execute(const Apr::CommandBufferObject& buffer, std::uint32_t start = 0, ReadCursor read = {}, bool defer = false, std::uint32_t submission = 0, bool amm = false) {
     std::uint32_t cursor = start;
     while (cursor < buffer.offset) {
         if (cursor + sizeof(Apr::CommandHeader) > buffer.offset) throw std::runtime_error("APR: truncated command buffer");
         Apr::CommandHeader header;
         std::memcpy(&header, buffer.base + cursor, sizeof(header));
+        _traceLoad("command queue=%s id=%u cursor=0x%x opcode=0x%x", amm ? "amm" : "apr", submission, cursor, static_cast<unsigned int>(header.opcode));
         if ((static_cast<std::uint32_t>(header.opcode) & 0xffu) == static_cast<std::uint32_t>(Apr::Opcode::CompactReadFileGather)) {
             if (sizeof(Apr::CompactReadFileGatherCommand) > buffer.offset - cursor) throw std::runtime_error("APR: truncated compact gather command");
             Apr::CompactReadFileGatherCommand command;
@@ -634,6 +657,7 @@ std::optional<Deferred> _execute(const Apr::CommandBufferObject& buffer, std::ui
             break;
         case Apr::Opcode::WriteAddress: {
             const auto command = _read<Apr::WriteAddressCommand>(buffer, cursor);
+            _traceLoad("signal-address queue=%s id=%u address=0x%llx value=0x%llx", amm ? "amm" : "apr", submission, static_cast<unsigned long long>(command.address), static_cast<unsigned long long>(command.value));
             _writeAddress(command);
             break;
         }
@@ -657,6 +681,7 @@ std::optional<Deferred> _execute(const Apr::CommandBufferObject& buffer, std::ui
         }
         case Apr::Opcode::WriteKernelEventQueue: {
             const auto command = _read<Apr::WriteKernelEventQueueCommand>(buffer, cursor);
+            _traceLoad("signal-event queue=%s id=%u equeue=0x%llx ident=0x%llx data=0x%llx", amm ? "amm" : "apr", submission, static_cast<unsigned long long>(command.equeue), static_cast<unsigned long long>(command.ident), static_cast<unsigned long long>(command.data));
             EqueueTriggerEvent_nid_postfix(static_cast<KernelEqueue>(command.equeue), static_cast<uintptr_t>(command.ident), EVFILT_AMPR, reinterpret_cast<void*>(command.data));
             break;
         }
@@ -723,9 +748,9 @@ struct AprQueue {
     std::uint32_t completed = 0;
 };
 
-AprQueue* _startQueue() {
+AprQueue* _startQueue(bool amm) {
     auto* created = new AprQueue();
-    std::thread([created] {
+    std::thread([created, amm] {
         for (;;) {
             AprQueue::Work work;
             {
@@ -737,7 +762,7 @@ AprQueue* _startQueue() {
             }
             try {
                 const auto bytes = static_cast<std::uint32_t>(work.commands.size());
-                _execute(Apr::CommandBufferObject{Apr::BufferType::Generic, 0, bytes, 0, bytes, work.commands.data()}, work.resume.cursor, work.resume.read);
+                _execute(Apr::CommandBufferObject{Apr::BufferType::Generic, 0, bytes, 0, bytes, work.commands.data()}, work.resume.cursor, work.resume.read, false, work.id, amm);
             } catch (const std::exception& error) {
                 std::fprintf(stderr, "APR: %s\n", error.what());
                 std::fflush(stderr);
@@ -748,6 +773,7 @@ AprQueue* _startQueue() {
                 created->running = false;
                 created->completed = std::max(created->completed, work.id);
             }
+            _traceLoad("queue-done queue=%s id=%u", amm ? "amm" : "apr", work.id);
             created->done.notify_all();
         }
     }).detach();
@@ -755,7 +781,7 @@ AprQueue* _startQueue() {
 }
 
 AprQueue& _queue(bool amm) {
-    static AprQueue* const queues[2] = {_startQueue(), _startQueue()};
+    static AprQueue* const queues[2] = {_startQueue(false), _startQueue(true)};
     return *queues[amm ? 1 : 0];
 }
 
@@ -780,7 +806,7 @@ std::uint32_t _submit(const std::uint8_t* base, std::uint32_t bytes, bool amm) {
         enqueue({});
         return id;
     }
-    if (const auto deferred = _execute(Apr::CommandBufferObject{Apr::BufferType::Generic, 0, bytes, 0, bytes, const_cast<std::uint8_t*>(base)}, 0, {}, true)) {
+    if (const auto deferred = _execute(Apr::CommandBufferObject{Apr::BufferType::Generic, 0, bytes, 0, bytes, const_cast<std::uint8_t*>(base)}, 0, {}, true, id, amm)) {
         enqueue(*deferred);
         return id;
     }
@@ -788,6 +814,7 @@ std::uint32_t _submit(const std::uint8_t* base, std::uint32_t bytes, bool amm) {
         std::lock_guard lock(queue.mutex);
         queue.completed = std::max(queue.completed, id);
     }
+    _traceLoad("queue-done queue=%s id=%u", amm ? "amm" : "apr", id);
     queue.done.notify_all();
     return id;
 }
