@@ -95,7 +95,7 @@ inline std::size_t RegisteredRangeIndex(const GuestAllocations::Lease& lease, st
     return range.readable && address < range.address + range.bytes ? index : lease.size();
 }
 
-inline std::pair<std::size_t, std::size_t> RegisteredRunBounds(const GuestAllocations::Lease& lease, std::size_t index, std::uint64_t address, std::uint64_t window) {
+inline std::pair<std::size_t, std::size_t> RegisteredRunBounds(const GuestAllocations::Lease& lease, std::size_t index, std::uint64_t address, std::uint64_t window, bool clip = false) {
     const auto& containing = *lease[index];
     std::uint64_t low = 0;
     std::uint64_t high = std::numeric_limits<std::uint64_t>::max();
@@ -114,22 +114,22 @@ inline std::pair<std::size_t, std::size_t> RegisteredRunBounds(const GuestAlloca
     while (first > 0 && lease[first - 1]->address >= low && continues(*lease[first - 1], *lease[first])) --first;
     auto last = index;
     while (last + 1 < lease.size() && lease[last + 1]->address + lease[last + 1]->bytes <= high && continues(*lease[last], *lease[last + 1])) ++last;
-    if (window != 0 && (lease[first]->address != low || lease[last]->address + lease[last]->bytes != high)) first = last = index;
+    if (window != 0 && (lease[first]->address != low || lease[last]->address + lease[last]->bytes != high) && !(clip && containing.readable && containing.writable && containing.gpu)) first = last = index;
     return {first, last};
 }
 
-inline bool RegisteredRunCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased, bool* avoided = nullptr) {
+inline bool RegisteredRunCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased, bool* avoided = nullptr, bool clip = false) {
     if (avoided != nullptr) *avoided = false;
     const auto index = RegisteredRangeIndex(lease, begin);
     if (index == lease.size()) return false;
     if (avoided != nullptr) *avoided = true;
     if (end <= lease[index]->address + lease[index]->bytes) return true;
-    const auto [first, last] = RegisteredRunBounds(lease, index, begin, window);
+    const auto [first, last] = RegisteredRunBounds(lease, index, begin, window, clip);
     if (first != last && unaliased.contains(lease[first]->address)) return false;
     return end <= lease[last]->address + lease[last]->bytes;
 }
 
-inline ImportRejection RegisteredImportRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased) {
+inline ImportRejection RegisteredImportRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased, bool clip = false) {
     const auto found = std::upper_bound(lease.begin(), lease.end(), begin, [](std::uint64_t value, const auto& range) { return value < range->address; });
     if (found == lease.begin() || begin >= (*std::prev(found))->address + (*std::prev(found))->bytes) return ImportRejection::NoRegistryCoverage;
     auto index = static_cast<std::size_t>(std::prev(found) - lease.begin());
@@ -141,7 +141,7 @@ inline ImportRejection RegisteredImportRejection(const GuestAllocations::Lease& 
         ++index;
     }
     const auto containing = RegisteredRangeIndex(lease, begin);
-    const auto [first, last] = RegisteredRunBounds(lease, containing, begin, window);
+    const auto [first, last] = RegisteredRunBounds(lease, containing, begin, window, clip);
     if (first != last && unaliased.contains(lease[first]->address) && end > lease[containing]->address + lease[containing]->bytes) return ImportRejection::HostAliasProtectionFailure;
     return end > lease[last]->address + lease[last]->bytes ? ImportRejection::WindowIncomplete : ImportRejection::None;
 }

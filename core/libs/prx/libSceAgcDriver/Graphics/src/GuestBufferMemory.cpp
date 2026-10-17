@@ -234,7 +234,7 @@ struct RetiredImport {
 };
 
 const GuestAllocations::Range* containingRange(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end);
-bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end);
+bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, bool clip = true);
 bool joinedCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end);
 
 void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, HostImport>::iterator it, const GuestAllocations::Lease& lease, bool hold = true) {
@@ -876,6 +876,7 @@ struct ImportRun {
     std::uint64_t base = 0;
     std::uint64_t bytes = 0;
     std::vector<std::shared_ptr<const GuestAllocations::Range>> ranges;
+    bool windowClipped = false;
 };
 
 bool continuesRun(const GuestAllocations::Range& before, const GuestAllocations::Range& after) {
@@ -887,19 +888,27 @@ std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uin
 }
 
 std::atomic<std::uint64_t> importWindow{0};
+std::atomic<std::uint64_t> windowClippedImports{0};
 
-ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address) {
+bool importWindowClipEnabled() {
+    static const bool disabled = std::getenv("APS5_NO_IMPORT_WINDOW_CLIP") != nullptr;
+    return !disabled;
+}
+
+ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address, bool clip = false) {
     const auto index = leasedIndexContaining(lease, address);
     if (index == lease.size()) return {};
-    const auto [first, last] = RegisteredRunBounds(lease, index, address, importWindow.load(std::memory_order_relaxed));
+    const auto window = importWindow.load(std::memory_order_relaxed);
+    const auto [first, last] = RegisteredRunBounds(lease, index, address, window, clip && importWindowClipEnabled());
     if (first != last && Imports().unaliasedSpans.contains(lease[first]->address)) return {lease[index]->address, lease[index]->bytes, {lease[index]}};
     ImportRun run{lease[first]->address, lease[last]->address + lease[last]->bytes - lease[first]->address, {}};
     run.ranges.assign(lease.begin() + static_cast<std::ptrdiff_t>(first), lease.begin() + static_cast<std::ptrdiff_t>(last) + 1);
+    run.windowClipped = clip && first != last && std::pair{first, last} != RegisteredRunBounds(lease, index, address, window);
     return run;
 }
 
-ImportRejection importCoverageRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, const HostImports& state) {
-    const auto reason = RegisteredImportRejection(lease, begin, end, importWindow.load(std::memory_order_relaxed), state.unaliasedSpans);
+ImportRejection importCoverageRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, const HostImports& state, bool clip = true) {
+    const auto reason = RegisteredImportRejection(lease, begin, end, importWindow.load(std::memory_order_relaxed), state.unaliasedSpans, clip && importWindowClipEnabled());
     if (reason != ImportRejection::NoRegistryCoverage && reason != ImportRejection::CoverageHole) return reason;
     auto cursor = begin;
     auto index = RegisteredRangeIndex(lease, begin);
@@ -916,15 +925,15 @@ ImportRejection importCoverageRejection(const GuestAllocations::Lease& lease, st
 
 std::atomic<std::uint64_t> coverageOwnerListsAvoided{0};
 
-bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
+bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, bool clip) {
     static const bool disabled = std::getenv("APS5_NO_IMPORT_COVERAGE_PROBE") != nullptr;
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (disabled) {
-        const auto run = importRun(lease, begin);
+        const auto run = importRun(lease, begin, clip);
         return !run.ranges.empty() && end <= run.base + run.bytes;
     }
     bool avoided = false;
-    const auto covered = RegisteredRunCovers(lease, begin, end, importWindow.load(std::memory_order_relaxed), Imports().unaliasedSpans, &avoided);
+    const auto covered = RegisteredRunCovers(lease, begin, end, importWindow.load(std::memory_order_relaxed), Imports().unaliasedSpans, &avoided, clip && importWindowClipEnabled());
     if (profile && avoided) coverageOwnerListsAvoided.fetch_add(1, std::memory_order_relaxed);
     return covered;
 }
@@ -983,7 +992,8 @@ bool sameRange(const HostImport& entry, const GuestAllocations::Lease& lease) {
         const auto current = leasedRangeOwner(lease, entry.base, entry.base + entry.bytes);
         return current != nullptr && !entry.ranges.front().owner_before(current) && !current.owner_before(entry.ranges.front());
     }
-    return sameRun(entry, entry.joined ? joinedRun(lease, entry.base, entry.base + entry.bytes) : importRun(lease, entry.base));
+    if (entry.joined) return sameRun(entry, joinedRun(lease, entry.base, entry.base + entry.bytes));
+    return sameRun(entry, importRun(lease, entry.base)) || sameRun(entry, importRun(lease, entry.base, true));
 }
 
 bool pointerHeld(const HostImports& state, const HostImport& entry) {
@@ -1090,7 +1100,7 @@ std::uint64_t evictableBytes(const HostImports& state, std::uint64_t begin, std:
 }
 
 template<bool Diagnose = false>
-const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end = 0, bool evict = true, ImportRejection* rejection = nullptr) {
+const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end = 0, bool evict = true, ImportRejection* rejection = nullptr, bool clip = true) {
     const bool fresh = !importsStale(context, state);
     if (fresh && end != 0) {
         if (const auto* current = findImport(state, address, end)) return current;
@@ -1098,6 +1108,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         if (const auto* current = findImport(state, address, address + 1); current != nullptr && current->joined && sameRange(*current, lease)) return current;
     }
     auto run = importRun(lease, address);
+    if (clip && end != 0 && !run.ranges.empty() && end > run.base + run.bytes) run = importRun(lease, address, true);
     // Without an end the caller views the whole run through the import (AcquireRegistered): a window that holds the
     // first byte is shorter than that, so only an import of the whole run is a hit; a window is replaced below.
     if (fresh && end == 0) {
@@ -1326,6 +1337,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
 #endif
         return nullptr;
     }
+    if (run.windowClipped) windowClippedImports.fetch_add(1, std::memory_order_relaxed);
     auto& importedBytes = importedByteCount();
     importedBytes += bytes;
     static const bool trace = std::getenv("APS5_TRACE_HOST_IMPORT") != nullptr;
@@ -1392,7 +1404,7 @@ void refreshImports(const Context& context, HostImports& state, const GuestAlloc
         retireImport(context.device, state, it, lease);
         it = next;
     }
-    for (auto it = state.failed.begin(); it != state.failed.end();) it = sameRun(it->second, importRun(lease, it->first)) ? std::next(it) : state.failed.erase(it);
+    for (auto it = state.failed.begin(); it != state.failed.end();) it = sameRun(it->second, importRun(lease, it->first)) || sameRun(it->second, importRun(lease, it->first, true)) ? std::next(it) : state.failed.erase(it);
     for (auto it = state.failedJoins.begin(); it != state.failedJoins.end();) it = sameRun(it->second, joinedRun(lease, it->second.base, it->second.base + it->second.bytes)) ? std::next(it) : state.failedJoins.erase(it);
 }
 
@@ -3843,10 +3855,10 @@ void GuestBufferMemory::uploadFinish(bool addressable) {
                 const auto covers = [&](const HostImport* candidate) { return candidate != nullptr && candidate->base <= region.begin && candidate->base + candidate->bytes >= neededEnd; };
                 entry = findImport(state, region.begin, neededEnd);
                 if (entry == nullptr) {
-                    if (runCovers(importRanges(), region.begin, neededEnd)) {
-                        entry = importAllocation<Diagnose>(context, state, region.begin, importRanges(), 0, true, rejections.At(region));
+                    if (runCovers(importRanges(), region.begin, neededEnd, false)) {
+                        entry = importAllocation<Diagnose>(context, state, region.begin, importRanges(), 0, true, rejections.At(region), false);
                     } else if constexpr (Diagnose) {
-                        rejectImport(rejections.At(region), importCoverageRejection(importRanges(), region.begin, neededEnd, state));
+                        rejectImport(rejections.At(region), importCoverageRejection(importRanges(), region.begin, neededEnd, state, false));
                     }
                 }
                 if (!covers(entry)) entry = nullptr;
@@ -3937,7 +3949,7 @@ void GuestBufferMemory::uploadFinish(bool addressable) {
     const auto uploads = uploadsProfiled.fetch_add(1, std::memory_order_relaxed) + 1;
     if (uploads % 2000 == 0) {
         const auto& copies = Copies();
-        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back; %llu coverage owner lists avoided\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)), static_cast<unsigned long long>(coverageOwnerListsAvoided.load(std::memory_order_relaxed)));
+        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back; %llu coverage owner lists avoided; %llu window-clipped imports created\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)), static_cast<unsigned long long>(coverageOwnerListsAvoided.load(std::memory_order_relaxed)), static_cast<unsigned long long>(windowClippedImports.load(std::memory_order_relaxed)));
     }
     const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (ms > 50) {
