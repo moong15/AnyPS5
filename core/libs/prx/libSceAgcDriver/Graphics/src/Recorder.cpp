@@ -15,6 +15,7 @@
 #include "prx/libc/include/CpuTopology.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "Recompiler.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2609,6 +2610,13 @@ void Recorder::readGpuTiming(Batch& batch) {
     AgcDriver::ProfilePrint_nid_no_patch("[gputime] %.0f ms of GPU time in %llu batches over 10 s (batch %.0f ms first to last command; classes %.0f ms, all ranges %.0f ms, untimed %.0f ms outside every range; %llu presents; %llu ranges dropped at the %u cap); by program:", timingProgramMs, static_cast<unsigned long long>(timingBatches), timingBatchMs, timingClassMs, timingUnionMs, timingBatchMs - timingUnionMs, static_cast<unsigned long long>(presents), static_cast<unsigned long long>(timingDropped.exchange(0, std::memory_order_relaxed)), MaxTimedRanges);
     for (std::size_t i = 0; i < hot.size() && i < 12; ++i) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx x%llu %.0fms", static_cast<unsigned long long>(hot[i].first), static_cast<unsigned long long>(hot[i].second.count), hot[i].second.ms);
     AgcDriver::ProfilePrint_nid_no_patch("; by class:%s\n", classes.c_str());
+    static const bool profilePrograms = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (profilePrograms && ShaderRecompiler::ProgramDiagnosticsEnabled()) {
+        for (std::size_t i = 0; i < hot.size() && i < 12; ++i) {
+            const auto description = ShaderRecompiler::ProgramProfile(hot[i].first);
+            AgcDriver::ProfilePrint_nid_no_patch("[gpu-program] 0x%llx %.2fms/range %s\n", static_cast<unsigned long long>(hot[i].first), hot[i].second.ms / static_cast<double>(hot[i].second.count), description.c_str());
+        }
+    }
     timingByKey.clear();
     timingProgramMs = timingClassMs = timingUnionMs = timingBatchMs = 0;
     timingBatches = 0;

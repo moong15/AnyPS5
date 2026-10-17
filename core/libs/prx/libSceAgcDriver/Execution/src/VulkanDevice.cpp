@@ -2654,6 +2654,7 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
         Graphics::RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, transferAccess);
         Graphics::Recorder::CountBarriers(CommandClass::Copy);
     }
+    ShaderRecompiler::SetProgramCopy(programAddress, bytes);
     const auto gpuTiming = recorder.BeginGpuTiming(programAddress);
     const VkBufferCopy region{source - sourceImport->base, destination - destinationImport->base, bytes};
     context.Resolved(&Graphics::DeviceFunctions::cmdCopyBuffer, "vkCmdCopyBuffer")(commands, sourceImport->buffer, destinationImport->buffer, 1, &region);
@@ -4488,6 +4489,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     if (record.pushStages != 0) {
         context.Resolved(&Graphics::DeviceFunctions::cmdPushConstants, "vkCmdPushConstants")(commands, record.objects->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::ComputePushConstantBytes, record.pushBytes->data());
     }
+    ShaderRecompiler::SetProgramDispatch(record.programAddress != 0 ? record.programAddress : record.shader->program->variantId, *record.shader->program, record.x, record.y, record.z, computeSubgroupSize(*record.shader->program), argumentImport != nullptr ? record.arguments : 0);
     const auto gpuTiming = recorder.BeginGpuTiming(record.programAddress != 0 ? record.programAddress : record.shader->program->variantId);
     if (state->checkpointMarker != nullptr) state->checkpointMarker(commands, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(record.programAddress)));
     if (argumentImport != nullptr) {

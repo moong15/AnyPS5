@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -667,6 +668,12 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
         return identity;
     }
 };
+
+[[nodiscard]] bool ProgramDiagnosticsEnabled();
+[[nodiscard]] bool DumpProgramSelected(std::uint64_t address);
+[[nodiscard]] std::string ProgramProfile(std::uint64_t address);
+void SetProgramDispatch(std::uint64_t address, const RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t requiredSubgroupSize, std::uint64_t arguments);
+void SetProgramCopy(std::uint64_t address, std::uint64_t bytes);
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
 
