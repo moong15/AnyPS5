@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -102,7 +103,7 @@ void DrawPipeline::rethrowFailure() {
     std::rethrow_exception(error);
 }
 
-void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads) {
+void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool bounded) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     std::unique_lock lock(mutex);
     rethrowFailure();
@@ -118,7 +119,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     depthSum += items.size();
     ++enqueued;
     heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
-    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads)});
+    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded});
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) thread = std::thread([this] { run(); });
     if (committerWaiting) wake.notify_one();
@@ -145,6 +146,15 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
         *top = 0;
     }
     drainOpcodes = {};
+    drainText += "; packet hazards (overlap/disjoint/unknown):";
+    for (std::size_t opcode = 0; opcode < packetHazards.size(); ++opcode) {
+        const auto& counts = packetHazards[opcode];
+        if (counts[0] + counts[1] + counts[2] == 0) continue;
+        char item[128];
+        std::snprintf(item, sizeof(item), " 0x%02x %llu/%llu/%llu", static_cast<unsigned>(opcode), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]));
+        drainText += item;
+    }
+    packetHazards = {};
     const auto perCommit = commits == 0 ? 0.0 : static_cast<double>(commitNs) / 1e3 / static_cast<double>(commits);
     const auto perDraw = enqueued == 0 ? 0.0 : static_cast<double>(fullWaitNs) / 1e3 / static_cast<double>(enqueued);
     const auto queued = enqueued == 0 ? 0.0 : static_cast<double>(depthSum) / static_cast<double>(enqueued);
@@ -198,7 +208,80 @@ void DrawPipeline::run() {
     }
 }
 
+bool DrawPipeline::DrainPacket(std::span<const std::uint32_t> packet) {
+    if (packet.empty()) throw std::runtime_error("draw pipeline packet has no header");
+    const auto header = packet[0];
+    const auto opcode = (header >> 8u) & 0xffu;
+    auto& pipeline = *this;
+    if (header == FlipPacketHeader || header == RenderingWaitPacketHeader) {
+        pipeline.Drain(DrawPipeline::DrainReason::Packet, header == FlipPacketHeader ? 0xffu : opcode);
+        return true;
+    }
+    std::vector<DrawPipeline::Range> reads, writes;
+    bool bounded = false;
+    const auto add = [](auto& ranges, std::uint64_t address, std::uint64_t bytes) {
+        if (bytes != 0) ranges.emplace_back(address, address + bytes);
+    };
+    if (opcode == 0x20) {
+        bounded = true;
+    } else if (opcode == 0x3c || opcode == 0x93) {
+        const auto wait = Pm4::DecodeWait(packet);
+        add(reads, wait.address, wait.bytes);
+        bounded = true;
+    } else if (opcode == 0x50 && packet.size() == 7) {
+        const auto source = Pm4::DmaSource(packet);
+        const auto destination = Pm4::DmaDestination(packet);
+        bounded = (source == 0 || source == 2 || source == 3) && (destination == 0 || destination == 3);
+        if (source == 0 || source == 3) add(reads, packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), Pm4::DmaBytes(packet));
+        if (destination == 0 || destination == 3) add(writes, packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u), Pm4::DmaBytes(packet));
+    }
+    return pipeline.DrainPacket(opcode, reads, writes, bounded);
+}
+
+bool DrawPipeline::PreciseDrains() {
+    static const bool enabled = std::getenv("APS5_NO_PRECISE_DRAW_DRAINS") == nullptr;
+    return enabled;
+}
+
+bool DrawPipeline::DrainPacket(std::uint32_t opcode, std::span<const Range> reads, std::span<const Range> writes, bool bounded) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!Busy()) return false;
+    bool overlap = false;
+    bool complete = bounded;
+    {
+        std::lock_guard lock(mutex);
+        const auto intersects = [](const Range& a, const Range& b) { return a.first < b.second && b.first < a.second; };
+        const auto valid = [](const Range& range) { return range.first < range.second; };
+        complete &= std::all_of(reads.begin(), reads.end(), valid) && std::all_of(writes.begin(), writes.end(), valid);
+        for (const auto& item : items) {
+            if (!reads.empty() || !writes.empty()) {
+                complete &= item.bounded;
+                complete &= std::all_of(item.reads.begin(), item.reads.end(), valid) && std::all_of(item.writes.begin(), item.writes.end(), valid);
+            }
+            for (const auto& range : reads) {
+                for (const auto& pending : item.writes) overlap |= intersects(range, pending);
+            }
+            for (const auto& range : writes) {
+                for (const auto& pending : item.writes) overlap |= intersects(range, pending);
+                for (const auto& pending : item.reads) overlap |= intersects(range, pending);
+            }
+        }
+        if (profile) ++packetHazards[std::min<std::uint32_t>(opcode, 0x100)][overlap ? 0 : complete ? 1 : 2];
+    }
+    if (PreciseDrains() && complete && !overlap) return false;
+    drain(DrainReason::Packet, opcode);
+    return true;
+}
+
 void DrawPipeline::Drain(DrainReason reason, std::uint32_t opcode) {
+    if (reason == DrainReason::Packet && Busy()) {
+        DrainPacket(opcode, {}, {}, false);
+        return;
+    }
+    drain(reason, opcode);
+}
+
+void DrawPipeline::drain(DrainReason reason, std::uint32_t opcode) {
     drainRequests[std::min<std::uint32_t>(opcode, 0x100)].fetch_add(1, std::memory_order_relaxed);
     if (!Busy()) return;
     if (GuestMemory::GpuMutex().HeldByThisThread()) throw std::runtime_error("draw pipeline drain under the GPU lock (reason " + std::to_string(static_cast<unsigned>(reason)) + ", opcode " + std::to_string(opcode) + ")");

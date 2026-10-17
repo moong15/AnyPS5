@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -86,6 +87,45 @@ void Driver::noteDrawWriters(std::span<const Graphics::CompiledShader> stages, s
     for (const auto& stage : stages) {
         forEachWrittenBuffer(*stage.program, [&](std::uint32_t, std::uint64_t begin, std::uint64_t end, bool) { noteForeignWriter(begin, end, queue); });
     }
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawReadRanges(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> stages, bool& bounded) {
+    bounded = ExactDrawWrites() && !graphics.depth.has_value();
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    const auto colorBounded = [](const Graphics::ColorTarget& color) {
+        return color.address == 0 || (color.bytes != 0 && color.dccAddress == 0 && color.cmaskAddress == 0);
+    };
+    if (graphics.hasColorTarget) bounded &= colorBounded(graphics.color);
+    for (const auto& color : graphics.colors) bounded &= colorBounded(color);
+    for (const auto& stage : stages) {
+        if (stage.program == nullptr) {
+            bounded = false;
+            continue;
+        }
+        bounded &= stage.program->bdaAbiVersion == 0;
+        for (const auto& attribute : stage.program->vertexAttributes) {
+            if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute)) continue;
+            const auto begin = attribute.resource.Base48();
+            const auto bytes = std::max<std::uint64_t>(Graphics::VertexBufferExtent(attribute), attribute.resource.GetSize());
+            ranges.emplace_back(begin, begin + bytes);
+        }
+        for (const auto& binding : stage.program->bindings) {
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers && binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers) bounded = false;
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+            for (std::uint32_t element = 0; element < binding.count; ++element) {
+                if (binding.guestDescriptor.size() < (static_cast<std::size_t>(element) + 1) * 4) {
+                    bounded = false;
+                    continue;
+                }
+                const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4);
+                const ShaderRecompiler::ShaderBufferResource resource{{words[0], words[1], words[2], words[3]}};
+                const auto begin = resource.Base48();
+                const auto bytes = resource.GetSize();
+                if (begin != 0 && bytes != 0) ranges.emplace_back(begin, begin + bytes);
+            }
+        }
+    }
+    return ranges;
 }
 
 bool ExactDrawWrites() {

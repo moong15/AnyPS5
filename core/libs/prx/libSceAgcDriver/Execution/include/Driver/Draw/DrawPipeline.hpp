@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -44,8 +45,11 @@ public:
     // `reads` are guest ranges the commit reads at its own place in the command stream (the draw's
     // index range, known from the packets): a write the guest ordered after the item must not be
     // recorded into them before the item runs, or the commit reads what came later. See HeldReads.
-    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {});
+    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
+    static bool PreciseDrains();
+    bool DrainPacket(std::span<const std::uint32_t> packet);
+    bool DrainPacket(std::uint32_t opcode, std::span<const Range> reads, std::span<const Range> writes, bool bounded);
     static std::uint64_t DrainRequestsByOpcode(std::uint32_t opcode);
     bool Busy() const { return outstanding.load(std::memory_order_acquire) != 0; }
     std::size_t Outstanding() const { return outstanding.load(std::memory_order_acquire); }
@@ -63,8 +67,10 @@ private:
         std::uint64_t labelAddress = 0;
         std::vector<std::byte> labelBytes;
         std::vector<Range> reads;
+        bool bounded = false;
     };
     DrawPipeline() = default;
+    void drain(DrainReason reason, std::uint32_t opcode);
     void run();
     void rethrowFailure();
     void report(std::chrono::steady_clock::time_point now);
@@ -88,6 +94,7 @@ private:
     std::array<std::uint64_t, static_cast<std::size_t>(DrainReason::Count)> drainWaitNs{};
     std::array<std::uint64_t, 257> drainOpcodes{};
     std::array<std::atomic<std::uint64_t>, 257> drainRequests{};
+    std::array<std::array<std::uint64_t, 3>, 257> packetHazards{};
     std::uint64_t depthSum = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
