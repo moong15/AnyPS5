@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Recipe.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCacheDiagnostics.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -67,6 +68,8 @@ struct DispatchEntry {
 };
 
 struct EntryCounters {
+    std::uint64_t misses = 0, reReferenced = 0, userDataPeers = 0, entryLimitEvictions = 0, byteLimitEvictions = 0;
+
     std::uint64_t lookups = 0, absent = 0, equal = 0, differing = 0, inaccessible = 0, queuedLabel = 0, flushingImage = 0, publishMoved = 0, pendingMoved = 0, forgetMoved = 0, imagesFlushed = 0, runsSynced = 0, forgetSinceInsert = 0, replaced = 0, inserts = 0, unstable = 0, touches = 0;
 
     std::uint64_t aliasLookups = 0, aliasHits = 0, aliasUnreadable = 0, aliasWords = 0, aliasRange = 0, aliasPatches = 0, aliasValidation = 0;

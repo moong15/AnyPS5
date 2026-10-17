@@ -253,6 +253,7 @@ struct VulkanDevice::State {
     void* library = nullptr;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
+    PFN_vkCmdDispatchBase dispatchBase = nullptr;
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -1897,6 +1898,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         Graphics::FillDeviceFunctions(graphicsContext(), state->deviceFunctions);
         state->functionsReady = true;
     }
+    static const bool dispatchBaseProcCache = std::getenv("APS5_NO_DISPATCH_BASE_PROC_CACHE") == nullptr;
+    if (procTable && dispatchBaseProcCache) state->dispatchBase = state->DeviceFunction<PFN_vkCmdDispatchBase>("vkCmdDispatchBase");
     Graphics::PrepareImportWatch(graphicsContext());
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->emptyBuffer = std::make_unique<Graphics::Buffer>(graphicsContext(), Graphics::EmptyBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -4504,7 +4507,7 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
                 std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u exceeds device limits %ux%ux%u and NVIDIA drops workgroups of a vkCmdDispatchBase split", record.x, record.y, record.z, limit[0], limit[1], limit[2]);
                 throw std::runtime_error(text);
             }
-            const auto dispatchBase = context.Function<PFN_vkCmdDispatchBase>("vkCmdDispatchBase");
+            const auto dispatchBase = state->dispatchBase != nullptr ? state->dispatchBase : context.Function<PFN_vkCmdDispatchBase>("vkCmdDispatchBase");
             bool firstChunk = true;
             for (std::uint32_t zBase = 0; zBase < record.z; zBase += limit[2]) {
                 for (std::uint32_t yBase = 0; yBase < record.y; yBase += limit[1]) {
@@ -4615,14 +4618,19 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::createComputePipeline(cons
 
 std::shared_ptr<ComputePipelineObjects> VulkanDevice::computePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, VkDescriptorSetLayout setLayout, std::span<const std::uint32_t> layoutKey, VkShaderStageFlags pushStages, std::uint64_t programAddress) {
     const auto pipelineKey = ComputePipelineKey::Of(shader, pushStages != 0);
-    std::promise<std::shared_ptr<ComputePipelineObjects>> building;
+    static const bool lazyPromise = std::getenv("APS5_NO_LAZY_COMPUTE_PROMISE") == nullptr;
+    std::optional<std::promise<std::shared_ptr<ComputePipelineObjects>>> building;
+    if (!lazyPromise) building.emplace();
     if (!pipelineKey.identity.Empty()) {
         std::shared_future<std::shared_ptr<ComputePipelineObjects>> other;
         {
             std::lock_guard pipelines(state->computePipelinesMutex);
             if (const auto found = state->computePipelines.find(pipelineKey); found != state->computePipelines.end()) return found->second;
             if (const auto pending = state->computePipelinesBuilding.find(pipelineKey); pending != state->computePipelinesBuilding.end()) other = pending->second;
-            else state->computePipelinesBuilding.emplace(pipelineKey, building.get_future().share());
+            else {
+                if (!building) building.emplace();
+                state->computePipelinesBuilding.emplace(pipelineKey, building->get_future().share());
+            }
         }
         if (other.valid()) return other.get();
     }
@@ -4633,8 +4641,8 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::computePipeline(const Grap
             if (built != nullptr) built = state->computePipelines.try_emplace(pipelineKey, built).first->second;
             state->computePipelinesBuilding.erase(pipelineKey);
         }
-        if (error != nullptr) building.set_exception(error);
-        else building.set_value(built);
+        if (error != nullptr) building->set_exception(error);
+        else building->set_value(built);
         return built;
     };
     std::shared_ptr<ComputePipelineObjects> objects;
