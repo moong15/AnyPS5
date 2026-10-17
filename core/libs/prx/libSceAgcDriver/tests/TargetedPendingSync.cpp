@@ -163,11 +163,14 @@ void OlderBatchIsTheOnlyOneWaitedFor() {
     std::vector<int> order;
     {
         Recorder recorder(mockContext());
+        recorder.Activate();
         Record(recorder, guest, 0, 256, 0xa1, &order, 1);
         recorder.Submit();
         Record(recorder, guest, 512, 256, 0xb2, &order, 2);
         recorder.Submit();
         Expect(recorder.InFlightBatches() == 2 && mock.submits == 2, "the two recorded batches are not both in flight");
+        Expect(Recorder::SnapshotWriteOverlaps(guest.address(0), 16) && Recorder::SnapshotWriteOverlaps(guest.address(512), 16),
+            "the recorded ranges are missing from the published pending-write snapshot");
         recorder.SyncThrough(guest.address(0), 256);
         Expect(mock.fenceWaits == 1, "a sync targeting the older batch waited for " + std::to_string(mock.fenceWaits) + " fences, not its one");
         Expect(recorder.InFlightBatches() == 1, "a sync targeting the older batch retired " + std::to_string(2 - recorder.InFlightBatches()) + " batches, not one");
@@ -187,13 +190,15 @@ void OpenBatchTargetWaitsForOneFence() {
     std::vector<int> order;
     {
         Recorder recorder(mockContext());
+        recorder.Activate();
         Record(recorder, guest, 0, 256, 0xa1, &order, 1);
         recorder.Submit();
         Record(recorder, guest, 512, 256, 0xb2, &order, 2);
         Expect(recorder.Recording(), "the second batch did not stay open");
         recorder.SyncThrough(guest.address(512), 256);
         Expect(mock.submits == 2, "the open batch holding the write was not submitted");
-        Expect(mock.fenceWaits == (Targeted() ? 1u : 2u), "a sync for the open batch waited for " + std::to_string(mock.fenceWaits) + " fences");
+        Expect(mock.fenceWaits == 1, "a sync for the open batch waited for " + std::to_string(mock.fenceWaits) + " fences, not the one of the batch holding the write"
+            + (Targeted() ? "" : " (APS5_NO_TARGETED_PENDING_SYNC waits per batch again)"));
         Expect(recorder.InFlightBatches() == 0, "a sync for the open batch left a batch in flight");
         Expect(order == (std::vector<int>{1, 2}), "the batches ahead of the target did not run their completions in submission order");
         Expect(guest.byte(0) == 0xa1 && guest.byte(512) == 0xb2, "the write-backs did not land in submission order");
@@ -208,12 +213,14 @@ void OlderBatchesRunAfterTheTargetsFence() {
     std::vector<int> order;
     {
         Recorder recorder(mockContext());
+        recorder.Activate();
         for (int batch = 1; batch <= 3; ++batch) {
             Record(recorder, guest, static_cast<std::size_t>(batch - 1) * 256, 256, static_cast<std::uint8_t>(0x10 + batch), &order, batch);
             recorder.Submit();
         }
         recorder.SyncThrough(guest.address(512), 256);
-        Expect(mock.fenceWaits == (Targeted() ? 1u : 3u), "a sync for the newest of three batches waited for " + std::to_string(mock.fenceWaits) + " fences");
+        Expect(mock.fenceWaits == 1, "a sync for the newest of three batches waited for " + std::to_string(mock.fenceWaits) + " fences, not the one of the target"
+            + (Targeted() ? "" : " (APS5_NO_TARGETED_PENDING_SYNC waits per batch again)"));
         Expect(recorder.InFlightBatches() == 0, "a sync for the newest of three batches left a batch in flight");
         Expect(order == (std::vector<int>{1, 2, 3}), "the batches ahead of the target did not run their completions in submission order");
         Expect(guest.byte(0) == 0x11 && guest.byte(256) == 0x12 && guest.byte(512) == 0x13, "the write-backs did not land in submission order");
@@ -228,6 +235,7 @@ void NothingOverlappingWaitsForNothing() {
     Guest guest;
     {
         Recorder recorder(mockContext());
+        recorder.Activate();
         Record(recorder, guest, 0, 256, 0xa1, nullptr, 1);
         recorder.Submit();
         recorder.SyncThrough(guest.address(512), 256);
