@@ -6,7 +6,6 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
-#include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/MemoryWaitWakeup.hpp"
 #include <mutex>
 #include <array>
 #include <chrono>
@@ -44,6 +43,9 @@
 #endif
 
 namespace AgcDriver::GuestMemory {
+
+std::atomic<StoreObserver> storeObserver{nullptr};
+
 namespace {
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("AGC driver: ") + reason);
@@ -2668,7 +2670,11 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
     if (source.size() >= PageBytes) StoreOwnBytes(address, source);
     else StoreOwnBytes(address, source.size(), [&] { std::memcpy(destination, source.data(), source.size()); });
-    DriverDetail::MemoryWaitWakeup::Notify(address, source.size(), CurrentPacket().opcode == NoPacket ? DriverDetail::MemoryWaitSource::Unknown : DriverDetail::MemoryWaitSource::CpuLabel, CurrentPacket().queue, source);
+    if (const auto observer = storeObserver.load(std::memory_order_acquire)) observer(address, source, false);
+}
+
+void SetStoreObserver(StoreObserver observer) {
+    storeObserver.store(observer, std::memory_order_release);
 }
 
 }
@@ -2682,5 +2688,5 @@ extern "C" void AgcDriverStoreGuestLabel_nid_postfix(std::uint64_t* pointer, std
     AgcDriver::GuestMemory::StoreOwnBytes(reinterpret_cast<std::uintptr_t>(pointer), sizeof(*pointer), [&] {
         std::atomic_ref(*pointer).store(value, std::memory_order_release);
     });
-    AgcDriver::DriverDetail::MemoryWaitWakeup::Notify(reinterpret_cast<std::uintptr_t>(pointer), sizeof(value), AgcDriver::DriverDetail::MemoryWaitSource::GuestCpu, 0xffffffffu, std::as_bytes(std::span(&value, 1)));
+    if (const auto observer = AgcDriver::GuestMemory::storeObserver.load(std::memory_order_acquire)) observer(reinterpret_cast<std::uintptr_t>(pointer), std::as_bytes(std::span(&value, 1)), true);
 }

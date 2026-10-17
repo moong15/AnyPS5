@@ -177,6 +177,13 @@ void MemoryWaitWakeup::Notify(std::uint64_t address, std::size_t bytes, MemoryWa
 }
 
 
+static void notifyGuestStore(std::uint64_t address, std::span<const std::byte> stored, bool guestCpu) {
+    if (guestCpu) MemoryWaitWakeup::Notify(address, stored.size(), MemoryWaitSource::GuestCpu, 0xffffffffu, stored);
+    else MemoryWaitWakeup::Notify(address, stored.size(), GuestMemory::CurrentPacket().opcode == GuestMemory::NoPacket ? MemoryWaitSource::Unknown : MemoryWaitSource::CpuLabel, GuestMemory::CurrentPacket().queue, stored);
+}
+
+static const bool guestStoreObserved = (GuestMemory::SetStoreObserver(&notifyGuestStore), true);
+
 PollStats& Driver::pollStats() {
     static thread_local PollStats stats;
     return stats;
