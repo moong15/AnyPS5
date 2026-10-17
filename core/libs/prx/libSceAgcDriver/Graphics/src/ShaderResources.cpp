@@ -2916,23 +2916,82 @@ ShaderResources::OwnRefreshFallback ShaderResources::refreshOwnObjects(std::span
     return OwnRefreshFallback::Count;
 }
 
+namespace {
+
+struct CpuWriteSyncProfile {
+    std::array<std::uint64_t, 3> triggers{};
+    std::array<std::uint64_t, 3> ready{};
+    std::array<std::uint64_t, 3> completed{};
+    std::array<std::uint64_t, 3> synced{};
+    std::uint64_t avoided = 0;
+    std::uint64_t waits = 0;
+    double waitedMs = 0;
+    std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
+};
+
+void CountCpuWriteSync(unsigned before, unsigned after, bool ready, bool sync, double waitedMs) {
+    static CpuWriteSyncProfile counts;
+    for (unsigned i = 0; i < 3; ++i) {
+        const auto bit = 1u << i;
+        if ((before & bit) != 0) {
+            ++counts.triggers[i];
+            if (ready) ++counts.ready[i];
+            if ((after & bit) == 0) ++counts.completed[i];
+        }
+        if (sync && (after & bit) != 0) ++counts.synced[i];
+    }
+    if (!sync) ++counts.avoided;
+    else ++counts.waits;
+    counts.waitedMs += waitedMs;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - counts.lastReport < std::chrono::seconds(10)) return;
+    counts.lastReport = now;
+    const std::array<const char*, 3> names{"copied writer", "draw copied writer", "pending label"};
+    for (unsigned i = 0; i < 3; ++i) {
+        AgcDriver::ProfilePrint_nid_no_patch("[recorder] CPU-write trigger %s (cumulative, non-exclusive): %llu candidates, %llu newest overlapping GPU writer signaled at entry, %llu cleared by ordered reap, %llu syncs\n", names[i], static_cast<unsigned long long>(counts.triggers[i]), static_cast<unsigned long long>(counts.ready[i]), static_cast<unsigned long long>(counts.completed[i]), static_cast<unsigned long long>(counts.synced[i]));
+    }
+    AgcDriver::ProfilePrint_nid_no_patch("[recorder] CPU-write syncs (cumulative): %llu avoided after completions, %llu retained, %.1f ms in SyncThrough\n", static_cast<unsigned long long>(counts.avoided), static_cast<unsigned long long>(counts.waits), counts.waitedMs);
+}
+
+}
+
 bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || Recorder::InCompletion()) return false;
     auto* recorder = Recorder::Active();
     if (recorder == nullptr) return false;
     const auto drawWriters = DrawCopiedWriters();
-    const bool labels = Recorder::PendingCompletionLabels() != 0;
-    if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && !labels) return false;
-    if (!recorder->PendingWriteOverlaps(address, bytes)) return false;
-    const auto overlaps = [&](const auto& writers) {
-        return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->WritesOverlap(address, bytes); });
+    const auto triggers = [&] {
+        unsigned mask = 0;
+        const auto overlaps = [&](const auto& writers) {
+            return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->WritesOverlap(address, bytes); });
+        };
+        if (context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) mask |= 1u;
+        if (overlaps(*drawWriters)) mask |= 2u;
+        if (Recorder::PendingCompletionLabels() != 0 && recorder->PendingLabelIn(address, bytes)) mask |= 4u;
+        return mask;
     };
-    if ((context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) || overlaps(*drawWriters) || (labels && recorder->PendingLabelIn(address, bytes))) {
+    if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && Recorder::PendingCompletionLabels() == 0) return false;
+    if (!recorder->PendingWriteOverlaps(address, bytes)) return false;
+    const auto before = triggers();
+    if (before == 0) return false;
+    static const bool noPrecise = std::getenv("APS5_NO_PRECISE_CPU_WRITE_SYNC") != nullptr;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    const auto producer = profile ? recorder->DescribeWaitWrite(address, bytes) : std::nullopt;
+    bool retired = false;
+    if (!noPrecise) {
+        const auto batches = recorder->InFlightBatches();
+        recorder->Reap();
+        retired = recorder->InFlightBatches() != batches;
+    }
+    const auto after = noPrecise ? before : triggers();
+    const bool sync = after != 0 && (noPrecise || recorder->PendingWriteOverlaps(address, bytes));
+    const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (sync) {
         Recorder::CountSync(4);
         recorder->SyncThrough(address, bytes);
-        return true;
     }
-    return false;
+    if (profile) CountCpuWriteSync(before, after, producer.has_value() && producer->signaled, sync, sync ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() : 0);
+    return sync || retired;
 }
 
 const ShaderRecompiler::DescriptorBinding* ShaderResources::tableImages(std::span<const CompiledShader> shaders, ShaderRecompiler::ShaderStage stage) {
