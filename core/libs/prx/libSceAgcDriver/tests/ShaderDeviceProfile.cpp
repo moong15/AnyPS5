@@ -81,6 +81,7 @@ void CheckProfile() {
     invalid([](auto& value) { value.bda.bufferDeviceAddress = VK_FALSE; }, "bufferDeviceAddress");
     invalid([](auto& value) { value.device.pNext = nullptr; }, "bufferDeviceAddress");
     invalid([](auto& value) { value.core.shaderInt64 = VK_FALSE; }, "shaderInt64");
+    invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityGeometry); }, "geometryShader");
     invalid([](auto& value) { value.bytes.storageBuffer8BitAccess = VK_FALSE; }, "storageBuffer8BitAccess");
     ProfileInput withoutNull;
     withoutNull.robustness.nullDescriptor = VK_FALSE;
@@ -126,6 +127,11 @@ void CheckProfile() {
     disabled.device.pNext = &disabledTerminate;
     disabled.extensions.push_back("SPV_KHR_terminate_invocation");
     Reject([&] { AgcDriver::ShaderDeviceProfile rejected(disabled.Target(), disabled.device, disabled.limits); }, "shaderTerminateInvocation");
+    ProfileInput geometryEnabled;
+    geometryEnabled.capabilities.push_back(spv::CapabilityGeometry);
+    geometryEnabled.core.geometryShader = VK_TRUE;
+    const AgcDriver::ShaderDeviceProfile geometryAccepted(geometryEnabled.Target(), geometryEnabled.device, geometryEnabled.limits);
+    Require(std::ranges::find(geometryAccepted.Target().supportedCapabilities, spv::CapabilityGeometry) != geometryAccepted.Target().supportedCapabilities.end(), "enabled geometry shaders were rejected");
 }
 
 void CheckAbi() {

@@ -7,7 +7,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
-#include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -23,11 +23,8 @@ alignas(256) std::array<std::uint32_t, 7> CounterCode{0xf4080200u, 0xfa000000u, 
 
 constexpr std::size_t BlockBytes = 65536;
 constexpr std::uint32_t ArgumentsOffset = 4;
-struct alignas(BlockBytes) AlignedBlock {
-    std::array<std::uint8_t, BlockBytes> bytes{};
-};
-const auto BlockStorage = std::make_unique<AlignedBlock>();
-auto& Block = BlockStorage->bytes;
+std::array<std::uint8_t, BlockBytes * 2 - 1> BlockStorage{};
+const std::span<std::uint8_t, BlockBytes> Block{reinterpret_cast<std::uint8_t*>((reinterpret_cast<std::uintptr_t>(BlockStorage.data()) + BlockBytes - 1) & ~(BlockBytes - 1)), BlockBytes};
 alignas(256) std::array<std::uint32_t, 4> WriterDescriptor{};
 alignas(256) std::array<std::uint32_t, 4> Counter{};
 alignas(256) std::array<std::uint32_t, 4> CounterDescriptor{};
@@ -76,6 +73,7 @@ void Program(std::vector<std::uint32_t>& words, const void* code, std::initializ
 
 int main() {
     try {
+        Require(reinterpret_cast<std::uintptr_t>(Block.data()) % BlockBytes == 0, "the indirect arguments block is not 64 KiB aligned");
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         device.reset();
