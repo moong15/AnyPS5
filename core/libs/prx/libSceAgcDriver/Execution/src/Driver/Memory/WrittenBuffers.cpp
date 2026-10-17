@@ -108,8 +108,11 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawReadRanges(const Graphi
         bounded &= stage.program->bdaAbiVersion == 0;
         for (const auto& attribute : stage.program->vertexAttributes) {
             if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute)) continue;
-            const auto begin = attribute.resource.Base48();
-            const auto bytes = std::max<std::uint64_t>(Graphics::VertexBufferExtent(attribute), attribute.resource.GetSize());
+            const auto& fields = attribute.resource.fields;
+            const auto begin = (fields[0] | (static_cast<std::uint64_t>(fields[1]) << 32u)) & 0xffffffffffffull;
+            const auto stride = (fields[1] >> 16u) & 0x3fffu;
+            const auto size = stride == 0 ? static_cast<std::uint64_t>(fields[2]) : static_cast<std::uint64_t>(fields[2]) * stride;
+            const auto bytes = std::max<std::uint64_t>(Graphics::VertexBufferExtent(attribute), size);
             ranges.emplace_back(begin, begin + bytes);
         }
         for (const auto& binding : stage.program->bindings) {
