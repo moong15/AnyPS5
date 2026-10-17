@@ -229,7 +229,8 @@ std::size_t Driver::dispatchCacheEntries() {
         const auto parsed = text != nullptr ? std::strtoull(text, nullptr, 10) : 0ull;
         if (parsed != 0) return static_cast<std::size_t>(parsed);
         if (stampValidate()) return std::size_t{4096};
-        return dispatchVariants() > 2 ? std::size_t{8192} : std::size_t{16384};
+        if (std::getenv("APS5_NO_DISPATCH_CACHE_GROWTH") != nullptr) return dispatchVariants() > 2 ? std::size_t{8192} : std::size_t{16384};
+        return std::size_t{32768};
     }();
     return entries;
 }
@@ -263,6 +264,8 @@ void Driver::accountVariant(const DispatchVariant& variant, bool added) {
 }
 
 void Driver::eraseDispatchEntry(std::unordered_map<std::uint64_t, std::shared_ptr<DispatchEntry>>::iterator it) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (profile) dispatchDiagnostics.Evict(it->first);
     for (const auto& variant : it->second->variants) accountVariant(*variant, false);
     dispatchOrder.erase(it->second->order);
     dispatchCache.erase(it);

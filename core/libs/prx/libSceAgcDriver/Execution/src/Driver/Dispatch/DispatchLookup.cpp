@@ -5,6 +5,7 @@
 namespace AgcDriver::DriverDetail {
 
 void Driver::lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, std::uint64_t identity, std::span<const std::uint32_t> userData, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering) {
+    bool reReferenced = false, userDataPeer = false;
     if (!noDispatchCache) {
 
         static const bool validateUnlocked = std::getenv("APS5_NO_UNLOCKED_VALIDATE") == nullptr;
@@ -12,7 +13,14 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
         ++entryCounters.lookups;
         const auto found = dispatchCache.find(key);
         std::shared_ptr<DispatchEntry> entry = found != dispatchCache.end() ? found->second : nullptr;
-        if (entry == nullptr) ++entryCounters.absent;
+        if (entry == nullptr) {
+            ++entryCounters.absent;
+            if (profile) {
+                reReferenced = dispatchDiagnostics.WasEvicted(key);
+                static const bool keyHygiene = std::getenv("APS5_NO_DISPATCH_KEY_HYGIENE") == nullptr;
+                userDataPeer = keyHygiene && dispatchDiagnostics.HasIdentity(identity);
+            }
+        }
         if (validateUnlocked) cacheLock.unlock();
         phaseTiming.Phase(PhaseLookup);
         if (entry != nullptr) {
@@ -155,7 +163,8 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                         again->second = std::move(rotated);
                     }
 
-                    if (dispatchCacheHits - again->second->touched > dispatchCacheEntries() / 8) {
+                    static const bool exactLru = std::getenv("APS5_NO_DISPATCH_EXACT_LRU") == nullptr;
+                    if (exactLru || dispatchCacheHits - again->second->touched > dispatchCacheEntries() / 8) {
                         dispatchOrder.splice(dispatchOrder.begin(), dispatchOrder, again->second->order);
                         again->second->touched = dispatchCacheHits;
                         ++counters.touches;
@@ -167,10 +176,6 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                 missedEntry = entry;
                 missedDiffering = outcome == EntryOutcome::Differing;
                 if (!untouched) ++counters.replaced;
-            }
-            if (profile && std::chrono::steady_clock::now() - counters.lastReport > std::chrono::seconds(10)) {
-                counters.lastReport = std::chrono::steady_clock::now();
-                reportDispatchCache(counters);
             }
             phaseTiming.Phase(PhaseRelock);
         }
@@ -185,6 +190,11 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
     }
     if (!noDispatchCache && profile) {
         std::lock_guard cacheLock(dispatchCacheMutex);
+        if (!cached) {
+            ++entryCounters.misses;
+            if (reReferenced) ++entryCounters.reReferenced;
+            if (userDataPeer) ++entryCounters.userDataPeers;
+        }
         if (std::chrono::steady_clock::now() - entryCounters.lastReport > std::chrono::seconds(10)) reportDispatchCache(entryCounters);
     }
 }

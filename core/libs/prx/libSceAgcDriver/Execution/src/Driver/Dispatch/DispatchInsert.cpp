@@ -14,7 +14,7 @@ bool CacheableResult(const ShaderRecompiler::RecompileResult& compiled) {
     });
 }
 
-void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::span<const std::uint32_t> userData, bool noDispatchCache, bool profile, const std::shared_ptr<const ShaderSnapshot>& registeredShader, std::uint64_t forgetAtCapture, std::span<const ShaderRecompiler::MemoryRegion> memory, const std::shared_ptr<ShaderMemory>& shaderMemory, const std::vector<ShaderRecompiler::MemoryRegion>& captured, const std::shared_ptr<const ShaderRecompiler::ResourceCapture>& capture, const std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, const std::shared_ptr<DispatchEntry>& missedEntry, bool missedDiffering, std::shared_ptr<DispatchVariant>& attachVariant, DispatchPhaseTiming& phaseTiming) {
+void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::uint64_t identity, std::span<const std::uint32_t> userData, bool noDispatchCache, bool profile, const std::shared_ptr<const ShaderSnapshot>& registeredShader, std::uint64_t forgetAtCapture, std::span<const ShaderRecompiler::MemoryRegion> memory, const std::shared_ptr<ShaderMemory>& shaderMemory, const std::vector<ShaderRecompiler::MemoryRegion>& captured, const std::shared_ptr<const ShaderRecompiler::ResourceCapture>& capture, const std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, const std::shared_ptr<DispatchEntry>& missedEntry, bool missedDiffering, std::shared_ptr<DispatchVariant>& attachVariant, DispatchPhaseTiming& phaseTiming) {
     if (!noDispatchCache) {
         auto fresh = std::make_shared<DispatchVariant>();
         fresh->compiled = compiledResult;
@@ -85,6 +85,7 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::span<
             entryCounters.dataLeavesMismatched += dataCounts.mismatched;
             entryCounters.dataLeavesAliased += dataCounts.aliased;
             attachVariant = fresh;
+            if (profile) dispatchDiagnostics.Insert(key, identity);
             const auto found = dispatchCache.find(key);
             if (found == dispatchCache.end()) {
                 auto created = std::make_shared<DispatchEntry>();
@@ -124,11 +125,18 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::span<
             if (over()) {
                 if (lru) {
                     while (over()) {
+                        if (profile) {
+                            if (dispatchCache.size() > dispatchCacheEntries()) ++entryCounters.entryLimitEvictions;
+                            if (dispatchCacheVariantBytes > DispatchCacheBytes()) ++entryCounters.byteLimitEvictions;
+                        }
                         eraseDispatchEntry(dispatchCache.find(dispatchOrder.back()));
                         ++dispatchCacheEvictions;
                     }
                 } else {
                     dispatchCacheEvictions += dispatchCache.size();
+                    if (profile) {
+                        for (const auto& [evictedKey, entry] : dispatchCache) dispatchDiagnostics.Evict(evictedKey);
+                    }
                     dispatchCache.clear();
                     dispatchOrder.clear();
                     dispatchCacheVariants = 0;
