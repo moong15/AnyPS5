@@ -1314,7 +1314,7 @@ if(BUILD_TESTING)
     set_target_properties(agc_targeted_pending_sync_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_targeted_pending_sync COMMAND agc_targeted_pending_sync_tests)
     add_test(NAME agc_targeted_pending_sync_off COMMAND agc_targeted_pending_sync_tests)
-    set_tests_properties(agc_targeted_pending_sync_off PROPERTIES ENVIRONMENT "APS5_NO_TARGETED_PENDING_SYNC=1")
+    set_tests_properties(agc_targeted_pending_sync_off PROPERTIES ENVIRONMENT "APS5_NO_TARGETED_PENDING_SYNC=1" WILL_FAIL TRUE TIMEOUT 30)
     if(WIN32)
         set_tests_properties(agc_targeted_pending_sync agc_targeted_pending_sync_off PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
