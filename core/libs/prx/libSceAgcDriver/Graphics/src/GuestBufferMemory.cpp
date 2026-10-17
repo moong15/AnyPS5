@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <functional>
 #include <bit>
@@ -828,6 +829,49 @@ std::shared_ptr<const GuestAllocations::Range> leasedRangeOwner(const GuestAlloc
     return begin >= range->address && end <= range->address + range->bytes ? range : nullptr;
 }
 
+void rejectImport(ImportRejection* rejection, ImportRejection reason) {
+    if (rejection != nullptr && *rejection == ImportRejection::None) *rejection = reason;
+}
+
+struct ImportBudgetRefusals {
+    std::uint64_t refused = 0;
+    std::uint64_t bytes = 0;
+    std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+};
+
+ImportBudgetRefusals& importBudgetRefusals() {
+    static ImportBudgetRefusals counters;
+    return counters;
+}
+
+std::uint64_t& importedByteCount() {
+    static std::uint64_t bytes = 0;
+    return bytes;
+}
+
+struct NoImportRejections {};
+
+template<bool Diagnose>
+struct ImportRejections {
+    using Entry = std::pair<std::pair<std::uint64_t, std::uint64_t>, ImportRejection>;
+    std::conditional_t<Diagnose, std::vector<Entry>, NoImportRejections> entries;
+
+    template<typename TRegion>
+    explicit ImportRejections(const std::vector<TRegion>& regions) {
+        if constexpr (Diagnose) entries.reserve(regions.size());
+    }
+
+    template<typename TRegion>
+    ImportRejection* At(const TRegion& region) {
+        if constexpr (Diagnose) {
+            const auto key = std::pair{region.begin, region.end};
+            auto found = std::lower_bound(entries.begin(), entries.end(), key, [](const auto& entry, const auto& value) { return entry.first < value; });
+            if (found == entries.end() || found->first != key) found = entries.insert(found, {key, ImportRejection::None});
+            return &found->second;
+        } else return nullptr;
+    }
+};
+
 struct ImportRun {
     std::uint64_t base = 0;
     std::uint64_t bytes = 0;
@@ -839,11 +883,7 @@ bool continuesRun(const GuestAllocations::Range& before, const GuestAllocations:
 }
 
 std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uint64_t address) {
-    const auto found = std::upper_bound(lease.begin(), lease.end(), address, [](std::uint64_t value, const auto& range) { return value < range->address; });
-    if (found == lease.begin()) return lease.size();
-    const auto index = static_cast<std::size_t>(std::prev(found) - lease.begin());
-    const auto& range = *lease[index];
-    return range.readable && address < range.address + range.bytes ? index : lease.size();
+    return RegisteredRangeIndex(lease, address);
 }
 
 std::atomic<std::uint64_t> importWindow{0};
@@ -851,32 +891,42 @@ std::atomic<std::uint64_t> importWindow{0};
 ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address) {
     const auto index = leasedIndexContaining(lease, address);
     if (index == lease.size()) return {};
-    const auto& containing = *lease[index];
-    std::uint64_t low = 0;
-    std::uint64_t high = std::numeric_limits<std::uint64_t>::max();
-    const auto window = importWindow.load(std::memory_order_relaxed);
-    if (window != 0) {
-        low = address / window * window;
-        high = low + window;
-        if (containing.address < low || containing.address + containing.bytes > high) {
-            low = containing.address;
-            high = containing.address + containing.bytes;
-        }
-    }
-    auto first = index;
-    while (first > 0 && lease[first - 1]->address >= low && continuesRun(*lease[first - 1], *lease[first])) --first;
-    auto last = index;
-    while (last + 1 < lease.size() && lease[last + 1]->address + lease[last + 1]->bytes <= high && continuesRun(*lease[last], *lease[last + 1])) ++last;
-    if (window != 0 && (lease[first]->address != low || lease[last]->address + lease[last]->bytes != high)) first = last = index;
+    const auto [first, last] = RegisteredRunBounds(lease, index, address, importWindow.load(std::memory_order_relaxed));
     if (first != last && Imports().unaliasedSpans.contains(lease[first]->address)) return {lease[index]->address, lease[index]->bytes, {lease[index]}};
     ImportRun run{lease[first]->address, lease[last]->address + lease[last]->bytes - lease[first]->address, {}};
     run.ranges.assign(lease.begin() + static_cast<std::ptrdiff_t>(first), lease.begin() + static_cast<std::ptrdiff_t>(last) + 1);
     return run;
 }
 
+ImportRejection importCoverageRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, const HostImports& state) {
+    const auto reason = RegisteredImportRejection(lease, begin, end, importWindow.load(std::memory_order_relaxed), state.unaliasedSpans);
+    if (reason != ImportRejection::NoRegistryCoverage && reason != ImportRejection::CoverageHole) return reason;
+    auto cursor = begin;
+    auto index = RegisteredRangeIndex(lease, begin);
+    if (index != lease.size()) {
+        while (lease[index]->address + lease[index]->bytes < end) {
+            cursor = lease[index]->address + lease[index]->bytes;
+            if (index + 1 == lease.size() || lease[index + 1]->address != cursor) break;
+            ++index;
+        }
+    }
+    const auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(cursor, false);
+    return range != nullptr && !range->readable ? ImportRejection::FlagsMismatch : reason;
+}
+
+std::atomic<std::uint64_t> coverageOwnerListsAvoided{0};
+
 bool runCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
-    const auto run = importRun(lease, begin);
-    return !run.ranges.empty() && end <= run.base + run.bytes;
+    static const bool disabled = std::getenv("APS5_NO_IMPORT_COVERAGE_PROBE") != nullptr;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (disabled) {
+        const auto run = importRun(lease, begin);
+        return !run.ranges.empty() && end <= run.base + run.bytes;
+    }
+    bool avoided = false;
+    const auto covered = RegisteredRunCovers(lease, begin, end, importWindow.load(std::memory_order_relaxed), Imports().unaliasedSpans, &avoided);
+    if (profile && avoided) coverageOwnerListsAvoided.fetch_add(1, std::memory_order_relaxed);
+    return covered;
 }
 
 ImportRun crossedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end) {
@@ -1027,7 +1077,8 @@ ImportRun windowRun(const HostImports& state, ImportRun run, std::uint64_t begin
 
 const HostImport* findImport(HostImports& state, std::uint64_t begin, std::uint64_t end);
 bool importsStale(const Context& context, const HostImports& state);
-const HostImport* importRunAt(const Context& context, HostImports& state, ImportRun run, bool joined, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end, bool evict);
+template<bool Diagnose = false>
+const HostImport* importRunAt(const Context& context, HostImports& state, ImportRun run, bool joined, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end, bool evict, ImportRejection* rejection = nullptr);
 
 // The bytes retireLeastRecent could free outside [begin, end).
 std::uint64_t evictableBytes(const HostImports& state, std::uint64_t begin, std::uint64_t end) {
@@ -1038,7 +1089,8 @@ std::uint64_t evictableBytes(const HostImports& state, std::uint64_t begin, std:
     return bytes;
 }
 
-const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end = 0, bool evict = true) {
+template<bool Diagnose = false>
+const HostImport* importAllocation(const Context& context, HostImports& state, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end = 0, bool evict = true, ImportRejection* rejection = nullptr) {
     const bool fresh = !importsStale(context, state);
     if (fresh && end != 0) {
         if (const auto* current = findImport(state, address, end)) return current;
@@ -1052,32 +1104,53 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
         if (const auto* current = findImport(state, address, run.ranges.empty() ? address + 1 : run.base + run.bytes)) return current;
     }
     if (end != 0) run = windowRun(state, std::move(run), address, end, context.hostImportAlignment);
-    if (run.ranges.empty()) return nullptr;
-    return importRunAt(context, state, std::move(run), false, address, lease, end, evict);
+    if (run.ranges.empty()) {
+        if constexpr (Diagnose) rejectImport(rejection, importCoverageRejection(lease, address, end != 0 ? end : address + 1, state));
+        return nullptr;
+    }
+    return importRunAt<Diagnose>(context, state, std::move(run), false, address, lease, end, evict, rejection);
 }
 
-const HostImport* importJoined(const Context& context, HostImports& state, std::uint64_t begin, std::uint64_t end, const GuestAllocations::Lease& lease) {
+template<bool Diagnose = false>
+const HostImport* importJoined(const Context& context, HostImports& state, std::uint64_t begin, std::uint64_t end, const GuestAllocations::Lease& lease, ImportRejection* rejection = nullptr) {
     if (const auto* low = findImport(state, begin, begin + 1); low != nullptr && low->joined) begin = low->base;
     if (const auto* high = findImport(state, end - 1, end); high != nullptr && high->joined) end = high->base + high->bytes;
     auto run = joinedRun(lease, begin, end);
-    if (run.ranges.empty()) return nullptr;
-    if (const auto failed = state.failedJoins.find(run.base); failed != state.failedJoins.end() && sameRun(failed->second, run)) return nullptr;
-    return importRunAt(context, state, std::move(run), true, begin, lease, end, true);
+    if (run.ranges.empty()) {
+        if constexpr (Diagnose) {
+            const auto reason = importCoverageRejection(lease, begin, end, state);
+            rejectImport(rejection, reason == ImportRejection::None ? ImportRejection::WindowIncomplete : reason);
+        }
+        return nullptr;
+    }
+    if (const auto failed = state.failedJoins.find(run.base); failed != state.failedJoins.end() && sameRun(failed->second, run)) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::CachedFailure);
+        return nullptr;
+    }
+    return importRunAt<Diagnose>(context, state, std::move(run), true, begin, lease, end, true, rejection);
 }
 
-const HostImport* importRunAt(const Context& context, HostImports& state, ImportRun run, bool joined, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end, bool evict) {
+template<bool Diagnose>
+const HostImport* importRunAt(const Context& context, HostImports& state, ImportRun run, bool joined, std::uint64_t address, const GuestAllocations::Lease& lease, std::uint64_t end, bool evict, ImportRejection* rejection) {
     const auto base = run.base;
     const auto bytes = run.bytes;
     auto& failures = joined ? state.failedJoins : state.failed;
     const auto alignment = context.hostImportAlignment;
     if (joined && (alignment == 0 || base % alignment != 0 || bytes % alignment != 0)) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::Other);
         failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(run.ranges.begin(), run.ranges.end())});
         return nullptr;
     }
     if (const auto found = state.imports.find(base); found != state.imports.end() && sameRun(found->second, run)) return &found->second;
-    if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0) return nullptr;
+    if (alignment == 0 || base % alignment != 0 || bytes % alignment != 0) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::Other);
+        return nullptr;
+    }
     if (const auto failed = failures.find(base); failed != failures.end()) {
-        if (sameRun(failed->second, run)) return nullptr;
+        if (sameRun(failed->second, run)) {
+            if constexpr (Diagnose) rejectImport(rejection, ImportRejection::CachedFailure);
+            return nullptr;
+        }
         failures.erase(failed);
     }
     auto first = state.imports.lower_bound(base);
@@ -1092,15 +1165,21 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         return !expandedWindow || Recorder::Active() == nullptr;
     };
     for (auto it = first; it != state.imports.end() && it->first < base + bytes; ++it) {
-        if (held(it->second)) return nullptr;
+        if (held(it->second)) {
+            if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HeldImportConflict);
+            return nullptr;
+        }
         replaced += it->second.bytes;
     }
     const auto budget = importBudget(context);
     const auto live = state.liveBytes - replaced;
     if (live + bytes > budget && (!evict || live + bytes - evictableBytes(state, base, base + bytes) > budget)) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::BudgetExhausted);
         // A refused import turns every later use of the range into CPU copies, so say so.
-        static std::uint64_t refused = 0, refusedBytes = 0;
-        static auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+        auto& counters = importBudgetRefusals();
+        auto& refused = counters.refused;
+        auto& refusedBytes = counters.bytes;
+        auto& lastReport = counters.lastReport;
         ++refused;
         refusedBytes += bytes;
         if (std::chrono::steady_clock::now() - lastReport > std::chrono::seconds(10)) {
@@ -1126,6 +1205,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
     for (std::uint64_t cursor = base; cursor < base + bytes;) {
         MEMORY_BASIC_INFORMATION info{};
         if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+            if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HostAliasProtectionFailure);
             failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
             return nullptr;
         }
@@ -1138,6 +1218,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         cursor = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
     }
     if (!writable && readOnly) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HostAliasProtectionFailure);
         failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
         return nullptr;
     }
@@ -1155,15 +1236,18 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
             std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx cannot be aliased (%s); falling back to copies\n",
                 static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), error.what());
             if (joined || entry.ranges.size() == 1) {
+                if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HostAliasProtectionFailure);
                 failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
                 return nullptr;
             }
+            if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HostAliasProtectionFailure);
             state.unaliasedSpans.insert(base);
-            return importAllocation(context, state, address, lease, end, evict);
+            return importAllocation<Diagnose>(context, state, address, lease, end, evict, rejection);
         }
     }
 #else
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(base), static_cast<std::size_t>(bytes), true)) {
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::HostAliasProtectionFailure);
         failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
         return nullptr;
     }
@@ -1215,6 +1299,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
 #ifdef _WIN32
         GuestArena::GuestArenaUnmapAlias_nid_postfix(entry.alias);
 #endif
+        if constexpr (Diagnose) rejectImport(rejection, ImportRejection::VulkanImportFailure);
         failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
         std::fprintf(stderr, "[gpu] host import of 0x%llx+0x%llx failed at %s (%d); falling back to copies\n", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), step, static_cast<int>(result));
 #ifdef _WIN32
@@ -1241,7 +1326,7 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
 #endif
         return nullptr;
     }
-    static std::uint64_t importedBytes = 0;
+    auto& importedBytes = importedByteCount();
     importedBytes += bytes;
     static const bool trace = std::getenv("APS5_TRACE_HOST_IMPORT") != nullptr;
     state.liveBytes += bytes;
@@ -1321,9 +1406,16 @@ const HostImport* findImport(HostImports& state, std::uint64_t begin, std::uint6
     return &entry;
 }
 
-const HostImport* importAccess(const Context& context, HostImports& state, std::uint64_t begin, std::uint64_t end, const GuestAllocations::Lease& lease) {
-    if (!runCovers(lease, begin, end)) return findImport(state, begin, end);
-    const auto* entry = importAllocation(context, state, begin, lease, end);
+template<bool Diagnose = false>
+const HostImport* importAccess(const Context& context, HostImports& state, std::uint64_t begin, std::uint64_t end, const GuestAllocations::Lease& lease, ImportRejection* rejection = nullptr) {
+    if (!runCovers(lease, begin, end)) {
+        if constexpr (Diagnose) rejectImport(rejection, importCoverageRejection(lease, begin, end, state));
+        return findImport(state, begin, end);
+    }
+    const auto* entry = importAllocation<Diagnose>(context, state, begin, lease, end, true, rejection);
+    if constexpr (Diagnose) {
+        if (entry != nullptr && (begin < entry->base || end > entry->base + entry->bytes)) rejectImport(rejection, ImportRejection::WindowIncomplete);
+    }
     return entry != nullptr && findImport(state, begin, end) == entry ? entry : nullptr;
 }
 
@@ -3616,8 +3708,16 @@ void GuestBufferMemory::completeSpaceWrites() const {
 }
 
 void GuestBufferMemory::UploadFinish(bool addressable) {
-    Require(prepared && !uploaded, "guest memory upload was not prepared");
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (profile) uploadFinish<true>(addressable);
+    else uploadFinish<false>(addressable);
+}
+
+template<bool Diagnose>
+void GuestBufferMemory::uploadFinish(bool addressable) {
+    Require(prepared && !uploaded, "guest memory upload was not prepared");
+    constexpr bool profile = Diagnose;
+    ImportRejections<Diagnose> rejections(regions);
     const auto started = std::chrono::steady_clock::now();
     const auto pendingStart = started;
     for (const auto& region : regions) CompletePendingCpuWrites(context, region.begin, static_cast<std::size_t>(region.end - region.begin));
@@ -3672,7 +3772,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
         for (const auto& region : regions) {
             if (!region.pending || region.mirror != nullptr || region.direct != nullptr || sparseHeapCandidate(region)) continue;
             if (findImport(state, region.begin, region.end) != nullptr || runCovers(importRanges(), region.begin, region.end)) continue;
-            static_cast<void>(importJoined(context, state, region.begin, region.end, importRanges()));
+            static_cast<void>(importJoined<Diagnose>(context, state, region.begin, region.end, importRanges(), rejections.At(region)));
         }
     }
     if (space != nullptr && context.hostImportAlignment != 0) {
@@ -3734,7 +3834,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
             if (entry == nullptr) entry = findImport(state, region.begin, region.end);
             const bool sparseRun = region.sparseHeap && region.sparse;
             if (entry == nullptr && !sparseRun) {
-                entry = importAccess(context, state, region.begin, region.end, importRanges());
+                entry = importAccess<Diagnose>(context, state, region.begin, region.end, importRanges(), rejections.At(region));
             }
             bool runImport = false;
             if (entry == nullptr && sparseRun && !region.backed.empty() && region.backed.front().first == region.begin && !WritesOverlap(region.begin, static_cast<std::size_t>(bytes))) {
@@ -3742,7 +3842,13 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
                 const auto neededEnd = std::min(region.end, std::max(committedEnd, std::max(region.lastView, region.begin) + 4u));
                 const auto covers = [&](const HostImport* candidate) { return candidate != nullptr && candidate->base <= region.begin && candidate->base + candidate->bytes >= neededEnd; };
                 entry = findImport(state, region.begin, neededEnd);
-                if (entry == nullptr && runCovers(importRanges(), region.begin, neededEnd)) entry = importAllocation(context, state, region.begin, importRanges());
+                if (entry == nullptr) {
+                    if (runCovers(importRanges(), region.begin, neededEnd)) {
+                        entry = importAllocation<Diagnose>(context, state, region.begin, importRanges(), 0, true, rejections.At(region));
+                    } else if constexpr (Diagnose) {
+                        rejectImport(rejections.At(region), importCoverageRejection(importRanges(), region.begin, neededEnd, state));
+                    }
+                }
                 if (!covers(entry)) entry = nullptr;
                 const auto& lease = importRanges();
                 const auto index = leasedIndexContaining(lease, region.begin);
@@ -3753,13 +3859,16 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
                     const auto made = joins == state.sparseRunJoins.end() ? 0u : joins->second;
                     const auto seen = state.sparseRunEnds.find(region.begin);
                     if (seen != state.sparseRunEnds.end() && seen->second == committedEnd && made < MaxSparseRunJoins) {
-                        entry = importJoined(context, state, region.begin, neededEnd, lease);
+                        entry = importJoined<Diagnose>(context, state, region.begin, neededEnd, lease, rejections.At(region));
                         if (covers(entry) && ++state.sparseRunJoins[entry->base] == MaxSparseRunJoins) std::fprintf(stderr, "[gpu] the sparse heap at 0x%llx was joined into one import %u times; it is not joined again and is copied once its run outgrows the import\n", static_cast<unsigned long long>(entry->base), MaxSparseRunJoins);
                     }
                     state.sparseRunEnds[region.begin] = committedEnd;
                 }
                 if (!covers(entry)) entry = nullptr;
                 runImport = entry != nullptr;
+            }
+            if constexpr (Diagnose) {
+                if (entry == nullptr && sparseRun) rejectImport(rejections.At(region), ImportRejection::SparseRunPolicy);
             }
             // A staged region (see stagingEligible) is copied out of the import even when aligned;
             // without a recorder to record the copies it binds in place like any other.
@@ -3811,7 +3920,8 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
             region.deviceLocal = false;
         }
         const auto copyStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-        copyRegion(region, addressable);
+        if constexpr (Diagnose) copyRegion(region, addressable, *rejections.At(region));
+        else copyRegion(region, addressable);
         if (profile) copyUs += microsecondsSince(copyStart);
     }
     const auto copyRecordStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -3827,7 +3937,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
     const auto uploads = uploadsProfiled.fetch_add(1, std::memory_order_relaxed) + 1;
     if (uploads % 2000 == 0) {
         const auto& copies = Copies();
-        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)));
+        AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu uploads: import lookup %.0f ms, buffer allocation %.0f ms, guest read %.0f ms; upload finish %.0f ms (pending writes %.0f ms, flush %.0f ms, imports %.0f ms, region loop %.0f ms, copies %.0f ms); copies on the GPU: %llu regions (%.0f KiB) copied out of imports, %llu written sub-ranges (%.0f KiB) copied back, %llu staging stores by the CPU at write-back; %llu coverage owner lists avoided\n", static_cast<unsigned long long>(uploads), importUs.load(std::memory_order_relaxed) / 1000.0, allocateUs.load(std::memory_order_relaxed) / 1000.0, readUs.load(std::memory_order_relaxed) / 1000.0, finishUs.load(std::memory_order_relaxed) / 1000.0, finishPendingUs.load(std::memory_order_relaxed) / 1000.0, finishFlushUs.load(std::memory_order_relaxed) / 1000.0, finishResolveUs.load(std::memory_order_relaxed) / 1000.0, finishLoopUs.load(std::memory_order_relaxed) / 1000.0, finishCopyUs.load(std::memory_order_relaxed) / 1000.0, static_cast<unsigned long long>(copies.gpuCopies.load(std::memory_order_relaxed)), copies.gpuCopyBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.gpuCopyBacks.load(std::memory_order_relaxed)), copies.gpuCopyBackBytes.load(std::memory_order_relaxed) / 1024.0, static_cast<unsigned long long>(copies.stagingStores.load(std::memory_order_relaxed)), static_cast<unsigned long long>(coverageOwnerListsAvoided.load(std::memory_order_relaxed)));
     }
     const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     if (ms > 50) {
@@ -3850,7 +3960,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
     }
 }
 
-void GuestBufferMemory::copyRegion(Region& region, bool addressable) {
+void GuestBufferMemory::copyRegion(Region& region, bool addressable, ImportRejection rejection) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto bytes = region.end - region.begin;
     const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
@@ -3860,6 +3970,10 @@ void GuestBufferMemory::copyRegion(Region& region, bool addressable) {
         auto& state = Imports();
         std::lock_guard lock(state.mutex);
         inImport = findImport(state, region.begin, region.end) != nullptr;
+        if (!inImport && (region.hostBacked || region.writable) && rejection == ImportRejection::None) {
+            const auto ranges = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+            rejectImport(&rejection, importCoverageRejection(ranges, region.begin, region.end, state));
+        }
     }
     const auto allocateStart = std::chrono::steady_clock::now();
     if (region.sparse && region.buffer == nullptr && (region.hostBacked || region.writable)) {
@@ -3914,6 +4028,16 @@ void GuestBufferMemory::copyRegion(Region& region, bool addressable) {
         static std::uint64_t uploads = 0, noImport = 0, noImportBytes = 0, misaligned = 0, misalignedBytes = 0, snapshotOnly = 0, snapshotBytes = 0;
         static std::uint64_t logicalBytes = 0, readTotalBytes = 0;
         static std::map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> outside;
+        static std::array<std::pair<std::uint64_t, std::uint64_t>, static_cast<std::size_t>(ImportRejection::Other) + 1> rejections{};
+        struct OutsideAllocation {
+            std::uint64_t size = 0;
+            std::uint64_t bytes = 0;
+            bool readable = false;
+            bool writable = false;
+            bool gpu = false;
+        };
+        static std::map<std::uint64_t, OutsideAllocation> allocations;
+        static std::uint64_t unregisteredBytes = 0;
         std::lock_guard lock(reasonsMutex);
         const auto bufferBytes = region.buffer->Bytes().size();
         logicalBytes += bytes;
@@ -3926,11 +4050,58 @@ void GuestBufferMemory::copyRegion(Region& region, bool addressable) {
             auto& bucket = outside[region.begin >> 28u];
             ++bucket.first;
             bucket.second += bufferBytes;
+            const auto reason = rejection == ImportRejection::None ? ImportRejection::Other : rejection;
+            auto& rejected = rejections[static_cast<std::size_t>(reason)];
+            ++rejected.first;
+            rejected.second += bufferBytes;
+            const auto copiedEnd = region.begin + bufferBytes;
+            for (auto cursor = region.begin; cursor < copiedEnd;) {
+                const auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(cursor, true);
+                if (range == nullptr || range->address >= copiedEnd) {
+                    unregisteredBytes += copiedEnd - cursor;
+                    break;
+                }
+                if (range->address > cursor) {
+                    unregisteredBytes += range->address - cursor;
+                    cursor = range->address;
+                }
+                const auto end = std::min<std::uint64_t>(copiedEnd, range->address + range->bytes);
+                auto& allocation = allocations[range->address];
+                allocation.size = range->bytes;
+                allocation.bytes += end - cursor;
+                allocation.readable = range->readable;
+                allocation.writable = range->writable;
+                allocation.gpu = range->gpu;
+                cursor = end;
+            }
         }
         if (++uploads % 1000 == 0) {
             AgcDriver::ProfilePrint_nid_no_patch("[buffers] %llu completed CPU-copy operations: logical spans %.0f MiB, buffer spans %.0f MiB, bytes read %.0f MiB; %llu snapshots (%.0f MiB), %llu misaligned in imports (%.0f MiB), %llu outside imports (%.0f MiB):", static_cast<unsigned long long>(uploads), logicalBytes / 1048576.0, (snapshotBytes + misalignedBytes + noImportBytes) / 1048576.0, readTotalBytes / 1048576.0, static_cast<unsigned long long>(snapshotOnly), snapshotBytes / 1048576.0, static_cast<unsigned long long>(misaligned), misalignedBytes / 1048576.0, static_cast<unsigned long long>(noImport), noImportBytes / 1048576.0);
             for (const auto& [granule, counts] : outside) AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx0000000:%llu/%.0fMiB", static_cast<unsigned long long>(granule), static_cast<unsigned long long>(counts.first), counts.second / 1048576.0);
             AgcDriver::ProfilePrint_nid_no_patch("\n");
+            static constexpr std::array names{"none", "no registry coverage", "hole in coverage", "protection or GPU-flag mismatch", "window incomplete", "sparse-run policy", "held-import conflict", "budget exhausted", "cached failure", "host alias/protection failure", "Vulkan import failure", "other"};
+            AgcDriver::ProfilePrint_nid_no_patch("[buffers] outside-import reasons (cumulative):");
+            for (std::size_t index = 1; index < rejections.size(); ++index) {
+                AgcDriver::ProfilePrint_nid_no_patch("%s %s %llu/%.0fMiB", index == 1 ? "" : ",", names[index], static_cast<unsigned long long>(rejections[index].first), rejections[index].second / 1048576.0);
+            }
+            AgcDriver::ProfilePrint_nid_no_patch("\n");
+            using AllocationEntry = decltype(allocations)::value_type;
+            std::array<const AllocationEntry*, 4> largest{};
+            for (const auto& entry : allocations) {
+                for (std::size_t index = 0; index < largest.size(); ++index) {
+                    if (largest[index] != nullptr && largest[index]->second.bytes >= entry.second.bytes) continue;
+                    for (auto move = largest.size() - 1; move > index; --move) largest[move] = largest[move - 1];
+                    largest[index] = &entry;
+                    break;
+                }
+            }
+            AgcDriver::ProfilePrint_nid_no_patch("[buffers] outside-import allocations (cumulative, top 4 by bytes):");
+            for (const auto* entry : largest) {
+                if (entry == nullptr) break;
+                const auto& [base, allocation] = *entry;
+                AgcDriver::ProfilePrint_nid_no_patch(" 0x%llx+0x%llx r%d/w%d/gpu%d %.0fMiB;", static_cast<unsigned long long>(base), static_cast<unsigned long long>(allocation.size), static_cast<int>(allocation.readable), static_cast<int>(allocation.writable), static_cast<int>(allocation.gpu), allocation.bytes / 1048576.0);
+            }
+            AgcDriver::ProfilePrint_nid_no_patch(" unregistered %.0fMiB\n", unregisteredBytes / 1048576.0);
         }
     }
 }

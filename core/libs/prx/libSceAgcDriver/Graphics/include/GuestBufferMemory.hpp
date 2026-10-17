@@ -7,8 +7,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -79,6 +82,70 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 // made outside the device lock (a sampled texture's path, a dispatch's pre-sync); the path taken
 // re-checks with HostImportFor when it binds the import.
 bool HostImportCovers(const Context& context, std::uint64_t address, std::size_t bytes);
+enum class ImportRejection : std::uint8_t {
+    None, NoRegistryCoverage, CoverageHole, FlagsMismatch, WindowIncomplete, SparseRunPolicy,
+    HeldImportConflict, BudgetExhausted, CachedFailure, HostAliasProtectionFailure, VulkanImportFailure, Other
+};
+
+inline std::size_t RegisteredRangeIndex(const GuestAllocations::Lease& lease, std::uint64_t address) {
+    const auto found = std::upper_bound(lease.begin(), lease.end(), address, [](std::uint64_t value, const auto& range) { return value < range->address; });
+    if (found == lease.begin()) return lease.size();
+    const auto index = static_cast<std::size_t>(std::prev(found) - lease.begin());
+    const auto& range = *lease[index];
+    return range.readable && address < range.address + range.bytes ? index : lease.size();
+}
+
+inline std::pair<std::size_t, std::size_t> RegisteredRunBounds(const GuestAllocations::Lease& lease, std::size_t index, std::uint64_t address, std::uint64_t window) {
+    const auto& containing = *lease[index];
+    std::uint64_t low = 0;
+    std::uint64_t high = std::numeric_limits<std::uint64_t>::max();
+    if (window != 0) {
+        low = address / window * window;
+        high = low + window;
+        if (containing.address < low || containing.address + containing.bytes > high) {
+            low = containing.address;
+            high = containing.address + containing.bytes;
+        }
+    }
+    const auto continues = [](const auto& before, const auto& after) {
+        return before.address + before.bytes == after.address && before.readable && after.readable && before.writable == after.writable && before.gpu == after.gpu;
+    };
+    auto first = index;
+    while (first > 0 && lease[first - 1]->address >= low && continues(*lease[first - 1], *lease[first])) --first;
+    auto last = index;
+    while (last + 1 < lease.size() && lease[last + 1]->address + lease[last + 1]->bytes <= high && continues(*lease[last], *lease[last + 1])) ++last;
+    if (window != 0 && (lease[first]->address != low || lease[last]->address + lease[last]->bytes != high)) first = last = index;
+    return {first, last};
+}
+
+inline bool RegisteredRunCovers(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased, bool* avoided = nullptr) {
+    if (avoided != nullptr) *avoided = false;
+    const auto index = RegisteredRangeIndex(lease, begin);
+    if (index == lease.size()) return false;
+    if (avoided != nullptr) *avoided = true;
+    if (end <= lease[index]->address + lease[index]->bytes) return true;
+    const auto [first, last] = RegisteredRunBounds(lease, index, begin, window);
+    if (first != last && unaliased.contains(lease[first]->address)) return false;
+    return end <= lease[last]->address + lease[last]->bytes;
+}
+
+inline ImportRejection RegisteredImportRejection(const GuestAllocations::Lease& lease, std::uint64_t begin, std::uint64_t end, std::uint64_t window, const std::set<std::uint64_t>& unaliased) {
+    const auto found = std::upper_bound(lease.begin(), lease.end(), begin, [](std::uint64_t value, const auto& range) { return value < range->address; });
+    if (found == lease.begin() || begin >= (*std::prev(found))->address + (*std::prev(found))->bytes) return ImportRejection::NoRegistryCoverage;
+    auto index = static_cast<std::size_t>(std::prev(found) - lease.begin());
+    if (!lease[index]->readable) return ImportRejection::FlagsMismatch;
+    if (end <= lease[index]->address + lease[index]->bytes) return ImportRejection::None;
+    while (lease[index]->address + lease[index]->bytes < end) {
+        if (index + 1 == lease.size() || lease[index]->address + lease[index]->bytes != lease[index + 1]->address) return ImportRejection::CoverageHole;
+        if (!lease[index + 1]->readable || lease[index]->writable != lease[index + 1]->writable || lease[index]->gpu != lease[index + 1]->gpu) return ImportRejection::FlagsMismatch;
+        ++index;
+    }
+    const auto containing = RegisteredRangeIndex(lease, begin);
+    const auto [first, last] = RegisteredRunBounds(lease, containing, begin, window);
+    if (first != last && unaliased.contains(lease[first]->address) && end > lease[containing]->address + lease[containing]->bytes) return ImportRejection::HostAliasProtectionFailure;
+    return end > lease[last]->address + lease[last]->bytes ? ImportRejection::WindowIncomplete : ImportRejection::None;
+}
+
 struct RegisteredPiece {
     std::uint64_t address;
     std::uint64_t bytes;
@@ -399,7 +466,9 @@ private:
     bool bindSparseMirror(Region& region, const GuestAllocations::Lease& lease);
     // Gives a region a buffer of its own with its bytes (guest memory for host-backed and writable
     // ranges, plus the write-back's reference copy for a range a descriptor writes; else its snapshot).
-    void copyRegion(Region& region, bool addressable);
+    void copyRegion(Region& region, bool addressable, ImportRejection rejection = ImportRejection::None);
+    template<bool Diagnose>
+    void uploadFinish(bool addressable);
     // Whether a region inside a host import that cannot be bound in place is copied by the GPU
     // instead of the CPU (see Region::gpuCopy): live guest bytes, not sparse, at most the size
     // APS5_GPU_COPY_MAX_KIB allows, and APS5_CPU_COPIES unset.
