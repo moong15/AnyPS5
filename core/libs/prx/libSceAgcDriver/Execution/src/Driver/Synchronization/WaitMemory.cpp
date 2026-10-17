@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/MemoryWaitWakeup.hpp"
 #include <charconv>
 #include <cstring>
 #include <stdexcept>
@@ -309,13 +310,17 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
         }
     } epochPoint;
     GuestMemory::CheckRange(reinterpret_cast<const void*>(awaited), awaitedBytes, awaitedBytes);
+    MemoryWaitWakeup wakeup(packet, queue);
+    const bool memoryOnly = MemoryWaitWakeupEnabled();
     if constexpr (Diagnose) diagnostic->Checked();
     if (Pm4::WaitSatisfiedUnchecked(packet)) {
         if constexpr (Diagnose) diagnostic->resolved = "memory at entry";
+        wakeup.FirstPollSatisfied();
         ++outcomes.atEntry;
         return;
     }
-    if (heldAtSubmit) {
+    if (heldAtSubmit && !memoryOnly) {
+        wakeup.HeldAtSubmit();
         if constexpr (Diagnose) diagnostic->resolved = "held at submit";
         return;
     }
@@ -340,7 +345,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
         crossQueueRetry = false;
         return true;
     };
-    if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
+    if (std::uint32_t writer = queue; !requireMemory && (!memoryOnly || Pm4::WaitSatisfiedUnchecked(packet)) && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
         if constexpr (Diagnose) {
             diagnostic->resolved = "label history";
             diagnostic->historyQueue = writer;
@@ -384,6 +389,10 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             if (trace) traceLate("trusted", hit, refusal);
         }
         if (hit->crossQueueUnsubmitted && !serviceCrossQueue(true)) return false;
+        if (memoryOnly && !Pm4::WaitSatisfiedUnchecked(packet)) {
+            behindCompletion = completionsPending();
+            return false;
+        }
         if constexpr (Diagnose) {
             diagnostic->resolved = polling ? "recorder polling" : "recorder label";
             diagnostic->resolvingLabel = hit;
@@ -549,7 +558,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
     std::uint32_t polls = 0;
     StallWatch stall(queue);
     while (!Pm4::WaitSatisfiedUnchecked(packet)) {
-        if (std::uint32_t writer = queue; !requireMemory && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
+        if (std::uint32_t writer = queue; !requireMemory && (!memoryOnly || Pm4::WaitSatisfiedUnchecked(packet)) && storedSince(packet, awaited, awaitedBytes, received, &writer, Diagnose ? &diagnostic->historyStamp : nullptr) && (writer == queue || serviceCrossQueue())) {
             if constexpr (Diagnose) {
                 diagnostic->resolved = "label history";
                 diagnostic->historyQueue = writer;
@@ -564,7 +573,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             if ((polls & 63u) != 0) continue;
             if (std::chrono::steady_clock::now() - spinStart > spinLimit) spinning = false;
         } else if (pauseSpin || polls >= 4000) {
-            PollSleep();
+            wakeup.Wait();
         } else {
             std::this_thread::yield();
         }
@@ -579,7 +588,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             if (settleLock.owns_lock()) {
                 if (const auto localDevice = device.Load(); localDevice != nullptr) {
                     if constexpr (Diagnose) diagnostic->Observe(localDevice);
-                    if (localDevice->RecordedWritesSettled(awaited, awaitedBytes)) {
+                    if (localDevice->RecordedWritesSettled(awaited, awaitedBytes) && (!memoryOnly || Pm4::WaitSatisfiedUnchecked(packet))) {
                         if constexpr (Diagnose) diagnostic->resolved = "recorded writes settled";
                         return;
                     }
