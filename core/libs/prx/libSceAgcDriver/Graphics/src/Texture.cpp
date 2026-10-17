@@ -103,6 +103,9 @@ struct StorageTraffic {
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> writeBacks;
     std::array<std::pair<std::uint64_t, std::uint64_t>, 4> uploads{};
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> uploadReasons;
+    std::map<std::array<std::uint32_t, 7>, std::array<std::uint64_t, 5>> clearShapes;
+    std::array<std::uint64_t, 5> clearSizes{};
+    std::uint64_t clearUnchanged = 0, clearUntracked = 0, clearFirst = 0, clearSkipped = 0, clearSkippedBytes = 0, clearOverflow = 0;
     std::uint64_t directWriteBacks = 0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
@@ -134,6 +137,22 @@ void reportStorageTraffic(StorageTraffic& traffic) {
         std::snprintf(text, sizeof(text), " %llu/%.1f", static_cast<unsigned long long>(totals.first), totals.second / 1048576.0);
         line += " " + reason + text;
     }
+    line += "; clear detail (logical guest MiB, not transferred): size counts <=64KiB/<=1MiB/<=16MiB/<=64MiB/>64MiB";
+    for (const auto count : traffic.clearSizes) line += " " + std::to_string(count);
+    line += "; clear first " + std::to_string(traffic.clearFirst) + ", texel stamps unchanged " + std::to_string(traffic.clearUnchanged) + ", untracked " + std::to_string(traffic.clearUntracked);
+    line += ", skipped " + std::to_string(traffic.clearSkipped) + "/" + std::to_string(traffic.clearSkippedBytes / 1048576.0) + ", shape overflow " + std::to_string(traffic.clearOverflow);
+    std::vector<std::pair<std::array<std::uint32_t, 7>, std::array<std::uint64_t, 5>>> shapes(traffic.clearShapes.begin(), traffic.clearShapes.end());
+    std::sort(shapes.begin(), shapes.end(), [](const auto& a, const auto& b) { return a.second[1] > b.second[1]; });
+    line += "; top clear shapes {format/W/H/depth/layers/mips/tile: count/guestMiB/linearMiB/allocationMiB/keysChanged}";
+    for (std::size_t i = 0; i < std::min<std::size_t>(5, shapes.size()); ++i) {
+        line += " {";
+        for (const auto field : shapes[i].first) line += std::to_string(field) + "/";
+        const auto& totals = shapes[i].second;
+        line += ": " + std::to_string(totals[0]) + "/" + std::to_string(totals[1] / 1048576.0) + "/" + std::to_string(totals[2] / 1048576.0) + "/" + std::to_string(totals[3] / 1048576.0) + "/" + std::to_string(totals[4]) + "}";
+    }
+    traffic.clearShapes.clear();
+    traffic.clearSizes = {};
+    traffic.clearUnchanged = traffic.clearUntracked = traffic.clearFirst = traffic.clearSkipped = traffic.clearSkippedBytes = traffic.clearOverflow = 0;
     const auto take = [](std::atomic<std::uint64_t>& counter) { return static_cast<unsigned long long>(counter.exchange(0, std::memory_order_relaxed)); };
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
@@ -153,6 +172,32 @@ void countStorageUpload(std::size_t path, std::uint64_t bytes) {
     ++reason.first;
     reason.second += bytes;
     reportStorageTraffic(traffic);
+}
+
+void countStorageClear(const GuestTextureResource& descriptor, const SurfaceGeometry& geometry, std::uint64_t allocation, bool first, bool unchanged, bool tracked, bool keysChanged, bool skipped) {
+    if (!LookupOutcomes::Profiled()) return;
+    auto& traffic = Traffic();
+    std::lock_guard lock(traffic.mutex);
+    traffic.clearFirst += first;
+    traffic.clearUnchanged += !first && unchanged;
+    traffic.clearUntracked += !tracked;
+    traffic.clearSkipped += skipped;
+    if (skipped) traffic.clearSkippedBytes += geometry.guestBytes;
+    const auto bytes = geometry.guestBytes;
+    ++traffic.clearSizes[bytes <= 65536 ? 0 : bytes <= 1048576 ? 1 : bytes <= 16777216 ? 2 : bytes <= 67108864 ? 3 : 4];
+    const std::array<std::uint32_t, 7> shape{descriptor.format, descriptor.width, descriptor.height, geometry.imageDepth, geometry.imageLayers, descriptor.mipCount, static_cast<std::uint32_t>(descriptor.tileMode)};
+    auto found = traffic.clearShapes.find(shape);
+    if (found == traffic.clearShapes.end() && traffic.clearShapes.size() >= 128) {
+        ++traffic.clearOverflow;
+        return;
+    }
+    auto& totals = found != traffic.clearShapes.end() ? found->second : traffic.clearShapes[shape];
+    ++totals[0];
+    totals[1] += bytes;
+    totals[2] += geometry.sliceLinearBytes * geometry.layers;
+    totals[3] += allocation;
+    totals[4] += keysChanged;
+    if (skipped) reportStorageTraffic(traffic);
 }
 
 void countStorageWriteBack(std::uint64_t bytes, bool direct) {
@@ -2187,10 +2232,14 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         }
         refreshGeneration();
     };
+    const auto previousKeys = uploadedKeys;
     uploadedKeys = ProvedClearKeys(descriptor, guestBytes, keyProof);
     filledKeys = DccKeys::Uncompressed;
     VkClearColorValue clearValue{};
     if (IsDccClear(uploadedKeys) && ClearColorFor(storageFormat, uploadedKeys, clearValue)) {
+        static const bool clearFastPath = std::getenv("APS5_NO_STORAGE_CLEAR_FAST_PATH") == nullptr;
+        const bool texelsUnchanged = (profile || (clearFastPath && clearContent.has_value())) && generation != 0 && GuestMemory::UnchangedSince(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), generation);
+        const bool texelsTracked = profile && GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
         // A fast-cleared surface is cleared on the GPU; its texel memory is neither read nor filled.
         // The clear is recorded into the open batch like a direct upload (the image kept by it): a
         // batch of its own submitted the recorder's work first and waited for all of it, 25-40 ms
@@ -2203,9 +2252,11 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
             captureGuestBytes(nullptr);
         }
         forgetBorrowed(0, trackedLayers);
+        const bool sameClear = clearContent == std::make_optional(std::pair{uploadedKeys, version}) && texelsUnchanged && !anyLayerPending();
         stampLayers(false);
         static const bool recordClear = std::getenv("APS5_NO_RECORDED_CLEAR") == nullptr;
         auto* recorder = recordClear ? Recorder::Active() : nullptr;
+        const bool skipClear = clearFastPath && recorder != nullptr && sameClear;
         std::unique_ptr<CommandBatch> batch;
         VkCommandBuffer commands = VK_NULL_HANDLE;
         auto timing = Recorder::NoTiming;
@@ -2213,7 +2264,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
             commands = recorder->Commands();
             timing = recorder->BeginGpuTiming(Recorder::CommandClass::DccClear);
             if (auto self = weak_from_this().lock()) recorder->Keep(std::move(self));
-            ++Profile().storageRecordedClears;
+            if (!skipClear) ++Profile().storageRecordedClears;
             Recorder::CountBarriers(Recorder::CommandClass::DccClear, 2);
             if (Recorder::BarrierValidate()) {
                 const std::pair<VkImage, bool> cleared{image, true};
@@ -2227,14 +2278,14 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         VkImageMemoryBarrier toClear{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         toClear.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
         toClear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        toClear.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toClear.oldLayout = skipClear ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
         toClear.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         toClear.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toClear.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toClear.image = image;
         toClear.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, geometry.imageLayers};
         context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toClear);
-        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1, &toClear.subresourceRange);
+        if (!skipClear) context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1, &toClear.subresourceRange);
         VkImageMemoryBarrier toGeneral = toClear;
         toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         toGeneral.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -2242,9 +2293,11 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
         if (batch) batch->SubmitAndWait();
-        else recorder->EndGpuTiming(timing, guestBytes);
-        countStorageUpload(0, guestBytes);
+        else recorder->EndGpuTiming(timing, skipClear ? 0 : guestBytes);
+        countStorageClear(descriptor, geometry, memoryBytes, version == 0, texelsUnchanged, texelsTracked, previousKeys != uploadedKeys, skipClear);
+        if (!skipClear) countStorageUpload(0, guestBytes);
         ++version;
+        clearContent = std::pair{uploadedKeys, version};
         if (profile) LookupOutcomes::Add(LookupOutcomes::UploadClear, start);
         return;
     }
@@ -3126,6 +3179,7 @@ void StorageTexture::setHostWritePending(bool value) {
 }
 
 void StorageTexture::markLayersPending(std::uint32_t first, std::uint32_t count) {
+    clearContent.reset();
     CaptureTrace::Log("image-write image=%llx first=%u count=%u generation=%llu", static_cast<unsigned long long>(descriptor.baseAddress), first, count, static_cast<unsigned long long>(generation));
     static const bool eager = std::getenv("APS5_EAGER_WRITEBACK") != nullptr || std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     std::vector<bool> unsaved(trackedLayers, false);

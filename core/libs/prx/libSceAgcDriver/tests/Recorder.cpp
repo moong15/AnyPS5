@@ -4833,6 +4833,101 @@ void storageUploadLifetimeTests(const Device& device, Recorder& previous, bool f
     std::cout << "Storage upload lifetime" << (failView ? " after view failure" : " after caller release") << ": passed\n";
 }
 
+bool storageClearFastPathTests(const Device& device, Recorder& previous) {
+    constexpr std::uint32_t side = 128;
+    constexpr std::size_t surfaceBytes = side * side * 4;
+    constexpr std::size_t bytes = surfaceBytes + 65536;
+    void* block = AllocateWatched(bytes, 65536);
+    if (block == nullptr) return false;
+    struct Release {
+        void* block;
+        ~Release() { ReleaseWatched(block, bytes); }
+    } release{block};
+    auto* texels = static_cast<std::uint8_t*>(block);
+    auto* keys = texels + surfaceBytes;
+    std::memset(texels, 0x55, surfaceBytes);
+    std::memset(keys, 0, 65536);
+    auto context = device.GetContext();
+    context.hostImportAlignment = 0;
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    GuestTextureResource resource{};
+    resource.baseAddress = reinterpret_cast<std::uint64_t>(block);
+    resource.width = side;
+    resource.height = side;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kLinear;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dccAddress = resource.baseAddress + surfaceBytes;
+    Require(DescribeSurface(resource).guestBytes == surfaceBytes, "clear fixture surface size differs");
+    StorageUploadProbe probe(context, false);
+    Buffer readback(device.GetContext(), surfaceBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    const bool enabled = std::getenv("APS5_NO_STORAGE_CLEAR_FAST_PATH") == nullptr;
+    {
+        Recorder recorder(context);
+        recorder.Activate();
+        auto image = StorageTexture::Create(context, detiler, resource, 0);
+        Require(probe.Clears() == 1, "initial contents were not cleared");
+        const auto refill = [&](std::uint8_t key) {
+            std::memset(keys, key, surfaceBytes / 256);
+            AgcDriver::GuestMemory::MarkWritten(resource.dccAddress, surfaceBytes / 256);
+            Require(StorageTexture::NoteKeysFill(resource.dccAddress, surfaceBytes / 256, key) == 1, "key fill did not find its surface");
+            image->Refresh();
+        };
+        const auto expectImage = [&](std::array<std::uint8_t, 4> expected) {
+            const auto commands = recorder.Commands();
+            recorder.Keep(image);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {side, side, 1};
+            context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+            recorder.Sync();
+            const auto pixels = readback.Bytes();
+            for (std::size_t i = 0; i < pixels.size(); ++i) Require(std::to_integer<std::uint8_t>(pixels[i]) == expected[i % 4], "clear reuse lost image contents");
+        };
+        refill(0);
+        Require(probe.Clears() == (enabled ? 1u : 2u), "identical queued clear did not follow the switch");
+        expectImage({0, 0, 0, 0});
+        const auto settled = probe.Clears();
+        refill(0);
+        Require(probe.Clears() == settled + (enabled ? 0u : 1u), "identical submitted clear did not follow the switch");
+        expectImage({0, 0, 0, 0});
+        texels[0] = 0x73;
+        AgcDriver::GuestMemory::MarkWritten(resource.baseAddress, 1);
+        const auto changed = probe.Clears();
+        refill(0);
+        Require(probe.Clears() == changed + 1, "guest writes did not force the conservative clear path");
+        expectImage({0, 0, 0, 0});
+        Require(texels[0] == 0x73 && texels[surfaceBytes - 1] == 0x55, "a clear changed raw guest texels");
+        const auto different = probe.Clears();
+        refill(0xc0);
+        Require(probe.Clears() == different + 1, "a different DCC value reused stale contents");
+        expectImage({255, 255, 255, 255});
+        const auto commands = recorder.Commands();
+        const VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+        image->MarkDirty();
+        image->WriteBack();
+        std::vector<std::byte> stored(surfaceBytes);
+        AgcDriver::GuestMemory::Read(resource.baseAddress, stored);
+        constexpr std::array<std::uint8_t, 4> expected{255, 0, 0, 255};
+        for (std::size_t i = 0; i < stored.size(); ++i) Require(std::to_integer<std::uint8_t>(stored[i]) == expected[i % 4], "GPU results did not reach guest memory at write-back");
+        const auto written = probe.Clears();
+        refill(0xc0);
+        Require(probe.Clears() == written + 1, "GPU writes did not invalidate clear contents");
+        expectImage({255, 255, 255, 255});
+        recorder.Sync();
+    }
+    previous.Activate();
+    return true;
+}
+
 void refreshProofTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -8284,6 +8379,10 @@ int main(int argc, char** argv) {
         std::cout << "host imports " << (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch ? "are compared" : "stay watched") << '\n';
         Recorder recorder(device.GetContext());
         recorder.Activate();
+        if (argc == 2 && std::string_view(argv[1]) == "--storage-clear-fast-path-only") {
+            return storageClearFastPathTests(device, recorder) ? 0 : 77;
+        }
+
         if (argc == 2 && std::string_view(argv[1]) == "--copied-direct-only") {
             copiedDirectOrderingTests(device, recorder);
             return 0;
