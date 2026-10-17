@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -162,7 +163,13 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
     char reads[64];
     std::snprintf(reads, sizeof(reads), " %llu read ranges, %llu stores held", static_cast<unsigned long long>(heldReadRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadHits.exchange(0, std::memory_order_relaxed)));
     drainText += reads;
-    std::fprintf(stderr, "[draw] pipelined (10 s, depth %zu): %llu commits at %.1f us each on the committer, %llu failed; %llu enqueued behind %.2f on average, waiting %.1f us per draw for room;%s; drains:%s\n", Depth(), static_cast<unsigned long long>(commits), perCommit, static_cast<unsigned long long>(commitErrors), static_cast<unsigned long long>(enqueued), queued, perDraw, reads, drainText.c_str());
+    // The recorder's commit-wait totals are cumulative; this line reports the interval's share.
+    static AgcDriver::Graphics::Recorder::CommitWaitStatistics previousWaits{0, 0.0, 0.0};
+    const auto commitWaits = AgcDriver::Graphics::Recorder::CommitUnlockedWaits();
+    char commitText[96];
+    std::snprintf(commitText, sizeof(commitText), "; commit waits outside the lock %llu / %.1f ms (+ %.1f ms relocking)", static_cast<unsigned long long>(commitWaits.waits - previousWaits.waits), commitWaits.waitedMs - previousWaits.waitedMs, commitWaits.relockMs - previousWaits.relockMs);
+    previousWaits = commitWaits;
+    std::fprintf(stderr, "[draw] pipelined (10 s, depth %zu): %llu commits at %.1f us each on the committer, %llu failed; %llu enqueued behind %.2f on average, waiting %.1f us per draw for room;%s%s; drains:%s\n", Depth(), static_cast<unsigned long long>(commits), perCommit, static_cast<unsigned long long>(commitErrors), static_cast<unsigned long long>(enqueued), queued, perDraw, reads, commitText, drainText.c_str());
     commits = commitNs = commitErrors = enqueued = fullWaitNs = depthSum = 0;
     drains = {};
     drainWaitNs = {};

@@ -215,8 +215,22 @@ public:
     // Under the mutex: finishes (completions, release) the in-flight batches up to `serial`, from the
     // front only; tolerates batches another thread finished meanwhile. Later batches stay in flight.
     void FinishUpTo(std::uint64_t serial);
-    // Submits and waits for every batch, running completions in order.
-    void Sync();
+    // Submits and waits for every batch, running completions in order. `waitUnlocked` is SyncThrough's
+    // flag for a caller that must order after every recorded batch (a draw commit's own sync): the
+    // wait leaves the GpuMutex when the caller's acquisition is the outermost one on this thread.
+    void Sync(bool waitUnlocked = false);
+    // Whether a commit's own sync may wait with the GpuMutex released (APS5_NO_UNLOCKED_COMMIT_WAITS
+    // restores the locked wait); the callers that pass it to Sync/SyncThrough read it from here so
+    // the switch is read in one place.
+    static bool UnlockedCommitWaits();
+    // The commit syncs that waited without the GpuMutex, and their time: what the draw committer's
+    // hold no longer spends on the GPU, for the [recorder] and [draw] pipelined lines.
+    struct CommitWaitStatistics {
+        std::uint64_t waits;
+        double waitedMs;
+        double relockMs;
+    };
+    static CommitWaitStatistics CommitUnlockedWaits();
     void CountSamples();
     bool RecordMeshArguments(VkCommandBuffer commands, VkDeviceAddress record, VkDeviceAddress arguments, std::span<const std::uint32_t, 7> rules);
     std::uint64_t SamplesTotal();
@@ -242,12 +256,13 @@ public:
     // Waits only for the batches up to the newest one that writes the range (submitting the open
     // batch when it is that one); later batches stay in flight. Fences of one queue signal in
     // submission order, so completions still run in order. Debug aid: APS5_NO_SYNC_THROUGH=1 syncs all.
-    // `waitUnlocked` (the flush hook): when the caller's GpuMutex acquisition is the outermost one
-    // on this thread and the device has a timeline, the GPU wait runs WITHOUT the mutex (released
-    // and retaken here; the caller must hold nothing else that orders after it) and only the
-    // completions run under it, so other queues do not queue behind a CPU read's wait. Inside a
-    // batch's completion action no wait is made at all: every batch still in flight was recorded
-    // after the completing one, and its store is that batch's in-order write (see Recorder.cpp).
+    // `waitUnlocked` (the flush hook, a commit's own sync): when the caller's GpuMutex acquisition is
+    // the outermost one on this thread and the device has a timeline, the GPU wait runs WITHOUT the
+    // mutex (released and retaken here; the caller must hold nothing else that orders after it) and
+    // only the completions run under it, so other queues do not queue behind a CPU read's wait.
+    // Inside a batch's completion action no wait is made at all: every batch still in flight was
+    // recorded after the completing one, and its store is that batch's in-order write (see
+    // Recorder.cpp). UnlockedCommitWaits turns the unlocked wait off for a commit's own sync.
     void SyncThrough(std::uint64_t address, std::size_t bytes, bool waitUnlocked = false);
     // Completes batches that already finished; returns whether nothing is in flight.
     bool Reap();
@@ -782,10 +797,11 @@ private:
     // labelling over one, not at Submit).
     void recordKeyStores(bool forWriter);
 
-    // The unlocked wait of SyncThrough(waitUnlocked): the target batch (submitting the open one when
-    // it is the target), the timeline wait with the mutex released, then the completions up to it.
-    // Returns false when the locked path must run instead (no timeline, nested acquisition, off).
-    bool syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int source, const void* site);
+    // The unlocked wait of SyncThrough(waitUnlocked) and Sync(waitUnlocked): the target batch (for a
+    // commit's own sync every submitted one, submitting the open batch when there is one), the
+    // timeline wait with the mutex released, then the completions up to it. Returns false when the
+    // locked path must run instead (no timeline, nested acquisition, off).
+    bool syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int source, const void* site, bool commit = false);
     void waitFence(Batch& batch, int source);
     // `source` is the CountSync source the wait is attributed to.
     void finish(std::unique_ptr<Batch> batch, bool wait, int source, bool releaseNow = false);
