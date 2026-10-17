@@ -460,6 +460,29 @@ target_link_libraries(agc_driver_tests PRIVATE
 set_target_properties(agc_driver_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_tests)
 
+add_test_executable(agc_driver_long_memory_wait_tests EXCLUDE_FROM_ALL tests/LongMemoryWait.cpp)
+target_include_directories(agc_driver_long_memory_wait_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_driver_long_memory_wait_tests PRIVATE libSceAgcDriver libkernel libc)
+set_target_properties(agc_driver_long_memory_wait_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_long_memory_wait_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_driver_long_memory_wait_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_driver_long_memory_wait COMMAND agc_driver_long_memory_wait_tests)
+    add_test(NAME agc_driver_long_memory_wait_64 COMMAND agc_driver_long_memory_wait_tests --wide)
+    add_test(NAME agc_driver_long_memory_wait_disabled COMMAND agc_driver_long_memory_wait_tests --disabled)
+    set_tests_properties(agc_driver_long_memory_wait agc_driver_long_memory_wait_64 PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_TRACE_LONG_WAITS=10;APS5_GPU_WAIT_TIMEOUT_MS=10000"
+            TIMEOUT 10 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(agc_driver_long_memory_wait_disabled PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_GPU_WAIT_TIMEOUT_MS=10000"
+            ENVIRONMENT_MODIFICATION "APS5_TRACE_LONG_WAITS=unset:;APS5_PROFILE_DRAW=unset:"
+            TIMEOUT 10 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_property(TEST agc_driver_long_memory_wait agc_driver_long_memory_wait_64 agc_driver_long_memory_wait_disabled APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_driver_wait_shutdown_tests EXCLUDE_FROM_ALL tests/WaitShutdown.cpp)
 target_include_directories(agc_driver_wait_shutdown_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_driver_wait_shutdown_tests PRIVATE libSceAgcDriver libkernel libc)

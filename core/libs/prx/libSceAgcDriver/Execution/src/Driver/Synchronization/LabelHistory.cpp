@@ -18,7 +18,7 @@ void Driver::noteLabelStore(std::uint64_t address, std::span<const std::byte> by
     }
 }
 
-bool Driver::storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received, std::uint32_t* writer) {
+bool Driver::storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received, std::uint32_t* writer, std::uint64_t* stamp) {
     std::lock_guard lock(labelStoresMutex);
     const auto low = labelStores.find(address);
     if (low == labelStores.end()) return false;
@@ -34,6 +34,7 @@ bool Driver::storedSince(std::span<const std::uint32_t> packet, std::uint64_t ad
         }
         if (Pm4::WaitComparesValue(packet, value)) {
             if (writer != nullptr) *writer = store.queue;
+            if (stamp != nullptr) *stamp = store.stamp;
             return true;
         }
     }

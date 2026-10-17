@@ -1237,6 +1237,45 @@ std::optional<Recorder::LabelHit> Recorder::LookupLabel(std::uint64_t address, s
     return labelTableOwner->lookupLabel(address, bytes, afterStamp, refusal);
 }
 
+std::vector<Recorder::WaitProducer> Recorder::DescribeWaitLabels(std::uint64_t address, std::size_t bytes) {
+    std::vector<WaitProducer> result;
+    std::lock_guard tableLock(labelTableMutex);
+    if (labelTableOwner == nullptr) return result;
+    for (const auto* table : {&labelTableOwner->labels, &labelTableOwner->queuedLabels}) {
+        for (std::size_t offset = 0; offset < bytes; offset += 4) {
+            const auto found = table->find(address + offset);
+            if (found == table->end()) continue;
+            const auto& entry = found->second;
+            if (std::any_of(result.begin(), result.end(), [&](const auto& item) { return item.queue == entry.queue && item.stamp == entry.stamp; })) continue;
+            const auto* batch = entry.batch;
+            const bool submitted = batch != nullptr && batch->diagnosticSubmitted.load(std::memory_order_acquire);
+            const bool signaled = submitted && labelTableOwner->fenceStatus(batch->fence) == VK_SUCCESS;
+            result.push_back({entry.queue, batch != nullptr ? batch->recordingSerial : 0, entry.stamp, submitted, signaled, entry.behindCompletion});
+        }
+    }
+    return result;
+}
+
+std::optional<Recorder::WaitProducer> Recorder::DescribeWaitWrite(std::uint64_t address, std::size_t bytes) const {
+    const auto describe = [&](const Batch& batch, bool submitted) -> std::optional<WaitProducer> {
+        for (std::size_t index = batch.writes.size(); index != 0;) {
+            --index;
+            const auto& range = batch.writes[index];
+            if (address >= range.second || range.first >= address + bytes) continue;
+            const auto queue = index < batch.writeQueues.size() ? batch.writeQueues[index] : 0xffffffffu;
+            return WaitProducer{queue, batch.recordingSerial, batch.writeNotes[index], submitted, submitted && fenceStatus(batch.fence) == VK_SUCCESS, batch.writeBackCompletionCount != 0 || batch.completionLabelCount != 0};
+        }
+        return std::nullopt;
+    };
+    if (open != nullptr) {
+        if (const auto hit = describe(*open, false)) return hit;
+    }
+    for (auto it = inFlight.rbegin(); it != inFlight.rend(); ++it) {
+        if (const auto hit = describe(**it, true)) return hit;
+    }
+    return std::nullopt;
+}
+
 bool Recorder::WideLabelIn(std::uint64_t address, std::size_t bytes) {
     std::lock_guard tableLock(labelTableMutex);
     return labelTableOwner != nullptr && labelTableOwner->wideLabelInLocked(address, bytes);
@@ -1539,6 +1578,8 @@ void Recorder::ensureOpen() {
             throw;
         }
         batch->queue = GuestMemory::GpuLockThreadTag();
+        static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
+        if (traceLongWaits) batch->recordingSerial = submissions + 1;
         if (countingSamples && !segmentMode()) beginSamples(*batch);
         dropStaleHoldKept();
         batch->kept.insert(batch->kept.end(), holdKept.begin(), holdKept.end());
@@ -2722,6 +2763,8 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     open->writes.emplace_back(address, end);
     open->writeNotes.push_back(++writeNoteCount);
     open->writeValues.push_back(static_cast<std::int16_t>(value));
+    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
+    if (traceLongWaits) open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, end);
     // A poller waiting on this range learns that the open batch may now hold its producer.
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
@@ -2749,6 +2792,8 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     batch.writes.emplace_back(address, address + bytes);
     batch.writeNotes.push_back(++writeNoteCount);
     batch.writeValues.push_back(-1);
+    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
+    if (traceLongWaits) batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, address + bytes);
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
     if (!SnapshotCovers(address, address + bytes)) {
@@ -3373,6 +3418,8 @@ void Recorder::Submit() {
     Check(result, "vkQueueSubmit recorder");
     batch->submitted = true;
     batch->serial = ++submissions;
+    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
+    if (traceLongWaits) batch->diagnosticSubmitted.store(true, std::memory_order_release);
     batch->submittedAt = std::chrono::steady_clock::now();
     if (DrawProfiled()) {
         const auto us = std::chrono::duration<double, std::micro>(batch->submittedAt - submitStart).count();

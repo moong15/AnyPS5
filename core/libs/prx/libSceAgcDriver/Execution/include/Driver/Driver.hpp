@@ -42,6 +42,8 @@
 
 namespace AgcDriver::DriverDetail {
 
+struct LongMemoryWait;
+
 class Driver {
 public:
     static Driver& Get();
@@ -181,7 +183,7 @@ private:
     static PendingDrawPhases& pendingDrawPhases();
     void addDrawPhases(const std::array<double, DrawDriverPhaseCount>& ms, bool drawn, std::uint64_t captures);
     void noteLabelStore(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue);
-    bool storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received, std::uint32_t* writer = nullptr);
+    bool storedSince(std::span<const std::uint32_t> packet, std::uint64_t address, std::size_t bytes, std::uint64_t received, std::uint32_t* writer = nullptr, std::uint64_t* stamp = nullptr);
     static void traceLabel(std::span<const std::uint32_t> packet, std::uint32_t queue);
     static std::array<WriteRecord, 16384>& writeHistory();
     static std::size_t& writeCursor();
@@ -258,14 +260,18 @@ private:
     static bool pollReapAll();
     static bool pollTryEach();
     static bool traceLateLabels();
-    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit, bool requireMemory = false);
+    void waitMemory(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit, bool requireMemory = false, std::uint64_t serial = 0, std::size_t cursor = 0);
+    template<bool Diagnose>
+    void waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t queue, const PacketHistory& context, std::uint64_t received, bool heldAtSubmit, bool requireMemory, std::uint64_t serial, std::size_t cursor, LongMemoryWait* diagnostic);
     struct PendingWait {
         std::array<std::uint32_t, 8> words;
         std::size_t count;
         std::uint64_t received;
+        std::uint64_t serial;
+        std::size_t cursor;
     };
     static std::vector<PendingWait>& pendingWaits();
-    static void notePendingWait(std::span<const std::uint32_t> packet, std::uint32_t queue, std::uint64_t received);
+    static void notePendingWait(std::span<const std::uint32_t> packet, std::uint32_t queue, std::uint64_t received, std::uint64_t serial, std::size_t cursor);
     void landPendingWaits(std::uint32_t queue);
     struct ResolvedDispatch {
         std::uint64_t address = 0, key = 0, indirectArguments = 0;
