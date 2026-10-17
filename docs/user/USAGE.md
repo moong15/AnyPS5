@@ -157,6 +157,17 @@ Games that open the console's system font sets (`sceFontOpenFontSet`) need font 
 
 Games ask for the console's language with `sceSystemServiceParamGetInt` and show their text in it when they have it. It is English (United States) unless `ANYPS5_LANGUAGE` is set to another console language number: 0 Japanese, 1 English (United States), 2 French, 3 Spanish, 4 German, 5 Italian, 6 Dutch, 7 Portuguese (Portugal), 8 Russian, 9 Korean, 10 Chinese (Traditional), 11 Chinese (Simplified), 12 Finnish, 13 Swedish, 14 Danish, 15 Norwegian, 16 Polish, 17 Portuguese (Brazil), 18 English (United Kingdom), 19 Turkish, 20 Spanish (Latin America), 21 Arabic, 22 French (Canada), 23 Czech, 24 Hungarian, 25 Greek, 26 Romanian, 27 Thai, 28 Vietnamese, 29 Indonesian, 30 Ukrainian. For example, `ANYPS5_LANGUAGE=21` selects Arabic. An empty value is the same as an unset one; any other value stops the game at its first language query with an error that names the variable.
 
+### PlayGo dumps without metadata
+
+When a dump has neither `sce_sys/playgo-chunk.dat` nor `sce_sys/playgo-scenario.json`, AnyPS5 cannot tell which nonzero PlayGo chunk IDs exist. Requests for those IDs stop with an error by default. Set `APS5_PLAYGO_UNLISTED_CHUNKS` to choose an answer for that dump:
+
+| Value | Answer for an unlisted chunk ID | Observed title that needs it |
+|-------|---------------------------------|------------------------------|
+| `installed` | Report it as installed (`LOCAL_FAST`). | High on Life (PPSA15388) needs this to load its saves. |
+| `absent` | Return `SCE_PLAYGO_ERROR_BAD_CHUNK_ID`. | Sifu (PPSA03001) uses this result to end its chunk-ID search. |
+
+Leave the variable unset to keep the explicit error. Any other value also stops with an error. Dumps that include PlayGo metadata are unaffected. These title-specific results come from emulator runs and have not been verified against a console.
+
 ### GPU selection
 
 The game runs on the first Vulkan 1.1 device with graphics and compute queues and swapchain presentation, preferring a discrete GPU over an integrated one. Set `ANYPS5_GPU` to a part of a device name, compared without regard to case, to run on another device; the names are printed at start-up in the `Physical device candidate` lines. When no usable device contains the text, the start fails and the error lists the device names.
