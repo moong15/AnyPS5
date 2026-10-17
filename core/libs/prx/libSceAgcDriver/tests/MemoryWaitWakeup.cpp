@@ -167,11 +167,6 @@ public:
         setResolution = ntdll ? reinterpret_cast<SetResolution>(reinterpret_cast<void*>(GetProcAddress(ntdll, "NtSetTimerResolution"))) : nullptr;
         ULONG current = 0;
         Require(setResolution != nullptr && setResolution(5000, TRUE, &current) >= 0, "failed to raise timer resolution to the runtime setting");
-        PROCESS_POWER_THROTTLING_STATE throttling{};
-        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
-        throttling.StateMask = 0;
-        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
     }
     ~TimerResolution() {
         ULONG current = 0;
