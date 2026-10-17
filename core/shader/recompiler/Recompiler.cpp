@@ -49,12 +49,126 @@
 #include "SpirvBackend/SpirvMemory/SpirvInputOutput.hpp"
 #include "Translation/include/Translation/InstructionTranslator.hpp"
 #include "Translation/include/Translation/ShaderInputInfoBuilder.hpp"
+#include <charconv>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <exception>
 #include <stdexcept>
 #include <string>
 #include <ControlFlow/RequestSerializer.hpp>
 
 namespace ShaderRecompiler {
+
+bool ProgramDiagnosticsEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_PROGRAM_DIAGNOSTICS") == nullptr;
+    return enabled;
+}
+
+bool DumpProgramSelected(std::uint64_t address) {
+    if (!ProgramDiagnosticsEnabled()) return false;
+    static const std::uint64_t target = [] {
+        const char* text = std::getenv("APS5_DUMP_PROGRAM");
+        if (text == nullptr || *text == '\0') return std::uint64_t{0};
+        std::string_view valueText(text);
+        if (valueText.starts_with("0x") || valueText.starts_with("0X")) valueText.remove_prefix(2);
+        std::uint64_t value = 0;
+        const auto parsed = std::from_chars(valueText.data(), valueText.data() + valueText.size(), value, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != valueText.data() + valueText.size() || value == 0) throw std::runtime_error("APS5_DUMP_PROGRAM must be a nonzero hexadecimal guest address");
+        return value;
+    }();
+    return ProgramDiagnosticsEnabled() && target != 0 && target == address;
+}
+
+namespace {
+
+struct ProgramDiagnostic {
+    PipelineIdentity identity;
+    PipelineIdentity dispatchedIdentity;
+    std::string summary;
+    std::string operation = "operation=unobserved";
+    std::array<std::uint32_t, 3> guestWorkgroup{};
+    std::string dumpStem;
+    std::vector<PipelineIdentity> dumped;
+    bool registrationLayout = true;
+    std::map<PipelineIdentity, std::pair<std::string, std::array<std::uint32_t, 3>>> variants;
+};
+
+std::mutex programDiagnosticsMutex;
+std::map<std::uint64_t, ProgramDiagnostic> programDiagnostics;
+
+std::string programStem(std::uint64_t address, PipelineIdentity identity) {
+    std::ostringstream text;
+    static const std::string directory = [] {
+        const char* value = std::getenv("APS5_DUMP_PROGRAM_DIR");
+        return value != nullptr && *value != '\0' ? std::string(value) : std::string("hot-shaders");
+    }();
+    text << std::hex << address << '-' << identity.high << '-' << identity.low;
+    return (std::filesystem::path(directory) / text.str()).string();
+}
+
+void writeProgramFile(const std::string& path, const void* data, std::size_t bytes) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    file.exceptions(std::ios::badbit | std::ios::failbit);
+    file.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    file.close();
+}
+
+}
+
+std::string ProgramProfile(std::uint64_t address) {
+    if (!ProgramDiagnosticsEnabled()) return {};
+    std::lock_guard lock(programDiagnosticsMutex);
+    const auto found = programDiagnostics.find(address);
+    return found == programDiagnostics.end() ? "metadata=unavailable" : "last-observed " + found->second.operation + " " + found->second.summary;
+}
+
+void SetProgramDispatch(std::uint64_t address, const RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t requiredSubgroupSize, std::uint64_t arguments) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!ProgramDiagnosticsEnabled() || (!profile && !DumpProgramSelected(address))) return;
+    std::lock_guard lock(programDiagnosticsMutex);
+    auto& entry = programDiagnostics[address];
+    const auto identity = shader.Identity();
+    if (const auto found = entry.variants.find(identity); found != entry.variants.end()) {
+        entry.summary = found->second.first;
+        entry.guestWorkgroup = found->second.second;
+    } else {
+        entry.summary = "metadata=unavailable-for-bound-module";
+        entry.guestWorkgroup = {};
+    }
+    entry.dumpStem = std::ranges::find(entry.dumped, identity) != entry.dumped.end() ? programStem(address, identity) : std::string{};
+    std::ostringstream text;
+    text << "operation=dispatch groups=";
+    if (arguments != 0) text << "GPU-indirect@0x" << std::hex << arguments << std::dec << " threads=unknown";
+    else {
+        text << x << 'x' << y << 'x' << z << " guest-threads=";
+        if (std::ranges::find(entry.guestWorkgroup, 0u) != entry.guestWorkgroup.end()) text << "unknown";
+        else {
+            long double threads = static_cast<long double>(x) * y * z;
+            for (const auto size : entry.guestWorkgroup) threads *= size;
+            text << std::fixed << std::setprecision(0) << threads << "(nominal)";
+        }
+    }
+    text << " required-subgroup=" << requiredSubgroupSize;
+    const auto operation = text.str();
+    if (DumpProgramSelected(address) && !entry.dumpStem.empty() && (operation != entry.operation || entry.dispatchedIdentity != identity)) {
+        std::ofstream file(entry.dumpStem + ".dispatch.txt", std::ios::app);
+        file.exceptions(std::ios::badbit | std::ios::failbit);
+        file << operation << '\n';
+        file.close();
+        std::fprintf(stderr, "[program] 0x%llx %s\n", static_cast<unsigned long long>(address), operation.c_str());
+    }
+    entry.operation = operation;
+    entry.dispatchedIdentity = identity;
+}
+
+void SetProgramCopy(std::uint64_t address, std::uint64_t bytes) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!ProgramDiagnosticsEnabled() || (!profile && !DumpProgramSelected(address))) return;
+    std::lock_guard lock(programDiagnosticsMutex);
+    programDiagnostics[address].operation = "operation=copy bytes=" + std::to_string(bytes) + " groups=n/a threads=n/a workgroup=n/a required-subgroup=n/a";
+}
 
 namespace {
 
@@ -929,6 +1043,117 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
     return entry->module;
 }
 
+void diagnoseProgram(const CompiledVariant& variant, const RecompileRequest& request, const RecompileResult& result, bool registrationDefaults = false) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    const auto address = request.shader.codeAddress;
+    const bool dump = DumpProgramSelected(address);
+    if (!ProgramDiagnosticsEnabled() || (!profile && !dump)) return;
+    std::lock_guard lock(programDiagnosticsMutex);
+    auto& entry = programDiagnostics[address];
+    const auto identity = result.Identity();
+    const bool upgrading = entry.registrationLayout && !registrationDefaults;
+    if (entry.identity == identity && !entry.summary.empty() && !upgrading) return;
+    entry.registrationLayout = registrationDefaults;
+    entry.identity = identity;
+    entry.guestWorkgroup = request.context.compute ? request.context.compute->numThreads : std::array<std::uint32_t, 3>{};
+    std::map<std::uint32_t, std::uint32_t> opcodes;
+    std::map<std::uint32_t, std::uint32_t> decorations;
+    std::map<std::uint32_t, std::uint32_t> variables;
+    std::array<std::uint32_t, 3> local{};
+    std::uint32_t int64 = 0, float64 = 0;
+    std::ostringstream names;
+    for (std::size_t offset = 5; offset < result.spirv.size();) {
+        const auto count = result.spirv[offset] >> 16u;
+        const auto opcode = result.spirv[offset] & 0xffffu;
+        if (count == 0 || count > result.spirv.size() - offset) throw std::runtime_error("program diagnostic encountered malformed SPIR-V");
+        const auto* words = result.spirv.data() + offset;
+        ++opcodes[opcode];
+        if (opcode == spv::OpDecorate && count >= 3) ++decorations[words[2]];
+        if (opcode == spv::OpMemberDecorate && count >= 4) ++decorations[words[3]];
+        if (opcode == spv::OpVariable && count >= 4) ++variables[words[3]];
+        if (opcode == spv::OpTypeInt && count >= 4 && words[2] == 64) ++int64;
+        if (opcode == spv::OpTypeFloat && count >= 3 && words[2] == 64) ++float64;
+        if (opcode == spv::OpExecutionMode && count >= 6 && words[2] == spv::ExecutionModeLocalSize) local = {words[3], words[4], words[5]};
+        if (opcode == spv::OpName && count >= 3) {
+            names << words[1] << ' ';
+            const auto* bytes = reinterpret_cast<const char*>(words + 2);
+            for (std::size_t i = 0; i < (count - 2u) * sizeof(std::uint32_t) && bytes[i] != '\0'; ++i) names << bytes[i];
+            names << '\n';
+        }
+        offset += count;
+    }
+    std::uint32_t conversions = 0;
+    for (const auto& modes : variant.info.info.runtimeImageModes) {
+        for (const auto& mode : modes) conversions += mode.conversionFormat != IrBufferFormat::Invalid;
+    }
+    std::uint32_t atomics = 0;
+    for (auto opcode = static_cast<std::uint32_t>(spv::OpAtomicLoad); opcode <= static_cast<std::uint32_t>(spv::OpAtomicXor); ++opcode) atomics += opcodes[opcode];
+    std::ostringstream summary;
+    summary << "stage=" << static_cast<unsigned>(request.shader.stage)
+            << " module=" << std::hex << identity.high << '-' << identity.low << std::dec
+            << " guest-wg=" << entry.guestWorkgroup[0] << 'x' << entry.guestWorkgroup[1] << 'x' << entry.guestWorkgroup[2]
+            << " host-wg=" << local[0] << 'x' << local[1] << 'x' << local[2]
+            << " guest-wave=" << request.context.waveSize << " host-subgroup=" << result.hostSubgroupSize
+            << " wave64-host32=" << (request.context.waveSize == 64u && result.hostSubgroupSize == 32u)
+            << " full-subgroups=" << result.fullSubgroups << " device-LDS-dwords=" << result.workgroupMemoryDwords
+            << " guest-scratch-dwords=" << variant.info.scratchDwords << " bindings=" << result.bindings.size()
+            << " SPIRV-sites(nonuniform=" << decorations[spv::DecorationNonUniform]
+            << " loops=" << opcodes[spv::OpLoopMerge] << " control-barriers=" << opcodes[spv::OpControlBarrier]
+            << " memory-barriers=" << opcodes[spv::OpMemoryBarrier] << " int64-types=" << int64 << " float64-types=" << float64
+            << " atomics=" << atomics << " CAS=" << opcodes[spv::OpAtomicCompareExchange]
+            << " function-vars=" << variables[spv::StorageClassFunction] << " private-vars=" << variables[spv::StorageClassPrivate]
+            << " workgroup-vars=" << variables[spv::StorageClassWorkgroup] << " coherent=" << decorations[spv::DecorationCoherent]
+            << " restrict=" << decorations[spv::DecorationRestrict] << " nonwritable=" << decorations[spv::DecorationNonWritable]
+            << " nonreadable=" << decorations[spv::DecorationNonReadable] << ") conversion-modes=" << conversions;
+    entry.summary = summary.str();
+    entry.variants[identity] = {entry.summary, entry.guestWorkgroup};
+    if (!dump) return;
+    entry.dumpStem = programStem(address, identity);
+    const bool dumped = std::ranges::find(entry.dumped, identity) != entry.dumped.end();
+    if (dumped && !upgrading) return;
+    std::filesystem::create_directories(std::filesystem::path(entry.dumpStem).parent_path());
+    const auto writeText = [&](const char* suffix, const std::string& text) { writeProgramFile(entry.dumpStem + suffix, text.data(), text.size()); };
+    writeProgramFile(entry.dumpStem + ".isa.bin", request.shader.code.data(), request.shader.code.size_bytes());
+    writeProgramFile(entry.dumpStem + ".spv", result.spirv.data(), result.spirv.size() * sizeof(std::uint32_t));
+    writeText(".request.txt", RequestSerializer{}.Serialize(request));
+    std::ostringstream resources;
+    resources << entry.summary << '\n';
+    resources << (registrationDefaults ? "Registration layout with placeholder descriptor words.\n" : "First materialized binding sample.\n");
+    resources << "Enum values are from Recompiler.hpp.\n";
+    resources << "Kinds: 0 uniform-buffer, 1 storage-buffer, 2 uniform-texel-buffer, 3 storage-texel-buffer, 4 sampled-image, 5 storage-image, 6 sampler.\n";
+    resources << "Stage: 0 compute, 1 vertex, 2 tess-control, 3 tess-eval, 4 geometry, 5 fragment, 6 local, 7 mesh.\n";
+    for (const auto& binding : result.bindings) {
+        resources << "set=" << binding.descriptorSet << " binding=" << binding.binding << " kind=" << static_cast<unsigned>(binding.kind)
+                  << " role=" << static_cast<unsigned>(binding.role) << " count=" << binding.count << " readOnly=" << binding.readOnly << " words=";
+        for (const auto word : binding.guestDescriptor) resources << std::hex << word << ' ';
+        resources << std::dec << '\n';
+        const auto flags = [&](const char* label, const std::vector<bool>& values) {
+            resources << label << '=';
+            for (const bool value : values) resources << (value ? '1' : '0');
+            resources << '\n';
+        };
+        flags("bufferRead", binding.bufferRead);
+        flags("bufferWritten", binding.bufferWritten);
+        flags("bufferAtomic", binding.bufferAtomic);
+        flags("imageWritten", binding.imageWritten);
+        flags("imageAtomic", binding.imageAtomic);
+        flags("imageAtomic64", binding.imageAtomic64);
+    }
+    if (result.workgroupMemoryDwords != 0) resources << "implicit set=" << WorkgroupMemoryDescriptorSet << " binding=0 kind=storage-buffer count=1 role=device-LDS\n";
+    resources << "specialization id=value\n";
+    for (const auto& constant : result.specialization) resources << constant.id << '=' << constant.value << '\n';
+    resources << "push-bytes=" << result.pushConstants.size() << "\nSPIR-V opcode=count\n";
+    for (const auto& [opcode, count] : opcodes) if (count != 0) resources << opcode << '=' << count << '\n';
+    resources << "SPIR-V names\n" << names.str();
+    writeText(".resources.txt", resources.str());
+    auto program = PrepareResourceProgram(request);
+    prepareInterface(request, program);
+    writeText(".ir.txt", ProgramToString(program));
+    writeText(".dispatch.txt", "Awaiting dispatch observation.\n");
+    if (!dumped) entry.dumped.push_back(identity);
+    std::fprintf(stderr, "[program-dump] 0x%llx %s %s\n", static_cast<unsigned long long>(address), entry.dumpStem.c_str(), entry.summary.c_str());
+}
+
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool registrationDefaults = false) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -1106,6 +1331,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         result.imageTableShader = snapshot.tables.shader;
         result.imageTableFaults = tables.faults;
     }
+    diagnoseProgram(variant, request, result, registrationDefaults);
     return result;
 }
 
@@ -1438,7 +1664,9 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
             reportResultMemo();
-            return patchMemoUserData(*variant, found->second->result, snapshot);
+            auto result = patchMemoUserData(*variant, found->second->result, snapshot);
+            diagnoseProgram(*variant, request, *result);
+            return result;
         }
         if (found != source.memoIndex.end()) {
             counters.collisions.fetch_add(1, std::memory_order_relaxed);
