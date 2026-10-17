@@ -2763,8 +2763,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     open->writes.emplace_back(address, end);
     open->writeNotes.push_back(++writeNoteCount);
     open->writeValues.push_back(static_cast<std::int16_t>(value));
-    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
-    if (traceLongWaits) open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
+    open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, end);
     // A poller waiting on this range learns that the open batch may now hold its producer.
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
@@ -2792,8 +2791,7 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     batch.writes.emplace_back(address, address + bytes);
     batch.writeNotes.push_back(++writeNoteCount);
     batch.writeValues.push_back(-1);
-    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
-    if (traceLongWaits) batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
+    batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
     if (!ownLabel) markOverwritten(address, address + bytes);
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
     if (!SnapshotCovers(address, address + bytes)) {
@@ -2911,6 +2909,16 @@ bool Recorder::PendingWriteOverlaps(std::uint64_t address, std::size_t bytes) co
 
 bool Recorder::OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const {
     return bytes != 0 && open != nullptr && overlaps(*open, address, address + bytes);
+}
+
+bool Recorder::OpenCrossQueueWriteOverlaps(std::uint64_t address, std::size_t bytes, std::uint32_t queue) const {
+    if (bytes == 0 || open == nullptr) return false;
+    for (std::size_t index = 0; index < open->writes.size(); ++index) {
+        const auto& range = open->writes[index];
+        const auto writer = open->writeQueues[index];
+        if (writer != queue && writer != 0xffffffffu && address < range.second && range.first < address + bytes) return true;
+    }
+    return false;
 }
 
 bool Recorder::signaled(const Batch& batch) const {
@@ -3242,6 +3250,7 @@ std::optional<Recorder::LabelHit> Recorder::lookupLabel(std::uint64_t address, s
             hit.late = true;
             hit.generation = std::min(hit.generation, entry->generation);
         }
+        if (entry->queue != tag && entry->batch != nullptr && !entry->batch->diagnosticSubmitted.load(std::memory_order_acquire)) hit.crossQueueUnsubmitted = true;
         hit.value |= static_cast<std::uint64_t>(entry->value) << (offset * 8u);
         if (offset == 0) {
             hit.queue = entry->queue;
@@ -3418,8 +3427,7 @@ void Recorder::Submit() {
     Check(result, "vkQueueSubmit recorder");
     batch->submitted = true;
     batch->serial = ++submissions;
-    static const bool traceLongWaits = std::getenv("APS5_TRACE_LONG_WAITS") != nullptr;
-    if (traceLongWaits) batch->diagnosticSubmitted.store(true, std::memory_order_release);
+    batch->diagnosticSubmitted.store(true, std::memory_order_release);
     batch->submittedAt = std::chrono::steady_clock::now();
     if (DrawProfiled()) {
         const auto us = std::chrono::duration<double, std::micro>(batch->submittedAt - submitStart).count();

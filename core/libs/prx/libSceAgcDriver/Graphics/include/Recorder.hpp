@@ -187,6 +187,7 @@ public:
     static ReadStatistics ReadCounts();
     // Whether the OPEN (unsubmitted) batch writes the range: a wait on such a range must submit it.
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
+    bool OpenCrossQueueWriteOverlaps(std::uint64_t address, std::size_t bytes, std::uint32_t queue) const;
     // What SyncThrough(address, bytes) would wait for, for the [hooksync] attribution: the newest
     // batch whose noted range overlaps the access (the open batch counts first, with the serial it
     // will get), whether that batch's fence has already signaled (its GPU work is done, so the
@@ -315,6 +316,7 @@ public:
         // Taken under the late rule: `generation` is the oldest group generation of the dwords.
         bool late;
         std::uint64_t generation;
+        bool crossQueueUnsubmitted = false;
     };
     // Why a lookup refused a late candidate (an entry with stamp <= afterStamp), for the trace.
     // BehindCompletion replaces the other reasons when the refused entry's value reaches memory
