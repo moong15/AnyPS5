@@ -197,7 +197,7 @@ std::uint32_t GpuLockThreadTag();
 // as acquisitions; the hold they start is timed under "try". Holds are timed per site as well (the
 // outermost acquisition of a thread until its unlock; APS5_NO_HOLD_PROFILE=1 turns that off), so
 // the line shows who holds the mutex, not only who waits for it.
-enum class GpuLockSite : std::uint8_t { Other = 0, Dispatch, Indirect, Draw, Hook, Wait, Label, Flush, Present, Fill, Copy, End, Try, Count };
+enum class GpuLockSite : std::uint8_t { Other = 0, Dispatch, Indirect, Draw, Hook, Wait, Label, Flush, Present, Fill, Copy, End, Try, Import, Shader, Presync, Writeback, HostWrite, Lifecycle, Count };
 void TagGpuLockSite(GpuLockSite site);
 // A GPU wait (a fence or timeline wait that found its work unfinished) made while the calling
 // thread holds GpuMutex: counted on the thread's [lock] line as 'locked GPU waits' (APS5_PROFILE_DRAW).

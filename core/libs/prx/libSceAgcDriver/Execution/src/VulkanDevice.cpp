@@ -4181,6 +4181,7 @@ std::uint64_t VulkanDevice::presync(std::span<const std::pair<std::uint64_t, std
     if (overlaps) {
         // No reap here (SubmitAndEpoch's would run completions, which a compute worker must not do
         // on queue 0's behalf, see SubmitRecorded): the dispatch reaps after the wait.
+        GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Presync);
         std::lock_guard lock(GuestMemory::GpuMutex());
         if (state->recorder) {
             bool open = false;

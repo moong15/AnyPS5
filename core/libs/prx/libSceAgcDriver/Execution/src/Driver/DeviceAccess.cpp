@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/DeviceAccess.hpp"
 
+#include <cstdlib>
+
 namespace AgcDriver::DriverDetail {
 
 std::shared_ptr<VulkanDevice> DevicePointer::Load() const { return pointer.load(std::memory_order_acquire); }
@@ -19,6 +21,14 @@ VulkanDevice* DevicePointer::operator->() const { return Load().get(); }
 DevicePointer::operator bool() const { return Load() != nullptr; }
 
 bool DevicePointer::operator==(std::nullptr_t) const { return Load() == nullptr; }
+
+bool NarrowDeviceLock_nid_no_patch() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_NO_NARROW_DEVICE_LOCK");
+        return value == nullptr || value[0] == '\0' || value[0] == '0';
+    }();
+    return enabled;
+}
 
 void DeviceUseGate::lock_shared() {
     std::unique_lock lock(mutex);

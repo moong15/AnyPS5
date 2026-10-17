@@ -3204,6 +3204,7 @@ void StorageTexture::Flush() {
         pending.textures.remove(this);
         BumpPendingSerial();
     }
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     const auto previous = std::exchange(flushReason, "cache eviction");
     writeBack(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
@@ -3287,6 +3288,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     if (trace) {
         for (const auto& texture : flush) std::fprintf(stderr, "[flush] image 0x%llx+0x%llx for %s 0x%llx+0x%zx\n", static_cast<unsigned long long>(texture->descriptor.baseAddress), static_cast<unsigned long long>(texture->guestBytes), reason, static_cast<unsigned long long>(address), bytes);
     }
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     std::exception_ptr failure;
     const auto previousReason = std::exchange(flushReason, reason);
@@ -3342,6 +3344,7 @@ bool StorageTexture::FlushForHostWrite(std::uint64_t address, std::size_t bytes)
             if (!flush.empty()) BumpPendingSerial();
         }
     } unregister{flush};
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::HostWrite);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     const auto previousReason = std::exchange(flushReason, "host write");
     try {
@@ -3368,6 +3371,7 @@ void StorageTexture::SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes)
         for (auto* texture : pending.flushing) take(texture);
     }
     if (overlapping.empty()) return;
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     for (const auto& texture : overlapping) texture->saveBeforeUnwatch();
 }
@@ -3500,6 +3504,7 @@ void StorageTexture::awaitStoredSave(const std::vector<bool>* layers) {
 
 bool StorageTexture::PublishShadowsOnly(std::uint64_t address, std::size_t bytes, PublishScope scope, const char* reason) {
     if (scope == PublishScope::None || !AnyShadowedOverlaps(address, bytes)) return false;
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     return PublishShadow(address, bytes, scope, PublishReasonFor(reason)) != 0;
 }

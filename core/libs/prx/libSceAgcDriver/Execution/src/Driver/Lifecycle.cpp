@@ -118,6 +118,7 @@ void Driver::stop() {
     }
     StopWorkerSampler();
     CloseRegistrationPreparation();
+    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Lifecycle);
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
     device.Reset();
     replacedDevices.clear();
@@ -144,6 +145,7 @@ Driver::Driver() {
             try {
                 const auto current = Driver::Get().device.Load();
                 if (current == nullptr || current->ImportGuestMemory(ranges, generation, false)) return;
+                GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Import);
                 std::lock_guard lock(GuestMemory::GpuMutex());
                 if (Driver::Get().device.Load() == current) current->ImportGuestMemory(ranges, generation, true);
             } catch (const std::exception& error) {

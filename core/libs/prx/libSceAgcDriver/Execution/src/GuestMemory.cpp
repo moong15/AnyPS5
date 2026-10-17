@@ -1949,7 +1949,7 @@ namespace {
 // Per-thread GpuMutex wait accounting (APS5_PROFILE_DRAW): a queue worker tags its thread, other
 // threads (the presenter) report untagged.
 constexpr std::size_t GpuLockSiteCount = static_cast<std::size_t>(GpuLockSite::Count);
-constexpr const char* GpuLockSiteNames[GpuLockSiteCount] = {"other", "dispatch", "indirect", "draw", "hook", "wait", "label", "flush", "present", "fill", "copy", "end", "try"};
+constexpr const char* GpuLockSiteNames[GpuLockSiteCount] = {"other", "dispatch", "indirect", "draw", "hook", "wait", "label", "flush", "present", "fill", "copy", "end", "try", "import", "shader", "presync", "writeback", "host_write", "lifecycle"};
 
 // Hold-side holder matrix: nanoseconds held per (holder thread, site), added by EndHold. Column 0
 // is every untagged thread (the presenter, game threads); the queue workers take a column each on
@@ -2039,16 +2039,104 @@ bool GpuHoldProfiled() {
     return profiled;
 }
 
+struct HolderSiteStats {
+    std::uint64_t acquisitions = 0;
+    double heldMs = 0;
+    double maxHeldMs = 0;
+    double blockedMs = 0;
+};
+
+struct HolderBlocking {
+    std::mutex mutex;
+    std::array<HolderSiteStats, GpuLockSiteCount> sites{};
+    std::size_t waiters = 0;
+    std::size_t site = 0;
+    bool holding = false;
+    std::chrono::steady_clock::time_point changed = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lastReport = changed;
+
+    void Accumulate(std::chrono::steady_clock::time_point now) {
+        if (holding) sites[site].blockedMs += std::chrono::duration<double, std::milli>(now - changed).count() * static_cast<double>(waiters);
+        changed = now;
+    }
+};
+
+HolderBlocking& Blocking() {
+    static HolderBlocking blocking;
+    return blocking;
+}
+
+void ChangeHolderWaiters(bool entering) {
+    auto& blocking = Blocking();
+    std::lock_guard lock(blocking.mutex);
+    blocking.Accumulate(std::chrono::steady_clock::now());
+    if (entering) ++blocking.waiters;
+    else --blocking.waiters;
+}
+
+struct HolderWait {
+    explicit HolderWait(bool enabled) : enabled(enabled) {
+        if (enabled) ChangeHolderWaiters(true);
+    }
+    ~HolderWait() {
+        if (enabled) ChangeHolderWaiters(false);
+    }
+    bool enabled;
+};
+
+void StartHolder(std::size_t site) {
+    auto& blocking = Blocking();
+    std::lock_guard lock(blocking.mutex);
+    blocking.Accumulate(std::chrono::steady_clock::now());
+    blocking.site = site;
+    blocking.holding = true;
+}
+
+void FinishHolder(std::size_t site, double heldMs) {
+    auto& blocking = Blocking();
+    std::lock_guard lock(blocking.mutex);
+    blocking.Accumulate(std::chrono::steady_clock::now());
+    blocking.holding = false;
+    auto& row = blocking.sites[site];
+    ++row.acquisitions;
+    row.heldMs += heldMs;
+    row.maxHeldMs = std::max(row.maxHeldMs, heldMs);
+}
+
+void ReportHolders() {
+    auto& blocking = Blocking();
+    std::array<HolderSiteStats, GpuLockSiteCount> snapshot{};
+    {
+        std::lock_guard lock(blocking.mutex);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - blocking.lastReport < std::chrono::seconds(10)) return;
+        blocking.Accumulate(now);
+        blocking.lastReport = now;
+        snapshot = blocking.sites;
+    }
+    std::string text;
+    for (std::size_t i = 0; i < GpuLockSiteCount; ++i) {
+        const auto& row = snapshot[i];
+        if (row.acquisitions == 0) continue;
+        char entry[160];
+        std::snprintf(entry, sizeof(entry), " %s %llu/%.3f/%.3f/%.3f", GpuLockSiteNames[i], static_cast<unsigned long long>(row.acquisitions), row.heldMs, row.maxHeldMs, row.blockedMs);
+        text += entry;
+    }
+    AgcDriver::ProfilePrint_nid_no_patch("[device-lock] GPU mutex holders cumulative (site acquisitions/hold_ms/max_ms/others_wait_ms):%s\n", text.c_str());
+}
+
 void BeginHold(std::size_t site) {
     auto& stats = LockStats();
     stats.holdSite = site;
     stats.holdStart = std::chrono::steady_clock::now();
+    StartHolder(site);
 }
 
 void EndHold() {
     auto& stats = LockStats();
     const auto heldNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stats.holdStart).count();
     const auto heldMs = static_cast<double>(heldNs) / 1e6;
+    FinishHolder(stats.holdSite, heldMs);
     ++stats.siteHolds[stats.holdSite];
     stats.siteHeldMs[stats.holdSite] += heldMs;
     stats.siteMaxHeldMs[stats.holdSite] = std::max(stats.siteMaxHeldMs[stats.holdSite], heldMs);
@@ -2145,6 +2233,7 @@ void GpuMutexType::unlock() {
     // of the hold nor waited for by the next holder.
     if (outermost) {
         if (auto* hook = gpuUnlockHook.load(std::memory_order_acquire); hook != nullptr) hook();
+        if (GpuHoldProfiled()) ReportHolders();
     }
 }
 
@@ -2191,7 +2280,10 @@ void GpuMutexType::lock() {
         HolderMatrixValues before{};
         if (holders) Holders().Snapshot(before);
         const auto start = std::chrono::steady_clock::now();
-        mutex.lock();
+        {
+            const HolderWait waiter{holders};
+            mutex.lock();
+        }
         acquired();
         const auto now = std::chrono::steady_clock::now();
         if (auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr) trace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, now);
@@ -2202,10 +2294,7 @@ void GpuMutexType::lock() {
                 for (std::size_t s = 0; s < GpuLockSiteCount; ++s) stats.waitedBehindNs[h][s] += after[h][s] - before[h][s];
             }
         }
-        if (depth == 1 && holders) {
-            stats.holdSite = site;
-            stats.holdStart = now;
-        }
+        if (depth == 1 && holders) BeginHold(site);
         const auto waitedMs = std::chrono::duration<double, std::milli>(now - start).count();
         stats.waitedMs += waitedMs;
         ++stats.waits;
