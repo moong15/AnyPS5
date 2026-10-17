@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #ifndef _WIN32
 #include <cerrno>
 #include <fstream>
@@ -478,7 +480,32 @@ bool GuestArenaWriteWatched_nid_postfix() {
     return Arena::Get().WriteWatched();
 }
 
+namespace {
+std::atomic<void (*)(std::uintptr_t, std::size_t)> hostWriteOrder{nullptr};
+}
+
+void GuestArenaSetHostWriteOrder_nid_no_patch(void (*callback)(std::uintptr_t, std::size_t)) {
+    hostWriteOrder.store(callback, std::memory_order_release);
+}
+
+namespace {
+
+void OrderHostWrite(void* pointer, std::size_t bytes) {
+    static const bool disabled = std::getenv("APS5_NO_HOST_WRITE_ORDER") != nullptr;
+    if (disabled || bytes == 0 || pointer == nullptr) return;
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    if (bytes > std::numeric_limits<std::uintptr_t>::max() - address) throw std::overflow_error("host write range overflow");
+    if (const auto order = hostWriteOrder.load(std::memory_order_acquire)) order(address, bytes);
+}
+
+}
+
 bool GuestArenaBeginHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
+    OrderHostWrite(pointer, bytes);
+    return GuestArenaBeginHostWriteUnordered_nid_no_patch(pointer, bytes);
+}
+
+bool GuestArenaBeginHostWriteUnordered_nid_no_patch(void* pointer, std::size_t bytes) {
 #ifdef _WIN32
     return WindowsMappings::Get().BeginHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes);
 #else

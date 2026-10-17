@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -201,6 +202,8 @@ int32_t APS5_VABI sceJpegEncEncode(void* handle, const JpegEncEncodeParam* param
                                                                  restartBlocks, restartRows);
     if (jpeg.size() > param->jpeg_size) return SCE_JPEG_ENC_ERROR_INVALID_SIZE;
 
+    const GuestArena::HostWrite destination(param->jpeg, jpeg.size());
+    if (!destination.Open()) return SCE_JPEG_ENC_ERROR_INVALID_ADDR;
     std::memcpy(param->jpeg, jpeg.data(), jpeg.size());
     if (output_info) {
         output_info->size = static_cast<std::uint32_t>(jpeg.size());

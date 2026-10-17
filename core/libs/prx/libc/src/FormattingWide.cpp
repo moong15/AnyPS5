@@ -1,4 +1,5 @@
 #include <cerrno>
+#include "prx/libc/include/GuestArena.hpp"
 #include <climits>
 #include <cstdint>
 #include <cstddef>
@@ -376,6 +377,8 @@ char16_t* APS5_VABI fgetws_nid_postfix(char16_t* buffer, int size, FileStream* s
         errno = 22;
         return nullptr;
     }
+    const GuestArena::HostWrite destination(buffer, static_cast<std::size_t>(size) * sizeof(*buffer));
+    if (!destination.Open()) { stream->SetError(); errno = 14; return nullptr; }
     int count = 0;
     while (count < size - 1) {
         const std::int32_t character = fgetwc_nid_postfix(stream);

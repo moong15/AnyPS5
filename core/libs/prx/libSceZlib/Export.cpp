@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "zlib.h"
 #include <cstdint>
 #include <limits>
@@ -58,6 +59,8 @@ std::int32_t APS5_VABI sceZlibInflate(const void* source, std::uint32_t sourceLe
         throw std::runtime_error("sceZlibInflate: invalid buffer or size");
     if (result && !result->retrieved) throw std::runtime_error("sceZlibInflate: multiple outstanding requests unsupported");
     if (nextId == std::numeric_limits<std::uint64_t>::max()) throw std::runtime_error("sceZlibInflate: request IDs exhausted");
+    const GuestArena::HostWrite output(destination, destinationLength);
+    if (!output.Open()) throw std::runtime_error("sceZlibInflate: output is not writable");
     z_stream stream{};
     stream.next_in = const_cast<Bytef*>(static_cast<const Bytef*>(source));
     stream.avail_in = sourceLength;

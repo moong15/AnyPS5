@@ -1,4 +1,5 @@
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cerrno>
 #ifdef _WIN32
@@ -109,6 +110,8 @@ char* APS5_VABI fgets_nid_postfix(char* buffer, int size, FileStream* stream) {
         errno = 22;
         return nullptr;
     }
+    const GuestArena::HostWrite destination(buffer, static_cast<std::size_t>(size));
+    if (!destination.Open()) { stream->SetError(); errno = 14; return nullptr; }
     auto* result = std::fgets(buffer, size, GetNativeStream(stream));
     stream->SyncStatus();
     return result;

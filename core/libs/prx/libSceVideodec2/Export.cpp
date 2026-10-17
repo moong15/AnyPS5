@@ -1,4 +1,5 @@
 #include <array>
+#include "prx/libc/include/GuestArena.hpp"
 #include <span>
 #include <cstdint>
 #include <cstddef>
@@ -424,6 +425,8 @@ bool WriteNv12(Decoder& decoder, const AVFrame& frame, std::uint8_t* target, std
     const auto pitch = AlignUp(width, PitchAlignment);
     const auto luma = ChromaOffset(width, height);
     if (luma + static_cast<std::uint64_t>(pitch) * (height / 2) > bytes) return false;
+    const GuestArena::HostWrite destination(target, static_cast<std::size_t>(luma + static_cast<std::uint64_t>(pitch) * (height / 2)));
+    if (!destination.Open()) return false;
     std::uint8_t* planes[4] = {target, target + luma, nullptr, nullptr};
     const int strides[4] = {static_cast<int>(pitch), static_cast<int>(pitch), 0, 0};
     const auto format = static_cast<AVPixelFormat>(frame.format);

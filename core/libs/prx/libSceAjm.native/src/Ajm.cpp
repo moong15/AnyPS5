@@ -1,4 +1,5 @@
 #include <cstdint>
+#include "prx/libc/include/GuestArena.hpp"
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -500,6 +501,8 @@ struct PcmOutputs {
     void Emit(const std::uint8_t* source, std::size_t bytes) {
         while (bytes > 0 && index < count) {
             const std::size_t chunk = std::min(buffers[index].size - offset, bytes);
+            const GuestArena::HostWrite destination(static_cast<std::uint8_t*>(buffers[index].ptr) + offset, chunk);
+            if (!destination.Open()) throw std::runtime_error("AJM: output is not writable");
             std::memcpy(static_cast<std::uint8_t*>(buffers[index].ptr) + offset, source, chunk);
             source += chunk;
             bytes -= chunk;

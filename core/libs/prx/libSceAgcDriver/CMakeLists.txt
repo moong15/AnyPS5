@@ -1661,6 +1661,43 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         endif()
     endforeach()
+    add_test(NAME agc_host_write_helper COMMAND agc_driver_host_write_ordering_tests --helper)
+    add_test(NAME agc_host_write_helper_off COMMAND agc_driver_host_write_ordering_tests --helper)
+    set_tests_properties(agc_host_write_helper agc_host_write_helper_off PROPERTIES TIMEOUT 10)
+    set_tests_properties(agc_host_write_helper PROPERTIES ENVIRONMENT_MODIFICATION "APS5_NO_HOST_WRITE_ORDER=unset:")
+    set_tests_properties(agc_host_write_helper_off PROPERTIES ENVIRONMENT "APS5_NO_HOST_WRITE_ORDER=1")
+    if(WIN32)
+        set_property(TEST agc_host_write_helper agc_host_write_helper_off APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test(NAME agc_driver_host_write_ordering_off COMMAND agc_driver_host_write_ordering_tests)
+    set_tests_properties(agc_driver_host_write_ordering agc_driver_host_write_ordering_off PROPERTIES TIMEOUT 30)
+    set_property(TEST agc_driver_host_write_ordering APPEND PROPERTY ENVIRONMENT_MODIFICATION "APS5_NO_HOST_WRITE_ORDER=unset:")
+    set_tests_properties(agc_driver_host_write_ordering_off PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_HOST_WRITE_ORDER=1"
+            SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_driver_host_write_ordering_off PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    set_property(TEST agc_driver_host_write_ordering agc_driver_host_write_ordering_off APPEND PROPERTY ENVIRONMENT_MODIFICATION
+            "APS5_NO_PENDING_WRITE_SNAPSHOT=unset:")
+    foreach(host_write_mode IN ITEMS on off)
+        set(host_write_snapshot_test "agc_driver_host_write_ordering_no_snapshot_${host_write_mode}")
+        add_test(NAME ${host_write_snapshot_test} COMMAND agc_driver_host_write_ordering_tests)
+        set_tests_properties(${host_write_snapshot_test} PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_PENDING_WRITE_SNAPSHOT=1")
+        if(host_write_mode STREQUAL "off")
+            set_property(TEST ${host_write_snapshot_test} APPEND PROPERTY ENVIRONMENT "APS5_NO_HOST_WRITE_ORDER=1")
+        else()
+            set_property(TEST ${host_write_snapshot_test} APPEND PROPERTY ENVIRONMENT_MODIFICATION "APS5_NO_HOST_WRITE_ORDER=unset:")
+        endif()
+        if(WIN32)
+            set_property(TEST ${host_write_snapshot_test} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
     add_test(NAME agc_driver_partially_resident_pending_stores COMMAND agc_driver_partially_resident_snapshot_tests --pending-stores)
     set_tests_properties(agc_driver_partially_resident_pending_stores PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
     if(WIN32)
