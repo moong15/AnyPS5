@@ -238,10 +238,6 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             libraries.push_back(awaited->handle);
             continue;
         }
-        // The claim owns the build: it publishes the pipeline to every waiter and releases the key
-        // on the way out, including when the creation throws, so no request waits for a build that
-        // ended. With the claim off a part another thread built meanwhile is kept and this one is
-        // dropped, the path APS5_NO_PIPELINE_SINGLE_FLIGHT=1 restores.
         struct OwnedBuild {
             LibraryStore& store;
             DeviceLibraries& device;

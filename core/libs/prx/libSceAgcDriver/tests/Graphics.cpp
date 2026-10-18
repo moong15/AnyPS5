@@ -4802,7 +4802,6 @@ void resourceTests() {
         ShaderRecompiler::RecompileResult fragment;
         vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32))));
         vertex.bindings.back().guestDescriptor[1] |= 0x40000000u;
-        vertex.bindings.back().guestDescriptor[3] |= 2u << 30u;
         vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, ShaderDataWords({7, 8, 9})));
         vertex.shaderDataDwords = ShaderRecompiler::RuntimeAbi::ShaderDataDwords;
         fragment.bindings.push_back(makeBinding(Role::FlattenedSrt, 43, 1, {1, 2}));

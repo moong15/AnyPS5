@@ -2129,10 +2129,10 @@ constexpr const char* GpuLockSiteNames[GpuLockSiteCount] = {"other", "dispatch",
 
 thread_local bool traceHolds = false;
 thread_local GpuLockSite holdSite = GpuLockSite::Other;
-thread_local PerformanceTrace::TraceThread* holdTrace = nullptr;
+thread_local AgcDriver::TraceThread* holdTrace = nullptr;
 thread_local std::chrono::steady_clock::time_point holdStart{};
 
-void TraceHoldBegan(std::size_t site, PerformanceTrace::TraceThread* trace) {
+void TraceHoldBegan(std::size_t site, AgcDriver::TraceThread* trace) {
     if (!traceHolds) return;
     if (holdSite == GpuLockSite::Other) holdSite = static_cast<GpuLockSite>(site);
     holdTrace = trace;
