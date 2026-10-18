@@ -5,6 +5,7 @@
 #include "BdaAbi.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -65,6 +66,41 @@ ImportProbe ProbeDmaBufImportWriteProtection(const Context& context);
 ImportWatch PrepareImportWatch(const Context& context);
 void SetImportWatch(const Context& context, ImportWatch watch);
 
+class HostImportMissMemo {
+public:
+    struct Stamp {
+        VkDevice device = VK_NULL_HANDLE;
+        std::uint64_t alignment = 0;
+        std::uint64_t generation = 0;
+        std::uint64_t forgetSerial = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t inserted = 0;
+        std::uint64_t policy = 0;
+        bool operator==(const Stamp&) const = default;
+    };
+
+    static bool Enabled();
+    static bool Stable(const Stamp& before, const Stamp& after);
+    bool Contains(std::uint64_t begin, std::uint64_t end, const Stamp& current) const;
+    bool Store(std::uint64_t begin, std::uint64_t end, const Stamp& before, const Stamp& after);
+
+private:
+    struct Entry {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+    };
+    static std::size_t slot(std::uint64_t begin, std::uint64_t end);
+    Stamp stamp;
+    std::array<Entry, 256> entries{};
+};
+
+struct ImportMissMemoStats {
+    bool enabled;
+    std::uint64_t hits;
+    std::uint64_t stores;
+};
+
+ImportMissMemoStats ImportMissMemoCounters();
 // The host import of the registered allocation containing [address, address + bytes), made on demand
 // (alignment and budget permitting), or null. Bytes at `address` are at `address - import->base` in
 // the import's buffer.
