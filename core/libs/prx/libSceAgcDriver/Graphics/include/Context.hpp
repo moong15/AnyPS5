@@ -22,8 +22,13 @@ namespace AgcDriver::Graphics {
 inline std::atomic<std::uint64_t> hostPlacedBytes{0};
 inline std::atomic<std::uint64_t> vulkanHeapBytes[2]{};
 inline std::atomic<std::uint64_t> vulkanHeapAllocations[2]{};
+inline std::atomic<std::uint64_t> vulkanImportedHeapBytes[2]{};
+inline std::atomic<std::uint64_t> vulkanImportedHeapAllocations[2]{};
+inline std::atomic<std::uint64_t> vulkanAllocatedHeapBytes[2]{};
+inline std::atomic<std::uint64_t> vulkanAllocatedHeapAllocations[2]{};
 inline std::atomic<std::uint64_t> vulkanPipelines{0};
 inline std::atomic<std::uint64_t> pipelineCacheBlobBytes{0};
+inline std::atomic<std::uint64_t> pipelineCacheLoadedBytes{0};
 
 class TextureDetiler;
 class GpuColorTransfer;

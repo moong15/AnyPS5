@@ -12,12 +12,17 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <chrono>
+#include <cstdint>
+#include <utility>
+#include <vector>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 
 namespace AgcDriver {
+
+std::vector<std::pair<std::uintptr_t, std::uintptr_t>> HostMemoryImportRanges_nid_no_patch();
 
 namespace Graphics {
 class StorageTexture;

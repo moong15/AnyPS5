@@ -163,6 +163,7 @@ void PipelineCache::load(std::vector<std::byte>& initialData) {
     }
     initialData = std::move(file.contents);
     initialData.erase(initialData.begin(), initialData.begin() + sizeof(FileHeader));
+    if (ShaderRecompiler::HostMemoryLedgerEnabled()) pipelineCacheLoadedBytes.store(initialData.size(), std::memory_order_relaxed);
     loadedBytes = initialData.size();
     settledBytes = initialData.size();
     settledFile = file.header;

@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include <system_error>
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
@@ -66,6 +67,30 @@ ProcessRegions ProcessCommittedRegions() {
     return result;
 }
 
+std::pair<std::uint64_t, std::uint64_t> ImportedHostBytes() {
+    auto ranges = AgcDriver::HostMemoryImportRanges_nid_no_patch();
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> merged;
+    for (const auto& range : ranges) {
+        if (merged.empty() || range.first > merged.back().second) merged.push_back(range);
+        else merged.back().second = std::max(merged.back().second, range.second);
+    }
+    const auto count = KernelGuestMemoryRanges_nid_no_patch(nullptr, 0);
+    std::vector<std::uintptr_t> guest(count * 2);
+    KernelGuestMemoryRanges_nid_no_patch(guest.data(), count);
+    std::uint64_t uniqueBytes = 0;
+    std::uint64_t guestBytes = 0;
+    for (const auto& [begin, end] : merged) {
+        uniqueBytes += end - begin;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto first = std::max(begin, guest[i * 2]);
+            const auto last = std::min(end, guest[i * 2 + 1]);
+            if (first < last) guestBytes += last - first;
+        }
+    }
+    return {uniqueBytes, guestBytes};
+}
+
 void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriver::Graphics::BufferPool>> pools = {}) {
     using namespace AgcDriver;
     const auto privateBytes = ProcessPrivateBytes();
@@ -83,9 +108,11 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
     const auto recorder = Graphics::RecorderHostCounters();
     const auto shader = ShaderRecompiler::ResidentStats();
     const auto trace = PerformanceTrace::BufferBytes();
+    const auto imported = ImportedHostBytes();
+    const auto cacheSaved = Graphics::pipelineCacheBlobBytes.load(std::memory_order_relaxed);
     const double attributed = static_cast<double>(regions.guestBytes) + mirrors.shadowBytes + storage.originalBytes + sampled.sampledHostBytes + resources.first + resources.second + shader.sourceBytes + shader.artifactBytes - shader.spirvMappedBytes + shader.memoBytes + trace;
     constexpr double mib = 1048576.0;
-    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f; vq private %.3f (guest %.0f, host %.0f) mapped %.0f image %.0f; vk dev %.0f (%llu) host %.0f (%llu); pipelines %llu cache %.0f; spirv %.0f (%zu; heap %.0f/%.0f mapped %.0f) vectors %.0f\n",
+    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f; vq private %.3f (guest %.0f, host %.0f) mapped %.0f image %.0f; vk dev %.0f (%llu) host %.0f (%llu); pipelines %llu cache %.0f; spirv %.0f (%zu; heap %.0f/%.0f mapped %.0f) vectors %.0f; cache loaded %.0f saved %.0f; vk import host %.0f (%llu) dev %.0f (%llu) unique %.0f guest %.0f; vk alloc host %.0f (%llu) dev %.0f (%llu)\n",
         privateBytes / mib, host.bytes / mib, static_cast<unsigned long long>(host.count), mirrors.heapBytes / mib, mirrors.nonHeapBytes / mib, storage.savedBytes / mib,
         recorder.drawSnapshotBytes[0] / mib, recorder.drawSnapshotBytes[1] / mib, recorder.unwrittenBytes / mib, recorder.keptBytes / mib, poolBytes / mib,
         mirrors.shadowBytes / mib, storage.originalBytes / mib, static_cast<unsigned long long>(storage.images), sampled.sampledHostBytes / mib, sampled.sampledEntries,
@@ -94,8 +121,14 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
         regions.privateBytes / mib, regions.guestBytes / mib, (regions.privateBytes - regions.guestBytes) / mib, regions.mappedBytes / mib, regions.imageBytes / mib,
         Graphics::vulkanHeapBytes[0].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanHeapAllocations[0].load(std::memory_order_relaxed)),
         Graphics::vulkanHeapBytes[1].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanHeapAllocations[1].load(std::memory_order_relaxed)),
-        static_cast<unsigned long long>(Graphics::vulkanPipelines.load(std::memory_order_relaxed)), Graphics::pipelineCacheBlobBytes.load(std::memory_order_relaxed) / mib,
-        shader.spirvBytes / mib, shader.spirvPayloads, (shader.spirvBytes - shader.spirvMappedBytes) / mib, shader.spirvHeapBytes / mib, shader.spirvMappedBytes / mib, shader.artifactVectorBytes / mib);
+        static_cast<unsigned long long>(Graphics::vulkanPipelines.load(std::memory_order_relaxed)), cacheSaved / mib,
+        shader.spirvBytes / mib, shader.spirvPayloads, (shader.spirvBytes - shader.spirvMappedBytes) / mib, shader.spirvHeapBytes / mib, shader.spirvMappedBytes / mib, shader.artifactVectorBytes / mib,
+        Graphics::pipelineCacheLoadedBytes.load(std::memory_order_relaxed) / mib, cacheSaved / mib,
+        Graphics::vulkanImportedHeapBytes[1].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanImportedHeapAllocations[1].load(std::memory_order_relaxed)),
+        Graphics::vulkanImportedHeapBytes[0].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanImportedHeapAllocations[0].load(std::memory_order_relaxed)),
+        imported.first / mib, imported.second / mib,
+        Graphics::vulkanAllocatedHeapBytes[1].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanAllocatedHeapAllocations[1].load(std::memory_order_relaxed)),
+        Graphics::vulkanAllocatedHeapBytes[0].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanAllocatedHeapAllocations[0].load(std::memory_order_relaxed)));
 }
 
 }

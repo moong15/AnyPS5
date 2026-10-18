@@ -88,6 +88,8 @@ struct LedgerDevice {
     struct Allocation {
         VkDeviceSize bytes;
         unsigned heap;
+        bool imported;
+        std::optional<std::pair<std::uintptr_t, std::uintptr_t>> hostRange;
     };
     std::unordered_map<VkDeviceMemory, Allocation> allocations;
     std::uint64_t pipelines = 0;
@@ -115,8 +117,29 @@ VKAPI_ATTR VkResult VKAPI_CALL LedgerAllocateMemory(VkDevice device, const VkMem
     if (result == VK_SUCCESS) {
         const auto index = state->properties.memoryTypes[info->memoryTypeIndex].heapIndex;
         const unsigned heap = (state->properties.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 ? 0 : 1;
+        LedgerDevice::Allocation allocation{info->allocationSize, heap, false, std::nullopt};
+        for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
+#ifdef VK_EXT_external_memory_host
+            if (next->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) {
+                allocation.imported = true;
+                const auto* host = reinterpret_cast<const VkImportMemoryHostPointerInfoEXT*>(next);
+                const auto begin = reinterpret_cast<std::uintptr_t>(host->pHostPointer);
+                allocation.hostRange = std::pair{begin, begin + static_cast<std::uintptr_t>(info->allocationSize)};
+            }
+#endif
+#ifdef VK_KHR_external_memory_win32
+            if (next->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR) allocation.imported = true;
+#endif
+#ifdef VK_KHR_external_memory_fd
+            if (next->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR) allocation.imported = true;
+#endif
+        }
         std::lock_guard lock(state->mutex);
-        state->allocations.emplace(*memory, LedgerDevice::Allocation{info->allocationSize, heap});
+        state->allocations.emplace(*memory, allocation);
+        auto& classBytes = allocation.imported ? Graphics::vulkanImportedHeapBytes[heap] : Graphics::vulkanAllocatedHeapBytes[heap];
+        auto& classCount = allocation.imported ? Graphics::vulkanImportedHeapAllocations[heap] : Graphics::vulkanAllocatedHeapAllocations[heap];
+        classBytes.fetch_add(allocation.bytes, std::memory_order_relaxed);
+        classCount.fetch_add(1, std::memory_order_relaxed);
         Graphics::vulkanHeapBytes[heap].fetch_add(info->allocationSize, std::memory_order_relaxed);
         Graphics::vulkanHeapAllocations[heap].fetch_add(1, std::memory_order_relaxed);
     }
@@ -136,6 +159,10 @@ VKAPI_ATTR void VKAPI_CALL LedgerFreeMemory(VkDevice device, VkDeviceMemory memo
     }
     state->free(device, memory, callbacks);
     if (allocation) {
+        auto& classBytes = allocation->imported ? Graphics::vulkanImportedHeapBytes[allocation->heap] : Graphics::vulkanAllocatedHeapBytes[allocation->heap];
+        auto& classCount = allocation->imported ? Graphics::vulkanImportedHeapAllocations[allocation->heap] : Graphics::vulkanAllocatedHeapAllocations[allocation->heap];
+        classBytes.fetch_sub(allocation->bytes, std::memory_order_relaxed);
+        classCount.fetch_sub(1, std::memory_order_relaxed);
         Graphics::vulkanHeapBytes[allocation->heap].fetch_sub(allocation->bytes, std::memory_order_relaxed);
         Graphics::vulkanHeapAllocations[allocation->heap].fetch_sub(1, std::memory_order_relaxed);
     }
@@ -180,10 +207,16 @@ VKAPI_ATTR void VKAPI_CALL LedgerDestroyDevice(VkDevice device, const VkAllocati
     {
         std::lock_guard lock(state->mutex);
         for (const auto& [memory, allocation] : state->allocations) {
+            auto& classBytes = allocation.imported ? Graphics::vulkanImportedHeapBytes[allocation.heap] : Graphics::vulkanAllocatedHeapBytes[allocation.heap];
+            auto& classCount = allocation.imported ? Graphics::vulkanImportedHeapAllocations[allocation.heap] : Graphics::vulkanAllocatedHeapAllocations[allocation.heap];
+            classBytes.fetch_sub(allocation.bytes, std::memory_order_relaxed);
+            classCount.fetch_sub(1, std::memory_order_relaxed);
             Graphics::vulkanHeapBytes[allocation.heap].fetch_sub(allocation.bytes, std::memory_order_relaxed);
             Graphics::vulkanHeapAllocations[allocation.heap].fetch_sub(1, std::memory_order_relaxed);
         }
+        state->allocations.clear();
         Graphics::vulkanPipelines.fetch_sub(state->pipelines, std::memory_order_relaxed);
+        state->pipelines = 0;
     }
     auto& devices = MemoryLedgerDevices();
     std::lock_guard lock(devices.mutex);
@@ -219,6 +252,26 @@ PFN_vkGetDeviceProcAddr TrackLedgerDevice(VkDevice device, PFN_vkGetDeviceProcAd
     devices.devices.emplace(device, std::move(state));
     return LedgerDeviceProc;
 }
+
+}
+
+std::vector<std::pair<std::uintptr_t, std::uintptr_t>> HostMemoryImportRanges_nid_no_patch() {
+    if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return {};
+    std::vector<std::shared_ptr<LedgerDevice>> snapshot;
+    {
+        auto& devices = MemoryLedgerDevices();
+        std::lock_guard lock(devices.mutex);
+        for (const auto& [device, state] : devices.devices) snapshot.push_back(state);
+    }
+    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> ranges;
+    for (const auto& state : snapshot) {
+        std::lock_guard lock(state->mutex);
+        for (const auto& [memory, allocation] : state->allocations) if (allocation.hostRange) ranges.push_back(*allocation.hostRange);
+    }
+    return ranges;
+}
+
+namespace {
 
 void check(VkResult result, const char* operation) {
     if (result == VK_ERROR_DEVICE_LOST) Graphics::ReportDeviceLost();
