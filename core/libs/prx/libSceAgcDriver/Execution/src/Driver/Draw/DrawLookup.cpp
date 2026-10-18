@@ -236,7 +236,7 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
                 }
                 auto& candidates = dataCandidates[i];
                 for (const auto& variant : dataEntry->stages[i]) {
-                    if ((userWordMask ? differing & ~variant->userDataMask : differing) != 0) continue;
+                    if ((userWordMask ? differing & variant->userDataMask : differing) != 0) continue;
                     if ((i == 0 && variant->pushOffset != 0) || std::any_of(candidates.begin(), candidates.end(), [&](const auto& candidate) { return candidate.first->pushOffset == variant->pushOffset; })) continue;
                     std::vector<ShaderRecompiler::MemoryRegion> regions;
                     appendEntryRegions(*variant, regions);
