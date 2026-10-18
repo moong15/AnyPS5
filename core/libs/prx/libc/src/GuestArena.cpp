@@ -322,6 +322,31 @@ public:
     std::uintptr_t Base() const { return _base; }
     std::size_t Size() const { return _end - _base; }
     bool WriteWatched() const { return _writeWatched; }
+    std::size_t ReservedRanges(std::uintptr_t* ranges, std::size_t capacity) const {
+#ifdef _WIN32
+        auto holes = _holes;
+#else
+        auto holes = _hostRegions;
+#endif
+        std::sort(holes.begin(), holes.end());
+        auto cursor = _base;
+        std::size_t count = 0;
+        const auto append = [&](std::uintptr_t begin, std::uintptr_t end) {
+            if (begin >= end) return;
+            if (count < capacity) {
+                ranges[count * 2] = begin;
+                ranges[count * 2 + 1] = end;
+            }
+            ++count;
+        };
+        for (const auto& [begin, end] : holes) {
+            if (begin >= _end) break;
+            append(cursor, std::max(cursor, begin));
+            cursor = std::max(cursor, end);
+        }
+        append(cursor, _end);
+        return count;
+    }
     bool OverlapsHostRegion(std::uintptr_t start, std::size_t bytes) const {
         for (const auto& [regionStart, regionEnd] : _hostRegions) {
             if (regionStart < start + bytes && start < regionEnd) return true;
@@ -332,6 +357,10 @@ public:
 
 const bool g_reserved = (Arena::Get(), true);
 
+}
+
+std::size_t GuestArenaReservedRanges_nid_no_patch(std::uintptr_t* ranges, std::size_t capacity) {
+    return Arena::Get().ReservedRanges(ranges, capacity);
 }
 
 bool GuestArenaAvailable_nid_postfix() {

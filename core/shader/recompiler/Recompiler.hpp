@@ -27,6 +27,11 @@ struct ResidentMemoryStats {
     std::size_t variants = 0;
     std::size_t artifactBytes = 0;
     std::size_t memoBytes = 0;
+    std::size_t spirvBytes = 0;
+    std::size_t spirvPayloads = 0;
+    std::size_t spirvHeapBytes = 0;
+    std::size_t spirvMappedBytes = 0;
+    std::size_t artifactVectorBytes = 0;
 };
 bool HostMemoryLedgerEnabled();
 ResidentMemoryStats ResidentStats();
@@ -535,6 +540,8 @@ public:
     }
 
     [[nodiscard]] std::span<const std::uint32_t> Words() const { return holder ? holder->Words() : std::span<const std::uint32_t>{}; }
+    [[nodiscard]] bool Mapped() const { return holder && holder->owner != nullptr; }
+    [[nodiscard]] std::size_t HeapBytes() const { return holder ? holder->words.capacity() * sizeof(std::uint32_t) : 0; }
     [[nodiscard]] SpirvContentHash ContentHash() const {
         if (holder == nullptr) return {};
         if (holder->hashed.load(std::memory_order_acquire)) return {holder->hashLow.load(std::memory_order_relaxed), holder->hashHigh.load(std::memory_order_relaxed)};

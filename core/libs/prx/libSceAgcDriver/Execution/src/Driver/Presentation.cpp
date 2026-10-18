@@ -5,6 +5,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <system_error>
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <cstdlib>
 #include <cstdio>
@@ -25,9 +27,49 @@ std::uint64_t ProcessPrivateBytes() {
     return 0;
 }
 
+struct ProcessRegions {
+    std::uint64_t privateBytes = 0;
+    std::uint64_t guestBytes = 0;
+    std::uint64_t mappedBytes = 0;
+    std::uint64_t imageBytes = 0;
+};
+
+ProcessRegions ProcessCommittedRegions() {
+    ProcessRegions result;
+#ifdef _WIN32
+    const auto count = KernelGuestMemoryRanges_nid_no_patch(nullptr, 0);
+    std::vector<std::uintptr_t> ranges(count * 2);
+    KernelGuestMemoryRanges_nid_no_patch(ranges.data(), count);
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    const auto maximum = reinterpret_cast<std::uintptr_t>(system.lpMaximumApplicationAddress);
+    for (std::uintptr_t cursor = 0; cursor <= maximum;) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "host memory region walk");
+        const auto begin = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+        const auto end = begin + info.RegionSize;
+        if (end <= cursor) break;
+        if (info.State == MEM_COMMIT) {
+            if (info.Type == MEM_PRIVATE) {
+                result.privateBytes += info.RegionSize;
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto first = std::max(begin, ranges[i * 2]);
+                    const auto last = std::min(end, ranges[i * 2 + 1]);
+                    if (first < last) result.guestBytes += last - first;
+                }
+            } else if (info.Type == MEM_MAPPED) result.mappedBytes += info.RegionSize;
+            else if (info.Type == MEM_IMAGE) result.imageBytes += info.RegionSize;
+        }
+        cursor = end;
+    }
+#endif
+    return result;
+}
+
 void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriver::Graphics::BufferPool>> pools = {}) {
     using namespace AgcDriver;
     const auto privateBytes = ProcessPrivateBytes();
+    const auto regions = ProcessCommittedRegions();
     const auto host = Graphics::HostBufferCounters();
     std::uint64_t poolBytes = 0;
     for (const auto& pool : pools) if (pool) poolBytes += pool->Retained();
@@ -41,14 +83,19 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
     const auto recorder = Graphics::RecorderHostCounters();
     const auto shader = ShaderRecompiler::ResidentStats();
     const auto trace = PerformanceTrace::BufferBytes();
-    const double attributed = static_cast<double>(host.bytes) + poolBytes + mirrors.shadowBytes + storage.originalBytes + sampled.sampledHostBytes + resources.first + resources.second + shader.sourceBytes + shader.planBytes + shader.artifactBytes + shader.memoBytes + trace;
+    const double attributed = static_cast<double>(regions.guestBytes) + mirrors.shadowBytes + storage.originalBytes + sampled.sampledHostBytes + resources.first + resources.second + shader.sourceBytes + shader.artifactBytes - shader.spirvMappedBytes + shader.memoBytes + trace;
     constexpr double mib = 1048576.0;
-    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f\n",
+    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f; vq private %.3f (guest %.0f, host %.0f) mapped %.0f image %.0f; vk dev %.0f (%llu) host %.0f (%llu); pipelines %llu cache %.0f; spirv %.0f (%zu; heap %.0f/%.0f mapped %.0f) vectors %.0f\n",
         privateBytes / mib, host.bytes / mib, static_cast<unsigned long long>(host.count), mirrors.heapBytes / mib, mirrors.nonHeapBytes / mib, storage.savedBytes / mib,
         recorder.drawSnapshotBytes[0] / mib, recorder.drawSnapshotBytes[1] / mib, recorder.unwrittenBytes / mib, recorder.keptBytes / mib, poolBytes / mib,
         mirrors.shadowBytes / mib, storage.originalBytes / mib, static_cast<unsigned long long>(storage.images), sampled.sampledHostBytes / mib, sampled.sampledEntries,
         resources.first / mib, resources.second / mib, entries, capacity, shader.sources, shader.sourceBytes / mib, shader.plans, shader.planBytes / mib, shader.variants, shader.artifactBytes / mib, shader.memoBytes / mib,
-        trace / mib, (static_cast<double>(privateBytes) - attributed) / mib, Graphics::hostPlacedBytes.load(std::memory_order_relaxed) / mib, 0.0);
+        trace / mib, (static_cast<double>(privateBytes) - attributed) / mib, Graphics::hostPlacedBytes.load(std::memory_order_relaxed) / mib, 0.0,
+        regions.privateBytes / mib, regions.guestBytes / mib, (regions.privateBytes - regions.guestBytes) / mib, regions.mappedBytes / mib, regions.imageBytes / mib,
+        Graphics::vulkanHeapBytes[0].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanHeapAllocations[0].load(std::memory_order_relaxed)),
+        Graphics::vulkanHeapBytes[1].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanHeapAllocations[1].load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(Graphics::vulkanPipelines.load(std::memory_order_relaxed)), Graphics::pipelineCacheBlobBytes.load(std::memory_order_relaxed) / mib,
+        shader.spirvBytes / mib, shader.spirvPayloads, (shader.spirvBytes - shader.spirvMappedBytes) / mib, shader.spirvHeapBytes / mib, shader.spirvMappedBytes / mib, shader.artifactVectorBytes / mib);
 }
 
 }

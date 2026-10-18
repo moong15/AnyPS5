@@ -18,5 +18,12 @@ int main() {
     if (privateMiB <= 0) return 5;
 #endif
     if (std::strchr(line, '\n') == nullptr || std::fgetc(output.get()) != EOF) return 6;
+    const char* fields[]{"; vq private ", " (guest ", ", host ", ") mapped ", " image ", "; vk dev ", "; pipelines ", " cache ", "; spirv ", "; heap ", " mapped ", ") vectors "};
+    for (const auto* field : fields) if (std::strstr(line, field) == nullptr) return 7;
+    double walkMiB = 0;
+    if (std::sscanf(std::strstr(line, "; vq private "), "; vq private %lf", &walkMiB) != 1) return 8;
+#ifdef _WIN32
+    if (walkMiB <= 0) return 9;
+#endif
     return 0;
 }

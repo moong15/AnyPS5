@@ -21,6 +21,10 @@
 #include <system_error>
 #include <vector>
 
+extern "C" std::size_t KernelGuestMemoryRanges_nid_no_patch(std::uintptr_t* ranges, std::size_t capacity) {
+    return GuestArena::GuestArenaReservedRanges_nid_no_patch(ranges, capacity);
+}
+
 #if defined(__linux__)
 #include <fcntl.h>
 #include <link.h>

@@ -1852,8 +1852,15 @@ ResidentMemoryStats ResidentStats() {
     std::unordered_set<const void*> modules;
     const auto artifactBytes = [&](const CompiledShaderArtifact& artifact) {
         const auto& words = artifact.spirv.Words();
-        const auto spirvBytes = modules.insert(words.data()).second ? words.size() * sizeof(std::uint32_t) : 0;
-        return spirvBytes + vectorBytes(artifact.vertexInputPatches) + vectorBytes(artifact.runtimeImageResources) + vectorBytes(artifact.vertexInputs) + vectorBytes(artifact.parameterExports) + vectorBytes(artifact.fragmentParameters) + vectorBytes(artifact.stencilReferences);
+        if (!words.empty() && modules.insert(words.data()).second) {
+            ++stats.spirvPayloads;
+            stats.spirvBytes += words.size_bytes();
+            if (artifact.spirv.Mapped()) stats.spirvMappedBytes += words.size_bytes();
+            else stats.spirvHeapBytes += artifact.spirv.HeapBytes();
+        }
+        const auto bytes = vectorBytes(artifact.vertexInputPatches) + vectorBytes(artifact.runtimeImageResources) + vectorBytes(artifact.vertexInputs) + vectorBytes(artifact.parameterExports) + vectorBytes(artifact.fragmentParameters) + vectorBytes(artifact.stencilReferences);
+        stats.artifactVectorBytes += bytes;
+        return bytes;
     };
     for (const auto& source : entries) {
         std::lock_guard lock(source->mutex);
@@ -1874,6 +1881,7 @@ ResidentMemoryStats ResidentStats() {
             }
         }
     }
+    stats.artifactBytes += stats.spirvHeapBytes + stats.spirvMappedBytes;
     return stats;
 }
 

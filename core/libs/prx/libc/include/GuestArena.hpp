@@ -25,6 +25,7 @@ void GuestArenaMarkUsed_nid_postfix(const void* pointer, std::size_t bytes);
 void GuestArenaRelease_nid_postfix(const void* pointer, std::size_t bytes);
 // The reserved range, and whether it was reserved with page write watching (Windows MEM_WRITE_WATCH).
 void GuestArenaRange_nid_postfix(std::uintptr_t* base, std::size_t* bytes);
+std::size_t GuestArenaReservedRanges_nid_no_patch(std::uintptr_t* ranges, std::size_t capacity);
 bool GuestArenaWriteWatched_nid_postfix();
 void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t bytes, std::uint32_t protection);
 void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_t protection, std::size_t granule);

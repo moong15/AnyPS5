@@ -75,6 +75,151 @@
 namespace AgcDriver {
 namespace {
 
+struct LedgerDevice {
+    PFN_vkGetDeviceProcAddr resolve;
+    VkPhysicalDeviceMemoryProperties properties;
+    PFN_vkAllocateMemory allocate;
+    PFN_vkFreeMemory free;
+    PFN_vkCreateGraphicsPipelines graphics;
+    PFN_vkCreateComputePipelines compute;
+    PFN_vkDestroyPipeline destroyPipeline;
+    PFN_vkDestroyDevice destroyDevice;
+    std::mutex mutex;
+    struct Allocation {
+        VkDeviceSize bytes;
+        unsigned heap;
+    };
+    std::unordered_map<VkDeviceMemory, Allocation> allocations;
+    std::uint64_t pipelines = 0;
+};
+
+struct LedgerDevices {
+    std::mutex mutex;
+    std::unordered_map<VkDevice, std::shared_ptr<LedgerDevice>> devices;
+};
+
+LedgerDevices& MemoryLedgerDevices() {
+    static auto* devices = new LedgerDevices;
+    return *devices;
+}
+
+std::shared_ptr<LedgerDevice> MemoryLedgerDevice(VkDevice device) {
+    auto& devices = MemoryLedgerDevices();
+    std::lock_guard lock(devices.mutex);
+    return devices.devices.at(device);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL LedgerAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
+    const auto state = MemoryLedgerDevice(device);
+    const auto result = state->allocate(device, info, callbacks, memory);
+    if (result == VK_SUCCESS) {
+        const auto index = state->properties.memoryTypes[info->memoryTypeIndex].heapIndex;
+        const unsigned heap = (state->properties.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 ? 0 : 1;
+        std::lock_guard lock(state->mutex);
+        state->allocations.emplace(*memory, LedgerDevice::Allocation{info->allocationSize, heap});
+        Graphics::vulkanHeapBytes[heap].fetch_add(info->allocationSize, std::memory_order_relaxed);
+        Graphics::vulkanHeapAllocations[heap].fetch_add(1, std::memory_order_relaxed);
+    }
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL LedgerFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* callbacks) {
+    const auto state = MemoryLedgerDevice(device);
+    std::optional<LedgerDevice::Allocation> allocation;
+    if (memory != VK_NULL_HANDLE) {
+        std::lock_guard lock(state->mutex);
+        const auto found = state->allocations.find(memory);
+        if (found != state->allocations.end()) {
+            allocation = found->second;
+            state->allocations.erase(found);
+        }
+    }
+    state->free(device, memory, callbacks);
+    if (allocation) {
+        Graphics::vulkanHeapBytes[allocation->heap].fetch_sub(allocation->bytes, std::memory_order_relaxed);
+        Graphics::vulkanHeapAllocations[allocation->heap].fetch_sub(1, std::memory_order_relaxed);
+    }
+}
+
+void LedgerCreatedPipelines(const std::shared_ptr<LedgerDevice>& state, std::uint32_t count, const VkPipeline* pipelines) {
+    std::uint64_t created = 0;
+    for (std::uint32_t i = 0; i < count; ++i) if (pipelines[i] != VK_NULL_HANDLE) ++created;
+    std::lock_guard lock(state->mutex);
+    state->pipelines += created;
+    Graphics::vulkanPipelines.fetch_add(created, std::memory_order_relaxed);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL LedgerGraphicsPipelines(VkDevice device, VkPipelineCache cache, std::uint32_t count, const VkGraphicsPipelineCreateInfo* info, const VkAllocationCallbacks* callbacks, VkPipeline* pipelines) {
+    const auto state = MemoryLedgerDevice(device);
+    std::fill_n(pipelines, count, VK_NULL_HANDLE);
+    const auto result = state->graphics(device, cache, count, info, callbacks, pipelines);
+    LedgerCreatedPipelines(state, count, pipelines);
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL LedgerComputePipelines(VkDevice device, VkPipelineCache cache, std::uint32_t count, const VkComputePipelineCreateInfo* info, const VkAllocationCallbacks* callbacks, VkPipeline* pipelines) {
+    const auto state = MemoryLedgerDevice(device);
+    std::fill_n(pipelines, count, VK_NULL_HANDLE);
+    const auto result = state->compute(device, cache, count, info, callbacks, pipelines);
+    LedgerCreatedPipelines(state, count, pipelines);
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL LedgerDestroyPipeline(VkDevice device, VkPipeline pipeline, const VkAllocationCallbacks* callbacks) {
+    const auto state = MemoryLedgerDevice(device);
+    state->destroyPipeline(device, pipeline, callbacks);
+    if (pipeline == VK_NULL_HANDLE) return;
+    std::lock_guard lock(state->mutex);
+    --state->pipelines;
+    Graphics::vulkanPipelines.fetch_sub(1, std::memory_order_relaxed);
+}
+
+VKAPI_ATTR void VKAPI_CALL LedgerDestroyDevice(VkDevice device, const VkAllocationCallbacks* callbacks) {
+    const auto state = MemoryLedgerDevice(device);
+    state->destroyDevice(device, callbacks);
+    {
+        std::lock_guard lock(state->mutex);
+        for (const auto& [memory, allocation] : state->allocations) {
+            Graphics::vulkanHeapBytes[allocation.heap].fetch_sub(allocation.bytes, std::memory_order_relaxed);
+            Graphics::vulkanHeapAllocations[allocation.heap].fetch_sub(1, std::memory_order_relaxed);
+        }
+        Graphics::vulkanPipelines.fetch_sub(state->pipelines, std::memory_order_relaxed);
+    }
+    auto& devices = MemoryLedgerDevices();
+    std::lock_guard lock(devices.mutex);
+    devices.devices.erase(device);
+}
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL LedgerDeviceProc(VkDevice device, const char* name) {
+    const auto state = MemoryLedgerDevice(device);
+    const auto original = state->resolve(device, name);
+    if (original == nullptr) return nullptr;
+    if (std::strcmp(name, "vkAllocateMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerAllocateMemory);
+    if (std::strcmp(name, "vkFreeMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerFreeMemory);
+    if (std::strcmp(name, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerGraphicsPipelines);
+    if (std::strcmp(name, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerComputePipelines);
+    if (std::strcmp(name, "vkDestroyPipeline") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerDestroyPipeline);
+    if (std::strcmp(name, "vkDestroyDevice") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerDestroyDevice);
+    return original;
+}
+
+PFN_vkGetDeviceProcAddr TrackLedgerDevice(VkDevice device, PFN_vkGetDeviceProcAddr resolve, const VkPhysicalDeviceMemoryProperties& properties) {
+    if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return resolve;
+    auto state = std::make_shared<LedgerDevice>();
+    state->resolve = resolve;
+    state->properties = properties;
+    state->allocate = reinterpret_cast<PFN_vkAllocateMemory>(resolve(device, "vkAllocateMemory"));
+    state->free = reinterpret_cast<PFN_vkFreeMemory>(resolve(device, "vkFreeMemory"));
+    state->graphics = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(resolve(device, "vkCreateGraphicsPipelines"));
+    state->compute = reinterpret_cast<PFN_vkCreateComputePipelines>(resolve(device, "vkCreateComputePipelines"));
+    state->destroyPipeline = reinterpret_cast<PFN_vkDestroyPipeline>(resolve(device, "vkDestroyPipeline"));
+    state->destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(resolve(device, "vkDestroyDevice"));
+    auto& devices = MemoryLedgerDevices();
+    std::lock_guard lock(devices.mutex);
+    devices.devices.emplace(device, std::move(state));
+    return LedgerDeviceProc;
+}
+
 void check(VkResult result, const char* operation) {
     if (result == VK_ERROR_DEVICE_LOST) Graphics::ReportDeviceLost();
     if (result != VK_SUCCESS) {
@@ -1880,6 +2025,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     deviceInfo.pNext = &bdaFeatures;
     auto shaderProfile = std::make_unique<const ShaderDeviceProfile>(buildTarget(), deviceInfo, state->properties.limits);
     check(state->InstanceFunction<PFN_vkCreateDevice>("vkCreateDevice")(selected, &deviceInfo, nullptr, &state->device), "vkCreateDevice");
+    state->deviceProc = TrackLedgerDevice(state->device, state->deviceProc, state->memoryProperties);
     state->shaderProfile = std::move(shaderProfile);
     if (compileOnly) return;
     if (calibratedTimestamps != nullptr) {

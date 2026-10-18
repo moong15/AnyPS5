@@ -1,3 +1,4 @@
+#include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
@@ -240,6 +241,7 @@ void PipelineCache::save(bool final, bool waitForPipelines) {
         const auto result = getData(context.device, source, &size, file.data() + sizeof(FileHeader));
         if (result != VK_SUCCESS && result != VK_INCOMPLETE) return;
         file.resize(sizeof(FileHeader) + size);
+        if (ShaderRecompiler::HostMemoryLedgerEnabled()) pipelineCacheBlobBytes.store(size, std::memory_order_relaxed);
     }
     if (size < floor) {
         std::fprintf(stderr, "[pipeline-cache] keeping %s: the merged cache has %.1f KiB, less than the %.1f KiB on disk or loaded at start\n", path.string().c_str(), static_cast<double>(size) / 1024.0, static_cast<double>(floor) / 1024.0);
