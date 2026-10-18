@@ -644,6 +644,7 @@ endif()
 add_test_executable(agc_target_walk_skip_tests EXCLUDE_FROM_ALL
         tests/TargetWalkSkip.cpp
         Execution/src/GuestMemory.cpp
+        Execution/src/PerformanceTraceThread.cpp
 )
 target_include_directories(agc_target_walk_skip_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_target_walk_skip_tests PRIVATE shader_recompiler_agc_driver libc)
