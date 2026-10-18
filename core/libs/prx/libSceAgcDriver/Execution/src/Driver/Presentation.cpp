@@ -11,11 +11,17 @@
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <cstdlib>
 #include <cstdio>
+#include <array>
+#include <map>
+#include <mutex>
+#include <chrono>
+#include <iterator>
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#include <malloc.h>
 #endif
 
 namespace {
@@ -29,18 +35,186 @@ std::uint64_t ProcessPrivateBytes() {
 }
 
 struct ProcessRegions {
+    struct HeapBytes {
+        std::uint64_t allocated = 0;
+        std::uint64_t committed = 0;
+    };
+    struct Reservation {
+        std::uint64_t committed = 0;
+        std::uint64_t reserved = 0;
+        unsigned long protect = 0;
+    };
     std::uint64_t privateBytes = 0;
     std::uint64_t guestBytes = 0;
     std::uint64_t mappedBytes = 0;
     std::uint64_t imageBytes = 0;
+    std::size_t heaps = 0;
+    std::size_t otherHeaps = 0;
+    std::size_t summaryFailed = 0;
+    bool crtSeparate = false;
+    HeapBytes processHeap;
+    HeapBytes crtHeap;
+    HeapBytes otherHeap;
+    HeapBytes largestHeap;
+    std::uint64_t heapBytes = 0;
+    double walkMs = 0;
+    double walkAge = 0;
+    std::size_t walkEntries = 0;
+    std::size_t walkFailed = 0;
+    std::size_t nonheapGroups = 0;
+    std::uint64_t nonheapBytes = 0;
+    std::array<std::size_t, 6> bucketCounts{};
+    std::array<std::uint64_t, 6> bucketBytes{};
+    std::array<Reservation, 5> largestRegions{};
 };
+
+#ifdef _WIN32
+using HostRange = std::pair<std::uintptr_t, std::uintptr_t>;
+
+void MergeHostRanges(std::vector<HostRange>& ranges) {
+    std::sort(ranges.begin(), ranges.end());
+    std::size_t size = 0;
+    for (const auto range : ranges) {
+        if (size == 0 || range.first > ranges[size - 1].second) ranges[size++] = range;
+        else ranges[size - 1].second = std::max(ranges[size - 1].second, range.second);
+    }
+    ranges.resize(size);
+}
+
+struct HeapRanges {
+    std::vector<HostRange> ranges;
+    std::chrono::steady_clock::time_point sampled{};
+    double ms = 0;
+    std::size_t entries = 0;
+    std::size_t failed = 0;
+};
+
+void RefreshHeapRanges(HeapRanges& cache, const std::vector<HANDLE>& heaps) {
+    const auto start = std::chrono::steady_clock::now();
+    if (cache.sampled != std::chrono::steady_clock::time_point{} && start - cache.sampled < std::chrono::seconds(60)) return;
+    cache.ranges.clear();
+    cache.entries = 0;
+    cache.failed = 0;
+    struct Entry {
+        HostRange range;
+        bool region = false;
+    };
+    std::vector<Entry> scratch(4096);
+    std::vector<HostRange> busy;
+    for (const auto heap : heaps) {
+        for (;;) {
+            if (!HeapLock(heap)) {
+                ++cache.failed;
+                break;
+            }
+            PROCESS_HEAP_ENTRY entry{};
+            std::size_t used = 0;
+            std::size_t visited = 0;
+            bool full = false;
+            HostRange currentRegion{};
+            while (HeapWalk(heap, &entry)) {
+                ++visited;
+                if (!(entry.wFlags & (PROCESS_HEAP_REGION | PROCESS_HEAP_ENTRY_BUSY))) continue;
+                const auto begin = reinterpret_cast<std::uintptr_t>(entry.lpData);
+                const bool region = (entry.wFlags & PROCESS_HEAP_REGION) != 0;
+                const auto bytes = region ? static_cast<std::uint64_t>(entry.Region.dwCommittedSize) + entry.Region.dwUnCommittedSize : entry.cbData;
+                if (region) currentRegion = {begin, begin + bytes};
+                else if (begin >= currentRegion.first && begin + bytes <= currentRegion.second) continue;
+                if (used == scratch.size()) {
+                    full = true;
+                    break;
+                }
+                scratch[used++] = {{begin, begin + bytes}, region};
+            }
+            const auto error = GetLastError();
+            HeapUnlock(heap);
+            if (full) {
+                scratch.resize(scratch.size() * 2);
+                continue;
+            }
+            cache.entries += visited;
+            if (error != ERROR_NO_MORE_ITEMS) ++cache.failed;
+            for (std::size_t i = 0; i < used; ++i) {
+                if (scratch[i].region) cache.ranges.push_back(scratch[i].range);
+                else busy.push_back(scratch[i].range);
+            }
+            break;
+        }
+    }
+    MergeHostRanges(cache.ranges);
+    std::vector<HostRange> large;
+    for (const auto range : busy) {
+        const auto next = std::upper_bound(cache.ranges.begin(), cache.ranges.end(), HostRange{range.first, UINTPTR_MAX});
+        if (next != cache.ranges.begin() && std::prev(next)->second >= range.second) continue;
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(range.first), &info, sizeof(info)) == 0 || info.Type != MEM_PRIVATE) continue;
+        const auto base = reinterpret_cast<std::uintptr_t>(info.AllocationBase);
+        auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+        while (VirtualQuery(reinterpret_cast<const void*>(end), &info, sizeof(info)) != 0 && reinterpret_cast<std::uintptr_t>(info.AllocationBase) == base) {
+            const auto nextEnd = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            if (nextEnd <= end) break;
+            end = nextEnd;
+        }
+        large.emplace_back(base, end);
+    }
+    cache.ranges.insert(cache.ranges.end(), large.begin(), large.end());
+    MergeHostRanges(cache.ranges);
+    cache.sampled = start;
+    cache.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+#endif
 
 ProcessRegions ProcessCommittedRegions() {
     ProcessRegions result;
 #ifdef _WIN32
+    static HeapRanges heapRanges;
+    std::vector<HANDLE> heaps;
+    for (;;) {
+        const auto size = GetProcessHeaps(0, nullptr);
+        if (size == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "host heap enumeration");
+        heaps.resize(size);
+        const auto actual = GetProcessHeaps(size, heaps.data());
+        if (actual == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "host heap enumeration");
+        if (actual <= size) {
+            heaps.resize(actual);
+            break;
+        }
+    }
+    result.heaps = heaps.size();
+    const auto processHeap = GetProcessHeap();
+    const auto crtHeap = reinterpret_cast<HANDLE>(_get_heap_handle());
+    result.crtSeparate = crtHeap != processHeap;
+    static const auto summary = reinterpret_cast<decltype(&HeapSummary)>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "HeapSummary"));
+    for (const auto heap : heaps) {
+        const bool other = heap != processHeap && heap != crtHeap;
+        if (other) ++result.otherHeaps;
+        HEAP_SUMMARY bytes{};
+        bytes.cb = sizeof(bytes);
+        if (!summary || !summary(heap, 0, &bytes)) {
+            ++result.summaryFailed;
+            continue;
+        }
+        const ProcessRegions::HeapBytes value{bytes.cbAllocated, bytes.cbCommitted};
+        if (heap == processHeap) result.processHeap = value;
+        if (heap == crtHeap && result.crtSeparate) result.crtHeap = value;
+        if (other) {
+            result.otherHeap.allocated += value.allocated;
+            result.otherHeap.committed += value.committed;
+            if (value.committed > result.largestHeap.committed) result.largestHeap = value;
+        }
+    }
+    RefreshHeapRanges(heapRanges, heaps);
+    result.walkMs = heapRanges.ms;
+    result.walkAge = std::chrono::duration<double>(std::chrono::steady_clock::now() - heapRanges.sampled).count();
+    result.walkEntries = heapRanges.entries;
+    result.walkFailed = heapRanges.failed;
     const auto count = KernelGuestMemoryRanges_nid_no_patch(nullptr, 0);
     std::vector<std::uintptr_t> ranges(count * 2);
     KernelGuestMemoryRanges_nid_no_patch(ranges.data(), count);
+    std::vector<HostRange> excluded = heapRanges.ranges;
+    for (std::size_t i = 0; i < count; ++i) excluded.emplace_back(ranges[i * 2], ranges[i * 2 + 1]);
+    MergeHostRanges(excluded);
+    std::map<std::uintptr_t, ProcessRegions::Reservation> reservations;
     SYSTEM_INFO system{};
     GetSystemInfo(&system);
     const auto maximum = reinterpret_cast<std::uintptr_t>(system.lpMaximumApplicationAddress);
@@ -50,7 +224,10 @@ ProcessRegions ProcessCommittedRegions() {
         const auto begin = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
         const auto end = begin + info.RegionSize;
         if (end <= cursor) break;
+        if (info.State != MEM_FREE) reservations[reinterpret_cast<std::uintptr_t>(info.AllocationBase)].reserved += info.RegionSize;
         if (info.State == MEM_COMMIT) {
+            auto& reservation = reservations[reinterpret_cast<std::uintptr_t>(info.AllocationBase)];
+            if (reservation.protect == 0) reservation.protect = info.Protect;
             if (info.Type == MEM_PRIVATE) {
                 result.privateBytes += info.RegionSize;
                 for (std::size_t i = 0; i < count; ++i) {
@@ -58,10 +235,29 @@ ProcessRegions ProcessCommittedRegions() {
                     const auto last = std::min(end, ranges[i * 2 + 1]);
                     if (first < last) result.guestBytes += last - first;
                 }
+                std::uint64_t excludedBytes = 0;
+                auto range = std::lower_bound(excluded.begin(), excluded.end(), begin, [](const HostRange& value, std::uintptr_t address) { return value.second <= address; });
+                for (; range != excluded.end() && range->first < end; ++range) excludedBytes += std::min(end, range->second) - std::max(begin, range->first);
+                const auto nonheap = info.RegionSize - excludedBytes;
+                result.nonheapBytes += nonheap;
+                if (nonheap != 0) {
+                    reservation.committed += nonheap;
+                }
             } else if (info.Type == MEM_MAPPED) result.mappedBytes += info.RegionSize;
             else if (info.Type == MEM_IMAGE) result.imageBytes += info.RegionSize;
         }
         cursor = end;
+    }
+    result.heapBytes = result.privateBytes - result.guestBytes - result.nonheapBytes;
+    constexpr std::array<std::uint64_t, 5> limits{65536, 1048576, 16777216, 67108864, 268435456};
+    for (const auto& [base, reservation] : reservations) {
+        if (reservation.committed == 0) continue;
+        ++result.nonheapGroups;
+        const auto bucket = std::upper_bound(limits.begin(), limits.end(), reservation.committed) - limits.begin();
+        ++result.bucketCounts[bucket];
+        result.bucketBytes[bucket] += reservation.committed;
+        auto value = reservation;
+        for (auto& largest : result.largestRegions) if (value.committed > largest.committed) std::swap(value, largest);
     }
 #endif
     return result;
@@ -93,6 +289,8 @@ std::pair<std::uint64_t, std::uint64_t> ImportedHostBytes() {
 
 void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriver::Graphics::BufferPool>> pools = {}) {
     using namespace AgcDriver;
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
     const auto privateBytes = ProcessPrivateBytes();
     const auto regions = ProcessCommittedRegions();
     const auto host = Graphics::HostBufferCounters();
@@ -112,7 +310,7 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
     const auto cacheSaved = Graphics::pipelineCacheBlobBytes.load(std::memory_order_relaxed);
     const double attributed = static_cast<double>(regions.guestBytes) + mirrors.shadowBytes + storage.originalBytes + sampled.sampledHostBytes + resources.first + resources.second + shader.sourceBytes + shader.artifactBytes - shader.spirvMappedBytes + shader.memoBytes + trace;
     constexpr double mib = 1048576.0;
-    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f; vq private %.3f (guest %.0f, host %.0f) mapped %.0f image %.0f; vk dev %.0f (%llu) host %.0f (%llu); pipelines %llu cache %.0f; spirv %.0f (%zu; heap %.0f/%.0f mapped %.0f) vectors %.0f; cache loaded %.0f saved %.0f; vk import host %.0f (%llu) dev %.0f (%llu) unique %.0f guest %.0f; vk alloc host %.0f (%llu) dev %.0f (%llu)\n",
+    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f; vq private %.3f (guest %.0f, host %.0f) mapped %.0f image %.0f; vk dev %.0f (%llu) host %.0f (%llu); pipelines %llu cache %.0f; spirv %.0f (%zu; heap %.0f/%.0f mapped %.0f) vectors %.0f; cache loaded %.0f saved %.0f; vk import host %.0f (%llu) dev %.0f (%llu) unique %.0f guest %.0f; vk alloc host %.0f (%llu) dev %.0f (%llu)",
         privateBytes / mib, host.bytes / mib, static_cast<unsigned long long>(host.count), mirrors.heapBytes / mib, mirrors.nonHeapBytes / mib, storage.savedBytes / mib,
         recorder.drawSnapshotBytes[0] / mib, recorder.drawSnapshotBytes[1] / mib, recorder.unwrittenBytes / mib, recorder.keptBytes / mib, poolBytes / mib,
         mirrors.shadowBytes / mib, storage.originalBytes / mib, static_cast<unsigned long long>(storage.images), sampled.sampledHostBytes / mib, sampled.sampledEntries,
@@ -129,6 +327,22 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
         imported.first / mib, imported.second / mib,
         Graphics::vulkanAllocatedHeapBytes[1].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanAllocatedHeapAllocations[1].load(std::memory_order_relaxed)),
         Graphics::vulkanAllocatedHeapBytes[0].load(std::memory_order_relaxed) / mib, static_cast<unsigned long long>(Graphics::vulkanAllocatedHeapAllocations[0].load(std::memory_order_relaxed)));
+    double heapOther = 0;
+#ifdef _WIN32
+    const auto cpuHeapBytes = attributed - static_cast<double>(regions.guestBytes);
+    heapOther = static_cast<double>(regions.processHeap.allocated) + regions.crtHeap.allocated - cpuHeapBytes;
+#endif
+    std::fprintf(output, "; heaps %zu (failed %zu) process %.3f/%.3f crt %s %.3f/%.3f other-heaps %zu %.3f/%.3f largest %.3f/%.3f; heapwalk %.3f ms (%zu entries, %.3f s old, %zu failed); heap host %.3f heap-other %.3f nonheap host %.3f; nonheap groups %zu %.3f",
+        regions.heaps, regions.summaryFailed, regions.processHeap.allocated / mib, regions.processHeap.committed / mib,
+        regions.crtSeparate ? "separate" : "process", regions.crtHeap.allocated / mib, regions.crtHeap.committed / mib,
+        regions.otherHeaps, regions.otherHeap.allocated / mib, regions.otherHeap.committed / mib, regions.largestHeap.allocated / mib, regions.largestHeap.committed / mib,
+        regions.walkMs, regions.walkEntries, regions.walkAge, regions.walkFailed, regions.heapBytes / mib,
+        heapOther / mib, regions.nonheapBytes / mib, regions.nonheapGroups, regions.nonheapBytes / mib);
+    constexpr std::array<const char*, 6> labels{"<64K", "64K-1M", "1-16M", "16-64M", "64-256M", ">=256M"};
+    for (std::size_t i = 0; i < labels.size(); ++i) std::fprintf(output, "; nh %s %zu %.3f", labels[i], regions.bucketCounts[i], regions.bucketBytes[i] / mib);
+    std::fprintf(output, "; nh top");
+    for (const auto& region : regions.largestRegions) std::fprintf(output, " %.3f/%.3f/0x%lx", region.committed / mib, region.reserved / mib, region.protect);
+    std::fprintf(output, "\n");
 }
 
 }
