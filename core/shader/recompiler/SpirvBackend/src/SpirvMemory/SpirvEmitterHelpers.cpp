@@ -518,6 +518,14 @@ void DefineDescriptors(SpirvEmitterState& state) {
         state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferVariable, spv::DecorationDescriptorSet, WorkgroupMemoryDescriptorSet);
         state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferVariable, spv::DecorationBinding, 0u);
         state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferVariable, spv::DecorationCoherent);
+        if (state.requirements.ldsBufferInt64Atomics) {
+            state.ldsBufferU64Variable = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassStorageBuffer, StorageBufferU64BlockType(state)), spv::StorageClassStorageBuffer);
+            state.module.AddName(state.ldsBufferU64Variable, "workgroup_memory_u64");
+            state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferU64Variable, spv::DecorationDescriptorSet, WorkgroupMemoryDescriptorSet);
+            state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferU64Variable, spv::DecorationBinding, 0u);
+            state.module.AddAnnotation(spv::OpDecorate, state.ldsBufferU64Variable, spv::DecorationCoherent);
+            for (const auto variable : {state.ldsBufferVariable, state.ldsBufferU64Variable}) state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
+        }
     }
 }
 
