@@ -61,6 +61,7 @@ public:
     // commit's own read is the point: its commit is the first to run after the packets that came
     // before it, so a write recorded while it waits is ordered after the read it belongs to.
     static bool HeldReads(std::uint64_t address, std::size_t bytes);
+    void ReleaseRunningReads();
 
 private:
     struct Item {

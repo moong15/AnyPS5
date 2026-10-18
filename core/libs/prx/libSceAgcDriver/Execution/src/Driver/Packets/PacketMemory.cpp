@@ -317,6 +317,7 @@ bool Driver::enqueueDmaPacket(std::span<const std::uint32_t> packet, std::uint32
     if (!copy.has_value() || copy->destination % 4 != 0 || copy->bytes % 4 != 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->source), copy->bytes) || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->destination), copy->bytes, true)) return false;
     if (smallCopySourcePending(copy->source, copy->bytes, true)) return false;
     DrawPipeline::Queue0().Enqueue([this, queue, copy = *copy] {
+        DrawPipeline::Queue0().ReleaseRunningReads();
         GuestMemory::SetCurrentPacket(0x50, queue);
         if (copy.bytes > gpuStoreLimit) {
             GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);

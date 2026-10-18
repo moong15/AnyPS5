@@ -57,6 +57,7 @@ constexpr std::size_t VertexOffset = 0x2000;
 
 std::byte* ColorMemory = nullptr;
 std::byte* Pool = nullptr;
+std::byte* Copied = nullptr;
 
 alignas(256) constexpr std::array<std::uint32_t, 10> VertexCode{
     0xe0382000, 0x80020005, 0xe0382010, 0x80020405, 0xbf8c3f70,
@@ -219,6 +220,18 @@ void Submit(const std::vector<std::uint32_t>& words, const char* what) {
     Require(sceAgcDriverSubmitDcb(&packet) == 0, std::string("queued index read: the submission failed for ") + what);
 }
 
+std::vector<std::uint32_t> CopyPool(std::size_t bytes) {
+    const auto source = reinterpret_cast<std::uintptr_t>(Pool);
+    const auto destination = reinterpret_cast<std::uintptr_t>(Copied);
+    return {0xc0055000u, 0u, static_cast<std::uint32_t>(source), static_cast<std::uint32_t>(source >> 32u), static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>(destination >> 32u), static_cast<std::uint32_t>(bytes)};
+}
+
+void RequireCopiedImage(std::size_t bytes, const char* phase) {
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < bytes; ++i) differing += Copied[i] != Pool[i] ? 1u : 0u;
+    Require(differing == 0, std::string("queued index read: ") + phase + ": " + std::to_string(differing) + " of " + std::to_string(bytes) + " copied bytes miss the image's results over the copy source");
+}
+
 std::vector<std::uint32_t> WaitRegMem(std::uint64_t address, std::uint32_t reference) {
     return {0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), reference, 0xffffffffu, 0u};
 }
@@ -308,13 +321,32 @@ void WaitForHeldRange(std::uint64_t address, std::size_t bytes, const char* what
     Require(held, std::string("queued index read: the queued draw holds no read of its ") + what + " range");
 }
 
+void CopyPendingImage(std::size_t bytes, const char* phase) {
+    const auto poolAddress = reinterpret_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Pool));
+    ResetPool();
+    std::memset(Copied, 0, PoolBytes);
+    Submit(ImageWrite(), phase);
+    AgcDriverWaitIdle_nid_postfix();
+    Require(AgcDriver::Graphics::StorageTexture::AnyPending(), std::string("queued index read: ") + phase + ": the image write left no pending result to order against");
+    GateOpen = false;
+    GateUntilQueued();
+    Submit(CopyPool(bytes), phase);
+    WaitForHeldRange(poolAddress, bytes, "copy source");
+    WaitForCommits();
+    AgcDriverWaitIdle_nid_postfix();
+    LandPool();
+    RequireCopiedImage(bytes, phase);
+}
+
 }
 
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
+    _putenv_s("APS5_PIPELINE_DMA", "1");
 #else
     setenv("APS5_PIPELINED_DRAWS", "1", 1);
+    setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
         {
@@ -323,7 +355,9 @@ int main() {
         }
         ColorMemory = AllocateWatched(2 * Block);
         Pool = AllocateWatched(PoolBytes);
+        Copied = AllocateWatched(PoolBytes);
         GuestAllocations::Mutation().Add(Pool, PoolBytes, true, true, true);
+        GuestAllocations::Mutation().Add(Copied, PoolBytes, true, true, true);
         Register(VertexShader, VertexCode.data(), sizeof(VertexCode), 2);
         Register(PixelShader, PixelCode.data(), sizeof(PixelCode), 1);
         std::memset(Pool, Sentinel, PoolBytes);
@@ -386,6 +420,7 @@ int main() {
         AgcDriverWaitIdle_nid_postfix();
         RequireTriangle("the wait over the held range");
         Require(!VerticesIntact(), "queued index read: the image's results never reached the memory the wait covered");
+        CopyPendingImage(4096, "the queued copy of the image");
         std::puts("queued index read vs. deferred storage write-back tests passed");
         AgcDriverShutdown_nid_postfix();
         return 0;
