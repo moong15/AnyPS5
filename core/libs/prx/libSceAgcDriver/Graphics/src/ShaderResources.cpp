@@ -1110,14 +1110,15 @@ std::uint64_t StorageTextureCacheBudget(const Context& context) {
     return storageBudget(context);
 }
 
-TextureCacheUse TextureCacheUsage() {
+TextureCacheUse TextureCacheUsage(bool hostBytes) {
     TextureCacheUse use;
     {
         auto& sampled = Textures();
         std::lock_guard lock(sampled.mutex);
-        dropUncachedViews(sampled);
+        if (!hostBytes) dropUncachedViews(sampled);
         use.sampledEntries = sampled.entries.size();
         use.sampledBytes = sampled.bytes;
+        if (hostBytes) for (const auto& entry : sampled.entries) use.sampledHostBytes += entry.bytes.capacity();
     }
     use.storageBytes = storageCacheBytes();
     return use;
@@ -3920,6 +3921,17 @@ std::uint64_t ResourceCache::TableElementBudget() {
         return static_cast<std::uint64_t>(parsed != 0 ? parsed : 65536ull);
     }();
     return elements;
+}
+
+std::pair<std::uint64_t, std::uint64_t> ResourceCache::HostBytes() const {
+    std::lock_guard lock(mutex);
+    std::pair<std::uint64_t, std::uint64_t> bytes{};
+    for (const auto& entry : entries) {
+        const auto host = entry.resources->HostBytes();
+        bytes.first += host.first;
+        bytes.second += host.second;
+    }
+    return bytes;
 }
 
 std::uint64_t ResourceCache::TableElements() const {

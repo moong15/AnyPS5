@@ -113,6 +113,7 @@ private:
     bool orderReleased(std::uint32_t queue, std::uint64_t received) const;
     void noteWaitBlocked(std::uint32_t queue, std::uint64_t awaited, bool blocked);
     void reportPresents(double waitedMs, std::size_t inFlight);
+    void reportHostMemory();
     static bool dispatchRelocationEnabled();
     static std::uint64_t dispatchAliasKey(std::uint64_t identity, std::span<const std::uint32_t> userData, const DrawRelocation& relocation);
     void learnDispatchRelocation(std::uint64_t identity, std::span<const std::uint32_t> userData, const std::shared_ptr<DispatchVariant>& variant);

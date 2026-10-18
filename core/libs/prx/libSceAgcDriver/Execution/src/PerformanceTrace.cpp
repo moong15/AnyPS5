@@ -135,6 +135,20 @@ double seconds(Clock::duration elapsed) {
 
 }
 
+std::size_t PerformanceTrace::BufferBytes() {
+    std::size_t bytes = 0;
+    {
+        auto& state = session();
+        std::lock_guard lock(state.mutex);
+        for (const auto& thread : state.threads) bytes += thread->BufferBytes();
+    }
+    {
+        std::lock_guard lock(gpuMutex);
+        bytes += gpuRanges.capacity() * sizeof(TraceGpuRange);
+    }
+    return bytes;
+}
+
 void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
     if (!Configured() || local != nullptr) return;
     const bool windowed = std::getenv("APS5_TRACE_FRAMES") != nullptr || std::getenv("APS5_TRACE_SECONDS") != nullptr;

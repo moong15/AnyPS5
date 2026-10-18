@@ -19,6 +19,18 @@
 
 namespace ShaderRecompiler {
 
+struct ResidentMemoryStats {
+    std::size_t sources = 0;
+    std::size_t sourceBytes = 0;
+    std::size_t plans = 0;
+    std::size_t planBytes = 0;
+    std::size_t variants = 0;
+    std::size_t artifactBytes = 0;
+    std::size_t memoBytes = 0;
+};
+bool HostMemoryLedgerEnabled();
+ResidentMemoryStats ResidentStats();
+
 enum class ShaderStage {
     Compute,
     Vertex,

@@ -324,6 +324,9 @@ target_link_libraries(libSceAgcDriver PRIVATE
         jpeg_turbo
         ${CMAKE_DL_LIBS}
 )
+if(WIN32)
+    target_link_libraries(libSceAgcDriver PRIVATE psapi)
+endif()
 if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
 endif()
@@ -2116,6 +2119,8 @@ if(BUILD_TESTING)
         endif()
     endforeach()
     set_tests_properties(agc_driver_host_import_proofs PROPERTIES TIMEOUT 30)
+    set_tests_properties(agc_driver_host_memory_ledger PROPERTIES TIMEOUT 30)
+    set_property(TEST agc_driver_host_memory_ledger APPEND PROPERTY ENVIRONMENT "APS5_HOST_MEMORY_LEDGER=1")
     set_property(TEST agc_driver_pipelined_dma APPEND PROPERTY ENVIRONMENT "APS5_NO_GPU_SMALL_DMA_COPY=1")
     add_test(NAME agc_host_write_helper COMMAND agc_driver_host_write_ordering_tests --helper)
     add_test(NAME agc_host_write_helper_off COMMAND agc_driver_host_write_ordering_tests --helper)

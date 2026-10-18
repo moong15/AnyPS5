@@ -21,6 +21,9 @@
 #include <new>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
+#include <string_view>
+#include <type_traits>
 #include "ControlFlow/include/ControlFlow/GraphBuilder.hpp"
 #include "ControlFlow/include/ControlFlow/Structurizer.hpp"
 #include "RdnaDecoder/include/RdnaDecoder/RdnaInstructionDecoder.hpp"
@@ -444,6 +447,7 @@ struct SourceEntry : std::enable_shared_from_this<SourceEntry> {
     std::vector<std::uint32_t> linkedCallFallbacks;
     std::shared_ptr<const IrResourcePlan> plan;
     bool runtimeCaptured = false;
+    std::size_t planBytes = 0;
     // A plan build that threw (an unsupported resource chain or control flow) is remembered and
     // rethrown: the front end ran every pass before failing, ~13 ms per dispatch of a shader the
     // title issues every frame (0x1048947300 at the intro video). APS5_NO_FAILURE_MEMO=1 rebuilds.
@@ -502,6 +506,23 @@ struct SourceKeyHash {
     }
 };
 
+struct SourceRegistry {
+    PrimedSharedMutex mutex;
+    std::unordered_map<std::vector<std::uint64_t>, std::vector<std::shared_ptr<SourceEntry>>, SourceKeyHash> sources;
+};
+
+SourceRegistry& Sources() {
+    static SourceRegistry registry;
+    return registry;
+}
+
+void measurePlan(SourceEntry& source) {
+    source.planBytes = 0;
+    if (!HostMemoryLedgerEnabled() || source.plan == nullptr) return;
+    std::vector<std::byte> encoded;
+    if (ShaderDiskCache::EncodePlan(*source.plan, encoded)) source.planBytes = encoded.size();
+}
+
 bool FailureMemo() {
     static const bool memo = std::getenv("APS5_NO_FAILURE_MEMO") == nullptr;
     return memo;
@@ -523,9 +544,7 @@ bool releaseUndrawnPlans() {
 bool sameLayout(const BindingLayout& left, const BindingLayout& right);
 
 std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr, bool reclaim = true, const SourceHandle* preparedHandle = nullptr) {
-    static PrimedSharedMutex mutex;
-    // Entries whose code hashes alike share a bucket; the code comparison picks the right one.
-    static std::unordered_map<std::vector<std::uint64_t>, std::vector<std::shared_ptr<SourceEntry>>, SourceKeyHash> sources;
+    auto& [mutex, sources] = Sources();
     struct SourceKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, SourceKeyStorage>();
     RecompileCacheKey::Build(request, key);
@@ -576,6 +595,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
                 if (ShaderDiskCache::LoadPlan(planKey, loaded)) {
                     loaded.shaderHash = request.shader.codeAddress;
                     source->plan = std::make_shared<const IrResourcePlan>(std::move(loaded));
+                    measurePlan(*source);
                 }
             }
             if (source->plan == nullptr) {
@@ -589,6 +609,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
                     if (FailureMemo()) source->planFailure = std::current_exception();
                     throw;
                 }
+                measurePlan(*source);
                 if (disk) ShaderDiskCache::StorePlan(std::move(planKey), source->plan);
             }
         }
@@ -1806,6 +1827,54 @@ std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& re
         return acquirePlan(request, source, false);
     }
     return makeResourcePlan(request);
+}
+
+bool HostMemoryLedgerEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_HOST_MEMORY_LEDGER");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
+ResidentMemoryStats ResidentStats() {
+    ResidentMemoryStats stats;
+    std::vector<std::shared_ptr<SourceEntry>> entries;
+    {
+        auto& registry = Sources();
+        std::shared_lock lock(registry.mutex);
+        for (const auto& [key, bucket] : registry.sources) {
+            stats.sourceBytes += key.capacity() * sizeof(std::uint64_t);
+            entries.insert(entries.end(), bucket.begin(), bucket.end());
+        }
+    }
+    const auto vectorBytes = [](const auto& values) { return values.capacity() * sizeof(typename std::decay_t<decltype(values)>::value_type); };
+    std::unordered_set<const void*> modules;
+    const auto artifactBytes = [&](const CompiledShaderArtifact& artifact) {
+        const auto& words = artifact.spirv.Words();
+        const auto spirvBytes = modules.insert(words.data()).second ? words.size() * sizeof(std::uint32_t) : 0;
+        return spirvBytes + vectorBytes(artifact.vertexInputPatches) + vectorBytes(artifact.runtimeImageResources) + vectorBytes(artifact.vertexInputs) + vectorBytes(artifact.parameterExports) + vectorBytes(artifact.fragmentParameters) + vectorBytes(artifact.stencilReferences);
+    };
+    for (const auto& source : entries) {
+        std::lock_guard lock(source->mutex);
+        ++stats.sources;
+        stats.sourceBytes += vectorBytes(source->code) + vectorBytes(source->linkedCallFallbacks);
+        if (source->plan != nullptr) {
+            ++stats.plans;
+            stats.planBytes += source->planBytes;
+        }
+        stats.variants += source->variants.size();
+        for (const auto& variant : source->variants) stats.artifactBytes += artifactBytes(variant->artifact);
+        stats.memoBytes += source->memoIdentityBytes;
+        for (const auto& memo : source->memo) {
+            stats.memoBytes += (memo.identity.capacity() - memo.identity.size()) * sizeof(std::uint64_t) + (memo.userData.capacity() - memo.userData.size()) * sizeof(std::uint32_t);
+            if (memo.result != nullptr) {
+                const auto& result = *memo.result;
+                stats.memoBytes += artifactBytes(result) + vectorBytes(result.specialization) + vectorBytes(result.bindings) + vectorBytes(result.pushConstants) + vectorBytes(result.vertexAttributes) + vectorBytes(result.shaderDataUserWords) + vectorBytes(result.bufferBaseSlots);
+            }
+        }
+    }
+    return stats;
 }
 
 void ReleaseUndrawnResourcePlan(const SourceHandle& handle) {

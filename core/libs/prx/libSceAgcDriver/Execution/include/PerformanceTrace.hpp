@@ -176,6 +176,8 @@ public:
 
     inline static const std::atomic<bool> AlwaysBuffering{true};
 
+    std::size_t BufferBytes() const { return capacity * sizeof(Slice); }
+
     TraceThread(std::string name, const std::atomic<std::uint64_t>& presents, std::size_t capacity = DefaultCapacity, const std::atomic<bool>& buffering = AlwaysBuffering)
         : name(std::move(name)), presents(presents), buffering(buffering), slices(std::make_unique<Slice[]>(capacity)), capacity(capacity) {}
 
@@ -547,6 +549,7 @@ public:
     }
 
     static void StopOutput();
+    static std::size_t BufferBytes();
 
 private:
     friend bool ::AgcDriverTraceRecording_nid_postfix();

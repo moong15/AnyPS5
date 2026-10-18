@@ -19,6 +19,8 @@
 
 namespace AgcDriver::Graphics {
 
+inline std::atomic<std::uint64_t> hostPlacedBytes{0};
+
 class TextureDetiler;
 class GpuColorTransfer;
 class BufferPool;
@@ -306,9 +308,9 @@ struct Context {
         if (budget == 0 || (usage < budget && bytes <= budget - usage)) return type;
         for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
             if ((mask & (1u << i)) == 0 || (memory.memoryHeaps[memory.memoryTypes[i].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) continue;
-            static std::atomic<std::uint64_t> placements{0}, placedBytes{0};
+            static std::atomic<std::uint64_t> placements{0};
             const auto count = placements.fetch_add(1) + 1;
-            const auto total = placedBytes.fetch_add(bytes) + bytes;
+            const auto total = hostPlacedBytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
             if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] %s: device-local heap %u uses %llu of its %llu MiB budget, %llu bytes placed in host memory type %u; %llu such allocations, %llu MiB\n", what, heap, static_cast<unsigned long long>(usage >> 20u), static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(bytes), i, static_cast<unsigned long long>(count), static_cast<unsigned long long>(total >> 20u));
             return i;
         }

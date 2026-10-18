@@ -2778,11 +2778,24 @@ std::string AddressCopyOverflow(std::vector<AddressCopy> copies, std::uint64_t l
     return message;
 }
 
+std::pair<std::uint64_t, std::uint64_t> GuestBufferMemory::HostBytes() const {
+    std::pair<std::uint64_t, std::uint64_t> bytes{};
+    for (const auto& region : regions) {
+        bytes.first += region.snapshot.capacity();
+        bytes.second += region.uploaded.capacity();
+    }
+    return bytes;
+}
+
 MirrorStats MirrorCounters() {
     auto& state = Mirrors();
     std::lock_guard lock(state.mutex);
     MirrorStats stats{0, state.heapBytes, state.rebuilds, state.blocksCopied, state.heapRefills, state.sweeps, state.heapChecks, state.sparseBinds};
-    for (const auto& [base, mirror] : state.entries) stats.heapMirrors += mirror->heap ? 1 : 0;
+    for (const auto& [base, mirror] : state.entries) {
+        stats.heapMirrors += mirror->heap ? 1 : 0;
+        if (!mirror->heap) stats.nonHeapBytes += mirror->bytes;
+        stats.shadowBytes += mirror->shadow.capacity();
+    }
     return stats;
 }
 

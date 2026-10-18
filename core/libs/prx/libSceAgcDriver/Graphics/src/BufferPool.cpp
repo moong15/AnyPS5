@@ -186,6 +186,25 @@ std::size_t BufferPool::SlabBlocks() {
     return slabBlocks.size();
 }
 
+VkDeviceSize BufferPool::Retained() {
+    VkDeviceSize bytes = 0;
+    {
+        std::lock_guard lock(mutex);
+        for (const auto* tier : {&smallTier, &largeTier}) {
+            for (const auto& [key, slots] : tier->free) {
+                for (const auto& slot : slots) if (slot.allocation.mapping) bytes += slot.allocation.allocationBytes;
+            }
+        }
+    }
+    {
+        std::lock_guard lock(slabMutex);
+        for (const auto& [memory, block] : slabBlocks) {
+            if (block->mapping) bytes += SlabBlockBytes(block->slotBytes) - block->used * block->slotBytes;
+        }
+    }
+    return bytes;
+}
+
 bool BufferPool::DeviceTierEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("APS5_STAGING_POOL_MIB");

@@ -29,6 +29,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_BDA_DWORD_STORES` | presence | `core/shader/recompiler/Translation/src/MemoryInstructions/FlatInstructions.cpp` |  | reverts BDA writes to one address store per dword instead of a wide multi-dword store |
 | `APS5_DUMP_IR` | string | `core/shader/recompiler/Recompiler.cpp` |  | hex code address (or all) of the programs whose IR is printed after each front-end pass |
 | `APS5_GATHER_CONST` | integer | `core/shader/recompiler/SpirvBackend/src/SpirvImageEmitter.cpp` |  | integer every non-depth gather returns in all four texels instead of the sampled value |
+| `APS5_HOST_MEMORY_LEDGER` | string | `core/shader/recompiler/Recompiler.cpp` | off | 1 prints a host memory ledger to stderr at the first present and every 10 seconds; read once, with allocation counters maintained when off |
 | `APS5_IMAGE_TABLE_KEY_SCAN` | integer | `core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp` | 256 | number of image-table entries the key scan examines |
 | `APS5_IMAGE_TABLE_STRICT` | presence | `core/shader/recompiler/Optimization/src/ResourceMaterializer.cpp` |  | sets image-table materialization to its strict form; 0 leaves it off |
 | `APS5_NO_ATOMIC_BARRIER` | presence | `core/shader/recompiler/SpirvBackend/src/SpirvMemory/SpirvFormatConvert.cpp` |  | drops the device-scope acquire/release memory barrier emitted after atomics |

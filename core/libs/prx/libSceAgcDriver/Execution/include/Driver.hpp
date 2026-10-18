@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_HPP
 
 #include <cstdint>
+#include <cstdio>
 #include <span>
 #include "SceTypes.hpp"
 #include "SceShaders.hpp"
@@ -12,6 +13,7 @@ void Submit(const Packet* packet, std::uint32_t queue);
 
 }
 
+extern "C" void AgcDriverReportHostMemory_nid_no_patch(std::FILE* output);
 extern "C" void AgcDriverWaitIdle_nid_postfix();
 extern "C" void AgcDriverRaiseWorkerThreadPriority_nid_postfix(const char* role);
 extern "C" void AgcDriverLockVulkanLoader_nid_postfix();

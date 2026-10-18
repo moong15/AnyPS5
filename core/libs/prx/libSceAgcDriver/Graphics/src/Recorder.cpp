@@ -1188,6 +1188,17 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
 
 }
 
+namespace {
+
+std::array<std::atomic<std::uint64_t>, 2> hostDrawSnapshotBytes{};
+std::atomic<std::uint64_t> hostUnwrittenBytes{0}, hostKeptBytes{0};
+
+}
+
+RecorderHostStats RecorderHostCounters() {
+    return {{hostDrawSnapshotBytes[0].load(std::memory_order_relaxed), hostDrawSnapshotBytes[1].load(std::memory_order_relaxed)}, hostUnwrittenBytes.load(std::memory_order_relaxed), hostKeptBytes.load(std::memory_order_relaxed)};
+}
+
 Recorder::Recorder(const Context& context, bool timelineSemaphores) : context(context), id(nextRecorderId.fetch_add(1)) {
     {
         std::lock_guard lock(liveRecordersMutex);
@@ -1238,6 +1249,9 @@ Recorder::~Recorder() {
         hostWritePending.fetch_sub(found->second, std::memory_order_release);
         hostWriteRecorders.erase(found);
     }
+    for (std::size_t i = 0; i < drawSnapshotPools.size(); ++i) hostDrawSnapshotBytes[i].fetch_sub(drawSnapshotPools[i].bytes, std::memory_order_relaxed);
+    hostUnwrittenBytes.fetch_sub(unwrittenBytes, std::memory_order_relaxed);
+    hostKeptBytes.fetch_sub(inFlightKeptBytes, std::memory_order_relaxed);
     holdKept.clear();
     if (activeRecorder == this) {
         activeRecorder = nullptr;
@@ -2821,6 +2835,7 @@ std::size_t SnapshotPool(Recorder::SnapshotUse use) {
 void Recorder::eraseDrawSnapshot(std::map<DrawSnapshotKey, DrawSnapshot>::iterator entry) {
     auto& pool = drawSnapshotPools[SnapshotPool(std::get<1>(entry->first))];
     pool.bytes -= std::get<2>(entry->first);
+    hostDrawSnapshotBytes[SnapshotPool(std::get<1>(entry->first))].fetch_sub(std::get<2>(entry->first), std::memory_order_relaxed);
     pool.recency.erase(entry->second.recent);
     drawSnapshots.erase(entry);
 }
@@ -2839,6 +2854,7 @@ Recorder::UploadSlice Recorder::DrawUpload(std::size_t bytes) {
 void Recorder::retireUnwrittenSnapshots(const std::array<std::uint64_t, 3>& stamp) {
     if (stamp == unwrittenStamp) return;
     unwrittenSnapshots.clear();
+    hostUnwrittenBytes.fetch_sub(unwrittenBytes, std::memory_order_relaxed);
     unwrittenBytes = 0;
     unwrittenStamp = stamp;
 }
@@ -2855,11 +2871,13 @@ void Recorder::NoteUnwrittenDrawSnapshot(std::uint64_t address, std::size_t byte
     retireUnwrittenSnapshots(stamp);
     if (const auto found = unwrittenSnapshots.find(address); found != unwrittenSnapshots.end()) {
         unwrittenBytes -= found->second.bytes;
+        hostUnwrittenBytes.fetch_sub(found->second.bytes, std::memory_order_relaxed);
         unwrittenSnapshots.erase(found);
     }
     if (unwrittenSnapshots.size() >= UnwrittenSnapshotEntries || bytes > DrawSnapshotBudget - unwrittenBytes) return;
     unwrittenSnapshots.emplace(address, UnwrittenSnapshot{bytes, std::move(buffer), offset});
     unwrittenBytes += bytes;
+    hostUnwrittenBytes.fetch_add(bytes, std::memory_order_relaxed);
 }
 
 std::shared_ptr<Buffer> Recorder::ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint32_t* derived, std::uint64_t generation) {
@@ -2947,6 +2965,7 @@ void Recorder::KeepDrawSnapshot(std::uint64_t address, std::size_t bytes, std::u
         throw;
     }
     pool.bytes += bytes;
+    hostDrawSnapshotBytes[SnapshotPool(use)].fetch_add(bytes, std::memory_order_relaxed);
 }
 
 bool Recorder::KnownHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::optional<std::uint32_t>& highest) {
@@ -3713,6 +3732,7 @@ void Recorder::Submit() {
     }
     inFlight.push_back(std::move(batch));
     inFlightKeptBytes += inFlight.back()->keptBytes;
+    hostKeptBytes.fetch_add(inFlight.back()->keptBytes, std::memory_order_relaxed);
     if (activeRecorder == this) pendingLabelSince.store(NoPendingLabel, std::memory_order_release);
 }
 
@@ -4184,6 +4204,7 @@ void Recorder::waitFence(Batch& batch, int source) {
 
 void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool releaseNow) {
     inFlightKeptBytes -= batch->keptBytes;
+    hostKeptBytes.fetch_sub(batch->keptBytes, std::memory_order_relaxed);
     // The batch's writes stay published until its completions ran, on every exit path.
     struct Finishing {
         Recorder& recorder;

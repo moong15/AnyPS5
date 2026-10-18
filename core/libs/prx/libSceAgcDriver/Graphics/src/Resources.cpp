@@ -10,6 +10,8 @@ namespace AgcDriver::Graphics {
 
 namespace {
 
+std::atomic<std::uint64_t> hostBufferBytes{0}, hostBufferCount{0};
+
 VkDeviceSize ClassAllocationBytes(const VkMemoryRequirements& requirements, std::size_t capacity) {
     const auto alignment = std::max<VkDeviceSize>(requirements.alignment, 1);
     return std::max<VkDeviceSize>(requirements.size, (static_cast<VkDeviceSize>(capacity) + alignment - 1) / alignment * alignment);
@@ -37,6 +39,10 @@ VkBuffer BindExactBuffer(const Context& context, std::size_t size, VkBufferUsage
 
 }
 
+HostBufferStats HostBufferCounters() {
+    return {hostBufferBytes.load(std::memory_order_relaxed), hostBufferCount.load(std::memory_order_relaxed)};
+}
+
 Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) : context(context), size(size), capacity(BufferPool::Capacity(size, properties)), usage(BufferPool::Usage(usage, properties)), properties(properties) {
     Require(size != 0, "zero-sized GPU buffer");
     const bool addressable = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
@@ -62,6 +68,10 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
                 release();
                 throw;
             }
+        }
+        if (mapping) {
+            hostBufferBytes.fetch_add(allocationBytes, std::memory_order_relaxed);
+            hostBufferCount.fetch_add(1, std::memory_order_relaxed);
         }
         ready = true;
         return;
@@ -92,6 +102,10 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
             Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, offset), "vkBindBufferMemory slab");
             initializeAddress(usage);
             mapping = slot.mapping;
+            if (mapping) {
+                hostBufferBytes.fetch_add(allocationBytes, std::memory_order_relaxed);
+                hostBufferCount.fetch_add(1, std::memory_order_relaxed);
+            }
             ready = true;
             return;
         }
@@ -99,6 +113,10 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
         if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory, 0, VK_WHOLE_SIZE, 0, &mapping), "vkMapMemory");
+        if (mapping) {
+            hostBufferBytes.fetch_add(allocationBytes, std::memory_order_relaxed);
+            hostBufferCount.fetch_add(1, std::memory_order_relaxed);
+        }
         ready = true;
     } catch (...) {
         release();
@@ -111,6 +129,10 @@ Buffer::~Buffer() {
 }
 
 void Buffer::release() noexcept {
+    if (ready && mapping) {
+        hostBufferBytes.fetch_sub(allocationBytes, std::memory_order_relaxed);
+        hostBufferCount.fetch_sub(1, std::memory_order_relaxed);
+    }
     if (ready && cache) {
         cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, capacity, usage, properties, offset, slab, size});
         return;

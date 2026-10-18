@@ -70,6 +70,7 @@ public:
     SlabSlot TakeSlot(const Context& context, std::uint32_t memoryType, std::size_t capacity, bool addressable);
     VkDeviceSize PutSlot(VkDeviceMemory memory, VkDeviceSize offset) noexcept;
     std::size_t SlabBlocks();
+    VkDeviceSize Retained();
 
 private:
     struct SlabBlock {

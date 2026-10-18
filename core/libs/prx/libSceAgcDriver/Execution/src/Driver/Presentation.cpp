@@ -7,8 +7,73 @@
 #include <algorithm>
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <cstdlib>
+#include <cstdio>
+#include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#endif
+
+namespace {
+
+std::uint64_t ProcessPrivateBytes() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters))) return counters.PrivateUsage;
+#endif
+    return 0;
+}
+
+void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriver::Graphics::BufferPool>> pools = {}) {
+    using namespace AgcDriver;
+    const auto privateBytes = ProcessPrivateBytes();
+    const auto host = Graphics::HostBufferCounters();
+    std::uint64_t poolBytes = 0;
+    for (const auto& pool : pools) if (pool) poolBytes += pool->Retained();
+    const auto mirrors = Graphics::MirrorCounters();
+    const auto storage = Graphics::StorageHostCounters();
+    const auto sampled = Graphics::TextureCacheUsage(true);
+    auto& cache = Graphics::SharedResourceCache();
+    const auto resources = cache.HostBytes();
+    const auto entries = cache.Size();
+    const auto capacity = cache.Capacity();
+    const auto recorder = Graphics::RecorderHostCounters();
+    const auto shader = ShaderRecompiler::ResidentStats();
+    const auto trace = PerformanceTrace::BufferBytes();
+    const double attributed = static_cast<double>(host.bytes) + poolBytes + mirrors.shadowBytes + storage.originalBytes + sampled.sampledHostBytes + resources.first + resources.second + shader.sourceBytes + shader.planBytes + shader.artifactBytes + shader.memoBytes + trace;
+    constexpr double mib = 1048576.0;
+    std::fprintf(output, "[hostmem] private %.0f MiB: hostbuf %.0f (%llu; mirrors %.0f+%.0f, saved %.0f, drawsnap %.0f+%.0f, unwritten %.0f, kept %.0f) pool %.0f; cpu: shadow %.0f, original %.0f (%llu images), sampled %.0f (%zu), rescache %.0f+%.0f (%zu/%zu), shader %zu sources %.0f %zu plans %.0f variants %zu %.0f memo %.0f, trace %.0f; other %.0f; fallback %.0f cumulative; imports pinned %.0f\n",
+        privateBytes / mib, host.bytes / mib, static_cast<unsigned long long>(host.count), mirrors.heapBytes / mib, mirrors.nonHeapBytes / mib, storage.savedBytes / mib,
+        recorder.drawSnapshotBytes[0] / mib, recorder.drawSnapshotBytes[1] / mib, recorder.unwrittenBytes / mib, recorder.keptBytes / mib, poolBytes / mib,
+        mirrors.shadowBytes / mib, storage.originalBytes / mib, static_cast<unsigned long long>(storage.images), sampled.sampledHostBytes / mib, sampled.sampledEntries,
+        resources.first / mib, resources.second / mib, entries, capacity, shader.sources, shader.sourceBytes / mib, shader.plans, shader.planBytes / mib, shader.variants, shader.artifactBytes / mib, shader.memoBytes / mib,
+        trace / mib, (static_cast<double>(privateBytes) - attributed) / mib, Graphics::hostPlacedBytes.load(std::memory_order_relaxed) / mib, 0.0);
+}
+
+}
+
+extern "C" void AgcDriverReportHostMemory_nid_no_patch(std::FILE* output) {
+    if (ShaderRecompiler::HostMemoryLedgerEnabled()) ReportHostMemory(output);
+}
 
 namespace AgcDriver::DriverDetail {
+
+void Driver::reportHostMemory() {
+    if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return;
+    static std::atomic<std::int64_t> nextReport{0};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto next = nextReport.load(std::memory_order_relaxed);
+    if (now < next || !nextReport.compare_exchange_strong(next, now + 10000, std::memory_order_relaxed)) return;
+    std::vector<std::shared_ptr<Graphics::BufferPool>> pools;
+    {
+        GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Present);
+        std::lock_guard lock(GuestMemory::GpuMutex());
+        if (const auto current = device.Load()) pools.push_back(current->HostBufferPool());
+        for (const auto& previous : replacedDevices) pools.push_back(previous->HostBufferPool());
+    }
+    ReportHostMemory(stderr, pools);
+}
 
 std::uint32_t Driver::ReserveEopFlip(const FlipInfo& info) {
     std::lock_guard lock(mutex);
@@ -55,6 +120,7 @@ void Driver::AttachWindow(const PresentationWindow& window) {
 }
 
 void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buffer, bool opaque, void (*gpuReady)(void*), void* context) {
+    reportHostMemory();
     if (PerformanceTrace::Configured()) PerformanceTrace::Present(window.width, window.height, device.Load().get());
     PerformanceContext timingContext(window.timing.get());
     PerformanceTimer timing("Driver.Present");

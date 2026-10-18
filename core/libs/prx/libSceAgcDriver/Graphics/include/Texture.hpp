@@ -23,6 +23,13 @@
 
 namespace AgcDriver::Graphics {
 
+struct StorageHostStats {
+    std::uint64_t images = 0;
+    std::uint64_t originalBytes = 0;
+    std::uint64_t savedBytes = 0;
+};
+StorageHostStats StorageHostCounters();
+
 class Buffer;
 class ResidentColor;
 class CommandBatch;
@@ -550,6 +557,7 @@ private:
     std::uint64_t sliceLinearBytes = 0;
     SurfaceGeometry geometry;
     std::vector<std::byte> original;
+    void resizeOriginal(std::size_t bytes);
     mutable std::array<std::uint64_t, 5> comparedGuestBytes{};
     std::vector<std::byte> generationBaseline;
     // DCC keys the image content was uploaded under: a fast-cleared surface starts as its clear value.

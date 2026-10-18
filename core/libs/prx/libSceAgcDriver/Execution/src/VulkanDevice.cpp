@@ -3630,6 +3630,10 @@ bool VulkanDevice::GraphicsPipelineLibraries() const {
     return state->graphicsPipelineLibrary;
 }
 
+std::shared_ptr<Graphics::BufferPool> VulkanDevice::HostBufferPool() const {
+    return state->bufferPool;
+}
+
 Graphics::Context VulkanDevice::graphicsContext() const {
     static const bool noCache = std::getenv("APS5_NO_CONTEXT_CACHE") != nullptr;
     if (state->contextReady && !noCache) return state->context;

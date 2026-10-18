@@ -35,6 +35,7 @@ struct ComputePipelineObjects;
 
 class VulkanDevice {
 public:
+    std::shared_ptr<Graphics::BufferPool> HostBufferPool() const;
     explicit VulkanDevice(const PresentationWindow* window = nullptr);
     struct CompileOnly {};
     explicit VulkanDevice(CompileOnly);

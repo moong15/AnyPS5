@@ -41,8 +41,9 @@ struct TextureCacheUse {
     std::size_t sampledEntries = 0;
     std::uint64_t sampledBytes = 0;
     std::uint64_t storageBytes = 0;
+    std::uint64_t sampledHostBytes = 0;
 };
-TextureCacheUse TextureCacheUsage();
+TextureCacheUse TextureCacheUsage(bool hostBytes = false);
 std::uint64_t SampledTextureCacheBudget(const Context& context);
 std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words);
 bool SampledTexturesShareEntry(std::span<const std::uint32_t> first, std::span<const std::uint32_t> second);
@@ -223,6 +224,7 @@ public:
     bool ReadsImage(const StorageTexture* image) const;
     bool HasCachedStorageImages() const;
     bool HoldsReleasedTexture() const;
+    std::pair<std::uint64_t, std::uint64_t> HostBytes() const { return guestMemory.HostBytes(); }
     std::uint32_t TableElements() const { return tableElements[0] + tableElements[1]; }
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
     const std::vector<std::uint32_t>& FragmentLayoutKey() const { return fragmentLayoutKey; }
@@ -669,6 +671,7 @@ public:
     std::size_t Capacity() const;
     void SetBase(std::size_t entries, std::size_t shrinkWindow);
     std::uint64_t TableElements() const;
+    std::pair<std::uint64_t, std::uint64_t> HostBytes() const;
     static std::uint64_t TableElementBudget();
     static constexpr std::size_t InitialEntries = 1024;
     static constexpr std::size_t MaximumEntries = 16384;
