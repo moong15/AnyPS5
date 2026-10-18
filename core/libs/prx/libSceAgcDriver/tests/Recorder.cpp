@@ -3621,6 +3621,86 @@ void untrackedForgetTests(const Device& device) {
     std::cout << "untracked comparison memo: ok\n";
 }
 
+void untrackedKeyProofTests() {
+    const bool stamped = std::getenv("APS5_NO_UNTRACKED_KEY_PROOFS") == nullptr;
+    constexpr std::uint32_t side = 128;
+    constexpr std::size_t surfaceBytes = side * side * 4;
+    constexpr std::size_t bytes = surfaceBytes + 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the untracked key block");
+    auto* texels = static_cast<std::uint8_t*>(block);
+    std::memset(texels, 0x55, surfaceBytes);
+    std::memset(texels + surfaceBytes, 0x00, 65536);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        void* block;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } unregister{block};
+    const auto keys = address + surfaceBytes;
+    const auto keyCount = DccKeyBytes(surfaceBytes);
+    if (AgcDriver::GuestMemory::CollectWrites(keys, keyCount) != 0) {
+        std::cout << "the key range is write-watched: key proofs over untracked memory not tested\n";
+        return;
+    }
+    GuestTextureResource resource{};
+    resource.baseAddress = address;
+    resource.width = side;
+    resource.height = side;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    resource.dccAddress = keys;
+    Require(DescribeSurface(resource).guestBytes == surfaceBytes, "the key test surface has an unexpected size");
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    DccKeyProof proof;
+    const auto before = KeyProofCounts();
+    Require(ProvedClearKeys(resource, surfaceBytes, proof) == DccKeys::Clear0000, "0x00 keys are not a 0000 clear");
+    Require(ProvedClearKeys(resource, surfaceBytes, proof) == DccKeys::Clear0000, "the proved keys changed");
+    const auto proved = KeyProofCounts();
+    Require(proved.scanned == before.scanned + (stamped ? 1 : 2) && proved.proved == before.proved + (stamped ? 1 : 0), "the second key proof did not follow the untracked proof switch");
+    std::memset(texels + surfaceBytes, 0xff, keyCount);
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    Require(ProvedClearKeys(resource, surfaceBytes, proof) != DccKeys::Clear0000, "keys stored before a new collect epoch were not read again");
+    Require(KeyProofCounts().scanned == proved.scanned + 1, "a key proof survived a store and a new collect epoch");
+    {
+        std::unique_lock gpu(AgcDriver::GuestMemory::GpuMutex());
+        DccRangeProof range;
+        const auto start = KeyProofCounts();
+        const auto first = ProvedCurrentDccKeys(keys, surfaceBytes, range);
+        Require(ProvedCurrentDccKeys(keys, surfaceBytes, range) == first, "the proved key range changed");
+        const auto after = KeyProofCounts();
+        Require(after.rangeScanned == start.rangeScanned + (stamped ? 1 : 2) && after.rangeProved == start.rangeProved + (stamped ? 1 : 0), "the second key range proof did not follow the untracked proof switch");
+        std::memset(texels + surfaceBytes, 0x00, keyCount);
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        Require(ProvedCurrentDccKeys(keys, surfaceBytes, range) == DccKeys::Clear0000, "the key range proof survived a CPU store and a new collect epoch");
+        Require(KeyProofCounts().rangeScanned == after.rangeScanned + 1, "the new collect epoch did not scan the key range again");
+    }
+    std::cout << "key proofs over untracked memory: ok\n";
+}
+
 void untrackedRevalidateTests(const Device& device, Recorder& recorder) {
     auto context = device.GetContext();
     context.nullDescriptors = device.NullDescriptors();
@@ -8813,6 +8893,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--untracked-revalidate-only") {
             untrackedRevalidateTests(device, recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--untracked-key-proofs-only") {
+            untrackedKeyProofTests();
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--untracked-forget-only") {
