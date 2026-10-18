@@ -74,10 +74,10 @@ void ExpectNoDrain(std::uint32_t opcode, std::uint64_t before, const char* what)
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
-    _putenv_s("APS5_NO_PIPELINE_DMA", "");
+    _putenv_s("APS5_PIPELINE_DMA", "1");
 #else
     setenv("APS5_PIPELINED_DRAWS", "1", 1);
-    unsetenv("APS5_NO_PIPELINE_DMA");
+    setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
         alignas(256) static std::array<std::uint32_t, 1024> first{};
@@ -141,6 +141,15 @@ int main() {
             Gate gate;
             Hold(gate, held, sizeof(pending));
             words.clear();
+            Append(words, DmaData(false, held, 0, other, 2));
+            ExpectDrains(words, 0x50, gate, "an unaligned copy of an uncommitted pipeline write did not drain");
+        }
+        AgcDriverWaitIdle_nid_postfix();
+
+        {
+            Gate gate;
+            Hold(gate, held, sizeof(pending));
+            words.clear();
             Append(words, std::array<std::uint32_t, 4>{0xc0022000u, 0x31100u, static_cast<std::uint32_t>(held), static_cast<std::uint32_t>(held >> 32u)});
             Append(words, std::array<std::uint32_t, 2>{0xc0001301u, 32u});
             ExpectDrains(words, 0x13, gate, "a predicated packet whose predicate overlaps an uncommitted write did not drain");
@@ -150,9 +159,11 @@ int main() {
         {
             Gate gate;
             Hold(gate, held, sizeof(pending));
+            const auto resetBefore = DrawPipeline::DrainRequestsByOpcode(0x10);
             words.clear();
             Append(words, std::array<std::uint32_t, 2>{0xc0001024u, 0u});
-            ExpectDrains(words, 0x10, gate, "DISPATCH_RESET did not drain the pipeline");
+            Submit(words);
+            ExpectNoDrain(0x10, resetBefore, "DISPATCH_RESET drained the pipeline");
         }
 
         LibcRunShutdown_nid_postfix();

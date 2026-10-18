@@ -48,9 +48,16 @@ void traceIndexPacket(const Submission& submission, std::size_t cursor, std::spa
     AgcDriver::indexTrace("[index-base] packet serial=%llu queue=0x%x cursor=%zu source=0x%llx op=%s base=0x%llx limitIndices=%u type=%u primitive=%u raw:%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(source != submission.indexCommandSources.end() ? source->second : 0), Pm4::Name(packet[0]).c_str(), static_cast<unsigned long long>(queue.indexBase), queue.indexBufferSize, queue.indexType, queue.userConfig.contains(0x242) ? queue.userConfig.at(0x242) : 0u, words.c_str());
 }
 
+constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
+
 bool orderedFills() {
     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
     return ordered;
+}
+
+bool pipelineDma() {
+    static const bool enabled = std::getenv("APS5_PIPELINE_DMA") != nullptr;
+    return enabled;
 }
 
 bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t header, std::uint32_t opcode) {
@@ -63,22 +70,22 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
         case 0x63: case 0x64: case 0x9f:
             return packet.size() >= 5 && !DrawPipeline::Queue0().Overlaps(packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u), static_cast<std::size_t>(packet[4]) * 8);
         case 0x50: {
-            if (packet.size() < 7) return false;
+            if (!pipelineDma() || packet.size() < 7) return false;
             const auto destination = Pm4::DmaDestination(packet);
             if (destination == Pm4::DmaSelectGds || destination == Pm4::DmaDestinationNowhere) return true;
             const auto bytes = Pm4::DmaBytes(packet);
             if (bytes == 0) return true;
-            const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
             const auto source = Pm4::DmaSource(packet);
             if ((source == 0 || source == 3) && DrawPipeline::Queue0().Overlaps(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), bytes)) {
                 ++Graphics::Recorder::SmallDmaStats().sourceChecks;
                 return false;
             }
+            const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
             return !DrawPipeline::Queue0().Overlaps(address, bytes);
         }
         case 0x10: {
             const auto operation = (header >> 2u) & 0x3fu;
-            return operation != 0x09;
+            return operation == 0 || operation == 0x09 || operation == 0x0b || operation == 0x0c || operation == 0x1a;
         }
         default: return false;
     }
@@ -113,6 +120,24 @@ void checkDeferredShadersOnShRegWrite(std::uint32_t opcode, std::span<const std:
         if (checkMesh) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x088u, {6});
         if (checkTess) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x108u, {7});
     }
+}
+
+void Driver::deliverGuestEopInterrupt(std::uint32_t queue) {
+    if (!AgcDriverDeliverEopInterrupt(queue)) return;
+    std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
+    eopSelfSignalFlips[queue] = 0;
+}
+
+void Driver::deliverFlipEopInterrupt(std::uint32_t queue) {
+    {
+        std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
+        const auto latched = eopSelfSignalFlips.find(queue);
+        if (latched != eopSelfSignalFlips.end()) {
+            if (++latched->second <= eopSelfSignalFlipLimit) return;
+            eopSelfSignalFlips.erase(latched);
+        }
+    }
+    AgcDriverDeliverEopInterrupt(queue);
 }
 
 template <typename TWork>
@@ -288,7 +313,7 @@ void Driver::execute(const Submission& submission) {
         if (pipelined && DrawPipeline::Queue0().Busy() && !keepsDrawPipeline(packet, header, opcode)) {
             const auto start = std::chrono::steady_clock::now();
             const auto queued = opcode == 0x50 ? DrawPipeline::QueuedItems() : 0;
-            const auto drained = DrawPipeline::Queue0().DrainPacket(packet);
+            const auto drained = opcode == 0x50 && !pipelineDma() ? DrawPipeline::Queue0().DrainPacket(opcode, {}, {}, false) : DrawPipeline::Queue0().DrainPacket(packet);
             if (opcode == 0x50) {
                 auto& stats = Graphics::Recorder::SmallDmaStats();
                 ++stats.drainCalls;
@@ -308,7 +333,6 @@ void Driver::execute(const Submission& submission) {
         GuestMemory::SetCurrentPacket(header == FlipPacketHeader ? 0xffffu : opcode, submission.queue);
         CaptureTrace::Log("packet submission=%llu queue=%x offset=%zu header=%08x words=%zu", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, header, packet.size());
         if (predicated) {
-            if (pipelined && DrawPipeline::Queue0().Busy() && DrawPipeline::Queue0().Overlaps(queue.predication.address, queue.predication.operation == 3 ? 8 : 4)) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, opcode);
             landPendingWaits(submission.queue);
             recordQueuedLabelsBeforeRead(submission.queue);
             if (!Pm4::PredicationPasses(queue)) {
@@ -384,7 +408,7 @@ void Driver::execute(const Submission& submission) {
                     Pm4::Execute(packet, queue);
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
                 }
-                if (endOfPipeInterrupt && !interruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
+                if (endOfPipeInterrupt && !interruptDeferred) deliverGuestEopInterrupt(submission.queue);
             }
             if (deviceUse.owns_lock()) deviceUse.unlock();
             CheckFailure();
@@ -400,10 +424,10 @@ void Driver::execute(const Submission& submission) {
                 if (localDevice != nullptr) {
                     localDevice->FlipBatches(batchesAtFlip, unsignaledAtFlip);
                     const auto queueId = submission.queue;
-                    flipInterruptDeferred = localDevice->AfterRecordedWork([queueId] { AgcDriverDeliverEopInterrupt(queueId); }, false);
+                    flipInterruptDeferred = localDevice->AfterRecordedWork([this, queueId] { deliverFlipEopInterrupt(queueId); }, false);
                 }
             }
-            if (!flipInterruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
+            if (!flipInterruptDeferred) deliverFlipEopInterrupt(submission.queue);
             ++flipsCounted;
             if (batchesAtFlip != 0) flipSerial = batchesAtFlip;
             flipBatchesUnsignaled += unsignaledAtFlip;
@@ -531,7 +555,7 @@ void Driver::execute(const Submission& submission) {
                     checkDeferredShadersOnShRegWrite(opcode, packet, cursor, submission, device.Load(), queue);
                 }
             }
-            if (endOfPipeInterrupt && !interruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
+            if (endOfPipeInterrupt && !interruptDeferred) deliverGuestEopInterrupt(submission.queue);
         }
         if (drawPacket || (sampleDump && wroteOnGpu)) Graphics::Recorder::CountRecordedWork();
         timing.Mark(header == RenderingWaitPacketHeader ? "rendering_wait" : opcode == 0x3c || opcode == 0x93 ? "memory_wait" : opcode == 0x15 || opcode == 0x16 ? "dispatch" : drawPacket ? "draw" : "execute");

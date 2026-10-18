@@ -277,6 +277,8 @@ When a register points at readable memory that starts with at least four printab
 
 Set `APS5_CRASH_INDIRECT_MEMORY=1` before launching the executable to include up to 64 bytes from each pointer found in the register memory dump. The report labels each block with its register, pointer offset and target address. Inaccessible, incomplete and executable targets are skipped. This additional dump is disabled when the variable is unset or empty.
 
+Set `APS5_CRASH_STACK_BYTES=<n>` to print, after the stack return address candidates, the faulting thread's stack words from `rsp` for `n` bytes (at most 1048576, decimal or `0x` hexadecimal), four words per line with their offset from `rsp`. Below them the report prints eight words at every distinct stack word that points at readable, non-executable memory outside the thread's stack, labelled with the word's offset and the address it holds, up to 256 addresses. This shows the objects the caller frames kept, such as the `this` of a destructor or the buffer of a container. The dump stops at the first unreadable stack page, and nothing is printed when the variable is unset, empty or 0.
+
 ### GPU submission rings and stall dumps
 
 Each GPU queue keeps its last 16 command buffer submissions: when each was submitted, its serial, size and guest address, and a copy of its first 512 dwords after indirect buffers are inlined. `APS5_PM4_RING=<n>` keeps the last `n` instead, from 0 to 4096; 0 keeps none, and any other value stops the title at its first submission. The rings are printed to stderr, one line per submission and one per decoded packet, when the Windows crash report runs: an unhandled exception, `abort()`, an invalid CRT parameter or the timed dump of `APS5_HANG_DUMP_SECS`.

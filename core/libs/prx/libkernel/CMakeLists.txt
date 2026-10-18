@@ -700,8 +700,20 @@ if(BUILD_TESTING)
     configure_windows_unwind(guest_semaphore_tests)
     add_test(NAME guest_semaphore COMMAND guest_semaphore_tests)
     set_tests_properties(guest_semaphore PROPERTIES TIMEOUT 20)
+    if(Python3_Interpreter_FOUND)
+        add_test_executable(semaphore_trace_tests
+            ${LIBS_INCLUDE_DIR}/tests/SemaphoreTrace.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Semaphore.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/Time/TimedWait.cpp)
+        target_include_directories(semaphore_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        find_package(Threads REQUIRED)
+        target_link_libraries(semaphore_trace_tests PRIVATE Threads::Threads libc)
+        add_test(NAME guest_semaphore_trace COMMAND ${Python3_EXECUTABLE}
+            ${LIBS_INCLUDE_DIR}/tests/test_semaphore_trace.py $<TARGET_FILE:semaphore_trace_tests>)
+        set_tests_properties(guest_semaphore_trace PROPERTIES TIMEOUT 20)
+    endif()
     if(WIN32)
-        set_tests_properties(guest_semaphore PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_semaphore guest_semaphore_trace PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_pthread_timed_locks_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadTimedLocks.cpp)
@@ -1278,6 +1290,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_tcp PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_tcp PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_socket_port_zero_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketPortZero.cpp)
+    target_include_directories(guest_socket_port_zero_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_socket_port_zero_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_socket_port_zero_tests)
+    add_test(NAME guest_socket_port_zero COMMAND guest_socket_port_zero_tests)
+    set_tests_properties(guest_socket_port_zero PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_socket_port_zero PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_socket_pair_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketPair.cpp)

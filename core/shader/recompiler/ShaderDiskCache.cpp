@@ -89,7 +89,7 @@ namespace ShaderRecompiler::ShaderDiskCache {
 static_assert(sizeof(CompiledShaderArtifact) == 240, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 208, "ShaderInvocation changed: update the invocation encoder");
 static_assert(sizeof(RecompileResult) == 496, "RecompileResult changed: update EncodeResult and DecodeResult");
-static_assert(sizeof(DescriptorBinding) == 592, "DescriptorBinding changed: update the binding encoder");
+static_assert(sizeof(DescriptorBinding) == 632, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
 static_assert(sizeof(FragmentParameter) == 16, "FragmentParameter changed: update the parameter encoder");
@@ -157,7 +157,7 @@ static_assert(fieldCount<ResourceBlock>() == 4, "ResourceBlock changed: update t
 static_assert(fieldCount<SrtRead>() == 2, "SrtRead changed: update the plan encoder");
 static_assert(fieldCount<UniformFill>() == 5, "UniformFill changed: update the plan encoder");
 static_assert(fieldCount<UniformFillPlan>() == 2, "UniformFillPlan changed: update the plan encoder");
-static_assert(fieldCount<DescriptorBinding>() == 22, "DescriptorBinding changed: update the binding plan encoder");
+static_assert(fieldCount<DescriptorBinding>() == 23, "DescriptorBinding changed: update the binding plan encoder");
 static_assert(fieldCount<PreparedDescriptorBinding>() == 8, "PreparedDescriptorBinding changed: update the binding plan encoder");
 static_assert(fieldCount<PreparedImageMetadata>() == 3, "PreparedImageMetadata changed: update the binding plan encoder");
 static_assert(fieldCount<DescriptorBindingPlan>() == 5, "DescriptorBindingPlan changed: update the binding plan encoder");
@@ -439,6 +439,7 @@ void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Flags(binding.imageUnnormalized);
     writer.Flags(binding.imageUnnormalizedBaseLevel);
     writer.Flags(binding.samplerIntegerBorder);
+    writer.Flags(binding.samplerCoordinatesIgnored);
     writer.Values(std::span<const std::uint32_t>(binding.imageSamplers));
     writer.Flags(binding.bufferRead);
 }
@@ -466,6 +467,7 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     reader.Flags(binding.imageUnnormalized);
     reader.Flags(binding.imageUnnormalizedBaseLevel);
     reader.Flags(binding.samplerIntegerBorder);
+    reader.Flags(binding.samplerCoordinatesIgnored);
     reader.Values(binding.imageSamplers);
     reader.Flags(binding.bufferRead);
 }

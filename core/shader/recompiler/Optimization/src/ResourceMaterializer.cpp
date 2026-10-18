@@ -1644,6 +1644,10 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
     return modes;
 }
 
+bool ResourceMaterializer::NullImageDescriptor(const ImageResource& image, const DescriptorValue& descriptor) {
+    return nullImageDescriptor(image, descriptor);
+}
+
 const char* ResourceMaterializer::UnnormalizedSampleMismatch(const ImageResource& image) {
     if (image.table != NoTable) return "samples an image selected at run time";
     if (image.constantSwizzle) return nullptr;
