@@ -6301,6 +6301,7 @@ void prewarmPipelineTests() {
     context.device = makeHandle<VkDevice>();
     context.limits.maxColorAttachments = 8;
     context.limits.maxPushConstantsSize = 256;
+    context.graphicsPipelineLibrary = true;
     DescriptorCache cache(context);
     context.descriptorCache = &cache;
     RecompileResult vertex;
@@ -6317,11 +6318,11 @@ void prewarmPipelineTests() {
     state.colors.push_back(state.color);
     state.blend.colorWriteMask = 15;
     state.blends.push_back(state.blend);
-    const auto createsBefore = mock.graphicsPipelineCreateCount;
+    const auto createsBefore = mock.pipelineCreateCount;
     PrewarmPipeline(context, state, shaders);
-    Require(mock.graphicsPipelineCreateCount == createsBefore + 1, "PrewarmPipeline did not create a pipeline on miss");
+    Require(mock.pipelineCreateCount == createsBefore + 1, "PrewarmPipeline did not create a pipeline on miss");
     PrewarmPipeline(context, state, shaders);
-    Require(mock.graphicsPipelineCreateCount == createsBefore + 1, "PrewarmPipeline recreated an already warmed pipeline");
+    Require(mock.pipelineCreateCount == createsBefore + 1, "PrewarmPipeline recreated an already warmed pipeline");
 }
 
 ShaderRecompiler::RecompileResult recompilePixel(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {

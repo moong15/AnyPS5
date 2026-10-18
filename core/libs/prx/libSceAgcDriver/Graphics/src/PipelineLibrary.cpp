@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -257,7 +258,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
                 if (!open) return;
                 open = false;
                 if (!lock.owns_lock()) lock.lock();
-                build->error = std::current_exception();
+                build->error = std::current_exception() != nullptr ? std::current_exception() : std::make_exception_ptr(std::runtime_error("AGC graphics: the request building a pipeline library part failed"));
                 build->finished = true;
                 device.inFlight.erase(flight);
                 store.parts.notify_all();
@@ -296,9 +297,6 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             break;
         }
         VkPipeline handle = VK_NULL_HANDLE;
-        // Built without the store's mutex: a draw whose parts are resident is not held behind
-        // another thread's build, and builds from several threads (the registration prebuild, the
-        // journal replay) run at once. Requests for keys that differ are not serialized either.
         lock.unlock();
         VkResult created;
         {
@@ -315,7 +313,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             ++device.counters.discarded;
             reportDiscard(part, device.counters.discarded);
             libraries.push_back(raced->second);
-            ownedBuild.Complete(VK_NULL_HANDLE);
+            ownedBuild.Complete(raced->second);
             continue;
         }
         cache.emplace(key, handle);
