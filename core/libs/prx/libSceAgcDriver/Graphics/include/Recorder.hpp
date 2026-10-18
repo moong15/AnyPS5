@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -96,7 +97,12 @@ public:
     // Whether `overlaps(begin, end)` holds for a queued store's range.
     bool AnyQueuedKeyStore(const std::function<bool(std::uint64_t, std::uint64_t)>& overlaps) const;
     void FlushKeyStores();
-    void FlushKeyStoresOverlapping(std::uint64_t address, std::size_t bytes) { if (HasQueuedKeyStores() && QueuedKeyStoreOverlaps(address, bytes)) FlushKeyStores(); }
+    void FlushKeyStoresOverlapping(std::uint64_t address, std::size_t bytes) {
+        if (HasQueuedKeyStores() && QueuedKeyStoreOverlaps(address, bytes)) {
+            if (ProfilingSmallDma()) ++SmallDmaStats().keyFlushes;
+            FlushKeyStores();
+        }
+    }
     bool Recording() const { return open != nullptr; }
     bool Idle() const { return open == nullptr && inFlight.empty(); }
     std::uint64_t OpenSerial() const { return submissions + 1; }
@@ -296,7 +302,12 @@ public:
     // Whether `overlaps(begin, end)` holds for a queued store's guest range.
     bool AnyQueuedStore(const std::function<bool(std::uint64_t, std::uint64_t)>& overlaps) const;
     void FlushStores();
-    void FlushStoresOverlapping(std::uint64_t address, std::size_t bytes) { if (HasQueuedStores() && QueuedStoreOverlaps(address, bytes)) FlushStores(); }
+    void FlushStoresOverlapping(std::uint64_t address, std::size_t bytes) {
+        if (HasQueuedStores() && QueuedStoreOverlaps(address, bytes)) {
+            if (ProfilingSmallDma()) ++SmallDmaStats().storeFlushes;
+            FlushStores();
+        }
+    }
 
     // Pending-label table. A GPU label (RELEASE_MEM/WRITE_DATA recorded as a store into the batch)
     // is noted per 4-byte dword with the value it will store and a record-order stamp (the driver's
@@ -560,6 +571,7 @@ public:
         double gpuEndNs = 0;
         std::chrono::steady_clock::time_point submittedAt{};
         std::chrono::steady_clock::time_point fenceSeenAt{};
+        std::uint64_t smallDmaCopies = 0;
         std::uint64_t readGeneration = 0;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> reads;
     };
@@ -573,6 +585,58 @@ public:
     // In-flight batches whose fence has not signaled (one status query each); under the mutex.
     std::size_t UnsignaledBatches() const;
     static bool FlipReadCheck();
+    struct SmallDmaStatistics {
+        std::atomic<std::uint64_t> barriers{0};
+        std::atomic<std::uint64_t> merged{0};
+        std::atomic<std::uint64_t> sourceFlushNs{0};
+        std::atomic<std::uint64_t> destinationFlushNs{0};
+        std::atomic<std::uint64_t> sourceStored{0};
+        std::atomic<std::uint64_t> destinationStored{0};
+        std::atomic<std::uint64_t> copyBatchGpuNs{0};
+        std::atomic<std::uint64_t> otherBatchGpuNs{0};
+        std::atomic<std::uint64_t> gapBeforeCopyNs{0};
+        std::atomic<std::uint64_t> gapBeforeOtherNs{0};
+        std::atomic<std::uint64_t> copyBatchCount{0};
+        std::atomic<std::uint64_t> otherBatchCount{0};
+        std::atomic<std::uint64_t> sourceOpen{0};
+        std::atomic<std::uint64_t> sourceSignaled{0};
+        std::atomic<std::uint64_t> sourceInFlight{0};
+        std::atomic<std::uint64_t> sourceImage{0};
+        std::atomic<std::uint64_t> sourceShadow{0};
+        std::atomic<std::uint64_t> heldBack{0};
+        std::atomic<std::uint64_t> sourceChecks{0};
+        std::atomic<std::uint64_t> drainCalls{0};
+        std::atomic<std::uint64_t> drains{0};
+        std::atomic<std::uint64_t> drainItems{0};
+        std::atomic<std::uint64_t> drainNs{0};
+        std::atomic<std::uint64_t> attempts{0};
+        std::atomic<std::uint64_t> refused{0};
+        std::atomic<std::uint64_t> copies{0};
+        std::atomic<std::uint64_t> bytes{0};
+        std::atomic<std::uint64_t> aliases{0};
+        std::atomic<std::uint64_t> lockNs{0};
+        std::atomic<std::uint64_t> recordNs{0};
+        std::atomic<std::uint64_t> copySubmits{0};
+        std::atomic<std::uint64_t> copySyncs{0};
+        std::atomic<std::uint64_t> copyThroughs{0};
+        std::atomic<std::uint64_t> commands{0};
+        std::atomic<std::uint64_t> passEnds{0};
+        std::atomic<std::uint64_t> keyFlushes{0};
+        std::atomic<std::uint64_t> storeFlushes{0};
+        std::atomic<std::uint64_t> noDeadline{0};
+        std::atomic<std::uint64_t> noWork{0};
+        std::atomic<std::uint64_t> batches{0};
+        std::atomic<std::uint64_t> submitDelayNs{0};
+        std::atomic<std::uint64_t> destSyncs{0};
+        std::atomic<std::uint64_t> destSyncNs{0};
+        std::atomic<std::uint64_t> destOpen{0};
+        std::atomic<std::uint64_t> destBatches{0};
+    };
+    static SmallDmaStatistics& SmallDmaStats();
+    static bool& ProfilingSmallDma();
+    static std::string SmallDmaReport();
+    bool SmallDmaDestinationOverlaps(std::uint64_t address, std::size_t bytes) const;
+    void NoteSmallDmaDestination(std::uint64_t address, std::size_t bytes);
 
 private:
     struct Batch {
@@ -583,6 +647,8 @@ private:
         std::unordered_set<const void*> keptOwners;
         std::vector<std::function<void()>> completions;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> smallDmaWrites;
+        std::chrono::steady_clock::time_point firstSmallDma{};
         std::vector<std::uint64_t> writeNotes;
         std::vector<std::int16_t> writeValues;
         std::vector<std::uint32_t> writeQueues;

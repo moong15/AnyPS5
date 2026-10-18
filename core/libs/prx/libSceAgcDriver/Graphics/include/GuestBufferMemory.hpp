@@ -111,6 +111,15 @@ ImportMissMemoStats ImportMissMemoCounters();
 // address)` in the import's buffer.
 const HostImport* HostImportFor(const Context& context, std::uint64_t address, std::size_t bytes);
 const HostImport* ExistingHostImportFor(const Context& context, std::uint64_t address, std::size_t bytes);
+struct HostImportLookupCache {
+    const HostImport* import = nullptr;
+    VkDevice device = VK_NULL_HANDLE;
+    std::uint64_t address = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t epoch = 0;
+    std::uint64_t inserted = 0;
+};
+const HostImport* HostImportForCached(const Context& context, std::uint64_t address, std::size_t bytes, HostImportLookupCache& cache);
 void SetHostImportWindow(std::uint64_t bytes);
 // Tests: the window of one large registered range (64 MiB) and the import budget (0: the configured one).
 void SetHostImportRangeWindow(std::uint64_t bytes);
@@ -239,9 +248,11 @@ struct HostImportsProof {
     VkDevice device = VK_NULL_HANDLE;
     std::uint64_t epoch = 0;
     std::uint64_t refreshedGeneration = 0;
+    std::uint64_t inserted = 0;
 };
 // Whether the table still matches `proof` (one lock); false for an empty or stale proof.
 bool HostImportsUnchanged(const Context& context, const HostImportsProof& proof);
+bool HostImportsReconciledUnchanged(const Context& context, const HostImportsProof& proof);
 // The table's identity when it is reconciled with the live registry (one lock), else empty.
 HostImportsProof HostImportsIdentity(const Context& context);
 

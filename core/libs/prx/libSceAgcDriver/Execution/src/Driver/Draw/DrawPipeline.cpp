@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
@@ -29,6 +30,14 @@ thread_local const std::vector<DrawPipeline::Range>* committingOrderedReads = nu
 std::atomic<std::uint64_t> heldReadRanges{0};
 std::atomic<std::uint64_t> heldReadQueries{0};
 std::atomic<std::uint64_t> heldReadHits{0};
+
+const char* commitStageName(GuestMemory::GpuLockSite site) {
+    switch (site) {
+        case GuestMemory::GpuLockSite::Draw: return "draw";
+        case GuestMemory::GpuLockSite::Dispatch: return "dispatch";
+        default: return "other";
+    }
+}
 
 }
 
@@ -191,6 +200,8 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
 }
 
 void DrawPipeline::run() {
+    if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("draw committer", TraceThread::DefaultCapacity / 8);
+    GuestMemory::SetTraceGpuHolds(true);
     for (;;) {
         Commit* commit = nullptr;
         SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
@@ -203,6 +214,8 @@ void DrawPipeline::run() {
             commit = stopped ? nullptr : &items.front().commit;
             committingOrderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
         }
+        auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
+        const auto outerSite = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(GuestMemory::GpuLockSite::Other) : GuestMemory::GpuLockSite::Other;
         const auto start = std::chrono::steady_clock::now();
         std::exception_ptr fatal;
         bool failed = false;
@@ -219,19 +232,28 @@ void DrawPipeline::run() {
             fatal = std::current_exception();
         }
         committingOrderedReads = nullptr;
+        const auto site = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(outerSite) : GuestMemory::GpuLockSite::Other;
+        if (trace != nullptr) trace->Add("Driver.Commit", commitStageName(site), start, std::chrono::steady_clock::now());
         const auto spent = elapsedNs(start);
         if (fatal != nullptr && !stopped) {
             stopped = true;
             if (!shutdown) Driver::Get().ReportFailure(fatal);
         }
-        std::lock_guard lock(mutex);
-        items.pop_front();
-        ++commits;
-        commitNs += spent;
-        if (failed) ++commitErrors;
-        if (fatal != nullptr && failure == nullptr) failure = fatal;
-        outstanding.fetch_sub(1, std::memory_order_release);
-        if (idleWaiters != 0) idle.notify_all();
+        std::chrono::steady_clock::time_point retired;
+        std::chrono::steady_clock::time_point released;
+        {
+            std::lock_guard lock(mutex);
+            if (trace != nullptr) retired = std::chrono::steady_clock::now();
+            items.pop_front();
+            if (trace != nullptr) released = std::chrono::steady_clock::now();
+            ++commits;
+            commitNs += spent;
+            if (failed) ++commitErrors;
+            if (fatal != nullptr && failure == nullptr) failure = fatal;
+            outstanding.fetch_sub(1, std::memory_order_release);
+            if (idleWaiters != 0) idle.notify_all();
+        }
+        if (trace != nullptr) trace->Add("Driver.Commit", "retire", retired, released);
     }
     runningCommitters.fetch_sub(1, std::memory_order_acq_rel);
 }
@@ -350,14 +372,17 @@ std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
 // draw. Off with APS5_NO_QUEUED_DRAW_READ_ORDER=1 (the pre-fix behaviour, write-backs overtake
 // queued index reads).
 bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
+    GuestMemory::TargetRefreshCounter inspected("held_read_ranges");
+    const GuestMemory::TargetRefreshScope heldScope(GuestMemory::TargetRefreshStep::HeldReads);
     if (bytes == 0 || std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") != nullptr) return false;
     const auto end = address + bytes;
     if (committingOrderedReads != nullptr && std::any_of(committingOrderedReads->begin(), committingOrderedReads->end(), [&](const Range& range) { return range.first <= address && end <= range.second; })) return false;
     auto& pipeline = Queue0();
-    std::lock_guard lock(pipeline.mutex);
+    const auto lock = GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::PipelineWait, [&] { return std::unique_lock(pipeline.mutex); });
     heldReadQueries.fetch_add(1, std::memory_order_relaxed);
     for (const auto& item : pipeline.items) {
         for (const auto& [begin, limit] : item.reads) {
+            ++inspected.value;
             if (address >= limit || begin >= end) continue;
             heldReadHits.fetch_add(1, std::memory_order_relaxed);
             return true;

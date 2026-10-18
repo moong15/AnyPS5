@@ -69,7 +69,10 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
             if (bytes == 0) return true;
             const auto address = packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u);
             const auto source = Pm4::DmaSource(packet);
-            if ((source == 0 || source == 3) && DrawPipeline::Queue0().Overlaps(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), bytes)) return false;
+            if ((source == 0 || source == 3) && DrawPipeline::Queue0().Overlaps(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), bytes)) {
+                ++Graphics::Recorder::SmallDmaStats().sourceChecks;
+                return false;
+            }
             return !DrawPipeline::Queue0().Overlaps(address, bytes);
         }
         case 0x10: {
@@ -279,7 +282,18 @@ void Driver::execute(const Submission& submission) {
                 continue;
             }
         }
-        if (pipelined && DrawPipeline::Queue0().Busy() && !keepsDrawPipeline(packet, header, opcode)) DrawPipeline::Queue0().DrainPacket(packet);
+        if (pipelined && DrawPipeline::Queue0().Busy() && !keepsDrawPipeline(packet, header, opcode)) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto queued = opcode == 0x50 ? DrawPipeline::QueuedItems() : 0;
+            const auto drained = DrawPipeline::Queue0().DrainPacket(packet);
+            if (opcode == 0x50) {
+                auto& stats = Graphics::Recorder::SmallDmaStats();
+                ++stats.drainCalls;
+                if (drained) ++stats.drains;
+                stats.drainItems += queued;
+                stats.drainNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+            }
+        }
         if (pipelined && predicated && DrawPipeline::Queue0().Busy() && DrawPipeline::Queue0().Overlaps(queue.predication.address, queue.predication.operation == 3 ? 8 : 4)) {
             const std::array<DrawPipeline::Range, 1> reads{{{queue.predication.address, queue.predication.address + (queue.predication.operation == 3 ? 8u : 4u)}}};
             DrawPipeline::Queue0().DrainPacket(opcode, reads, {}, false);

@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/HashSlotMap.hpp"
 #include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <array>
@@ -586,6 +587,7 @@ private:
     std::uint64_t pendingSerialSeen = 0;
     // The import table's identity when the direct regions' serials were last proved.
     HostImportsProof importsProof;
+    bool importsReconcilable = false;
     // FNV-1a offset basis: the hash of no data buffers (DataWordsHash).
     std::uint64_t dataWordsHash = 14695981039346656037ull;
     void rehashDataWords();
@@ -665,11 +667,12 @@ public:
     static constexpr std::size_t MaximumEntries = 16384;
 
 private:
-    void erase(const Key& key);
-    void noteMiss(const Key& key);
-    void noteEvicted(const Key& key);
-    void noteReturn(const Key& key);
-    void noteUse(const Key& key);
+    struct Entry {
+        Key key;
+        std::uint64_t hash;
+        std::shared_ptr<ShaderResources> resources;
+    };
+    using Entries = std::list<Entry>;
     struct KeyHash {
         std::size_t operator()(const Key& key) const noexcept {
             std::uint64_t hash = 14695981039346656037ull;
@@ -677,9 +680,47 @@ private:
             return static_cast<std::size_t>(hash);
         }
     };
+    class Index {
+    public:
+        Index() : slots(16) {}
+        Entries::iterator* find(std::uint64_t hash, const Key& key) {
+            if (!FastKeyHash()) {
+                const auto found = keyed.find(key);
+                return found != keyed.end() ? &found->second : nullptr;
+            }
+            auto* found = slots.find(hash);
+            return found != nullptr && (*found)->key == key ? found : nullptr;
+        }
+        std::pair<Entries::iterator*, bool> insert(std::uint64_t hash, const Key& key, Entries::iterator value) {
+            if (!FastKeyHash()) {
+                const auto [found, inserted] = keyed.try_emplace(key, value);
+                return {&found->second, inserted};
+            }
+            const auto [slot, inserted] = slots.try_emplace(hash);
+            if (inserted) *slot = value;
+            return {slot, inserted};
+        }
+        bool erase(std::uint64_t hash, const Key& key) {
+            if (!FastKeyHash()) return keyed.erase(key) != 0;
+            return slots.erase(hash);
+        }
+        void clear() {
+            if (!FastKeyHash()) keyed.clear();
+            else slots.clear();
+        }
+    private:
+        HashSlotMap<Entries::iterator> slots;
+        std::unordered_map<Key, Entries::iterator, KeyHash> keyed;
+    };
+    void noteMiss(const Key& key);
+    void noteEvicted(std::uint64_t hash);
+    void noteReturn(std::uint64_t hash);
+    void noteUse(std::uint64_t hash);
+    static bool FastKeyHash();
+    static std::uint64_t hashKey(const Key& key);
     mutable std::mutex mutex;
-    std::list<std::pair<Key, std::shared_ptr<ShaderResources>>> entries;
-    std::unordered_map<Key, decltype(entries)::iterator, KeyHash> index;
+    Entries entries;
+    Index index;
     std::size_t capacity = 0;
     bool fixedCapacity = false;
     std::list<std::size_t> evictedOrder;

@@ -768,6 +768,8 @@ struct HookSyncTotals {
     std::uint64_t rangeBytes = 0;
     std::uint64_t accessBytes = 0;
     double waitedMs = 0;
+    std::uint64_t smallDmaDestinations = 0;
+    double smallDmaWaitMs = 0;
 };
 
 // Size buckets for the noted ranges and the accesses: <=4K, <=64K, <=1M, <=16M, <=256M, larger.
@@ -847,6 +849,12 @@ void ReportHookSyncs(HookSyncStats& stats) {
         std::snprintf(text, sizeof(text), " [0x%x %s %s +0x%llx/+0x%llx/+0x%llx/+0x%llx/+0x%llx/+0x%llx: %llu/%.0fms u%llu/%llu/%llu c%llu s%llu %.0fK/%.0fK]", key.queue, PacketName(key.opcode).c_str(), GuestMemory::ReadSiteName(key.site), key.frames[0], key.frames[1], key.frames[2], key.frames[3], key.frames[4], key.frames[5], count(totals.count), totals.waitedMs, count(k.unchangedOpen), count(k.unchangedPending), count(k.unchangedSignaled), count(k.changed), count(k.stores), totals.rangeBytes / 1024.0 / totals.count, totals.accessBytes / 1024.0 / totals.count);
         report += text;
     }
+    report += "; small-dma destination overlaps by queue/packet/site count/ms:";
+    for (const auto& [key, totals] : stats.byKey) {
+        if (totals.smallDmaDestinations == 0) continue;
+        std::snprintf(text, sizeof(text), " [0x%x %s %s %llu/%.0fms]", key.queue, PacketName(key.opcode).c_str(), GuestMemory::ReadSiteName(key.site), static_cast<unsigned long long>(totals.smallDmaDestinations), totals.smallDmaWaitMs);
+        report += text;
+    }
     AgcDriver::ProfilePrint_nid_no_patch("%s\n", report.c_str());
     stats = HookSyncStats{};
 }
@@ -858,6 +866,7 @@ public:
     HookSyncScope(const Recorder& recorder, std::uint64_t address, std::size_t bytes) : enabled(HookSyncProfiled()), address(address), bytes(bytes) {
         if (!enabled) return;
         info = recorder.DescribePendingWrite(address, bytes);
+        smallDmaDestination = recorder.SmallDmaDestinationOverlaps(address, bytes);
         const auto packet = GuestMemory::CurrentPacket();
         key = HookSyncKey{packet.queue, packet.opcode, GuestMemory::CurrentReadSite(), {}};
         // Frame 0 is the hook's caller (the GuestMemory entry, or the driver code when the entry
@@ -880,6 +889,10 @@ public:
         auto& totals = stats.byKey[key];
         ++totals.count;
         totals.waitedMs += ms;
+        if (smallDmaDestination) {
+            ++totals.smallDmaDestinations;
+            totals.smallDmaWaitMs += ms;
+        }
         totals.accessBytes += bytes;
         ++stats.count;
         stats.waitedMs += ms;
@@ -912,6 +925,7 @@ public:
 private:
     static constexpr std::size_t CompareLimit = 65536;
     bool enabled;
+    bool smallDmaDestination = false;
     std::uint64_t address;
     std::size_t bytes;
     std::optional<Recorder::PendingWriteInfo> info;
@@ -1531,7 +1545,91 @@ std::uint64_t Recorder::ReapsWithWork() {
     return holdCounters.reapsWithWork;
 }
 
+Recorder::SmallDmaStatistics& Recorder::SmallDmaStats() {
+    static SmallDmaStatistics stats;
+    return stats;
+}
+
+bool& Recorder::ProfilingSmallDma() {
+    static thread_local bool active = false;
+    return active;
+}
+
+std::string Recorder::SmallDmaReport() {
+    const auto& stats = SmallDmaStats();
+    const std::pair<const char*, const std::atomic<std::uint64_t>*> fields[]{
+        {"barriers", &stats.barriers},
+        {"merged", &stats.merged},
+        {"sourceFlushNs", &stats.sourceFlushNs},
+        {"destinationFlushNs", &stats.destinationFlushNs},
+        {"sourceStored", &stats.sourceStored},
+        {"destinationStored", &stats.destinationStored},
+        {"copyBatchGpuNs", &stats.copyBatchGpuNs},
+        {"otherBatchGpuNs", &stats.otherBatchGpuNs},
+        {"gapBeforeCopyNs", &stats.gapBeforeCopyNs},
+        {"gapBeforeOtherNs", &stats.gapBeforeOtherNs},
+        {"copyBatchCount", &stats.copyBatchCount},
+        {"otherBatchCount", &stats.otherBatchCount},
+        {"sourceOpen", &stats.sourceOpen},
+        {"sourceSignaled", &stats.sourceSignaled},
+        {"sourceInFlight", &stats.sourceInFlight},
+        {"sourceImage", &stats.sourceImage},
+        {"sourceShadow", &stats.sourceShadow},
+        {"heldBack", &stats.heldBack},
+        {"sourceChecks", &stats.sourceChecks},
+        {"drainCalls", &stats.drainCalls},
+        {"drains", &stats.drains},
+        {"drainItems", &stats.drainItems},
+        {"drainNs", &stats.drainNs},
+        {"attempts", &stats.attempts},
+        {"refused", &stats.refused},
+        {"copies", &stats.copies},
+        {"bytes", &stats.bytes},
+        {"aliases", &stats.aliases},
+        {"lockNs", &stats.lockNs},
+        {"recordNs", &stats.recordNs},
+        {"copySubmits", &stats.copySubmits},
+        {"copySyncs", &stats.copySyncs},
+        {"copyThroughs", &stats.copyThroughs},
+        {"commands", &stats.commands},
+        {"passEnds", &stats.passEnds},
+        {"keyFlushes", &stats.keyFlushes},
+        {"storeFlushes", &stats.storeFlushes},
+        {"noDeadline", &stats.noDeadline},
+        {"noWork", &stats.noWork},
+        {"batches", &stats.batches},
+        {"submitDelayNs", &stats.submitDelayNs},
+        {"destSyncs", &stats.destSyncs},
+        {"destSyncNs", &stats.destSyncNs},
+        {"destOpen", &stats.destOpen},
+        {"destBatches", &stats.destBatches},
+    };
+    std::string report = "; small-dma cumulative:";
+    for (const auto& [name, value] : fields) {
+        report += " " + std::string(name) + "=" + std::to_string(value->load(std::memory_order_relaxed));
+    }
+    return report;
+}
+
+void Recorder::NoteSmallDmaDestination(std::uint64_t address, std::size_t bytes) {
+    if (open == nullptr || bytes == 0) return;
+    open->smallDmaWrites.emplace_back(address, address + bytes);
+    if (open->firstSmallDma == std::chrono::steady_clock::time_point{}) open->firstSmallDma = std::chrono::steady_clock::now();
+}
+
+bool Recorder::SmallDmaDestinationOverlaps(std::uint64_t address, std::size_t bytes) const {
+    const auto overlapsCopy = [&](const Batch& batch) {
+        return std::any_of(batch.smallDmaWrites.begin(), batch.smallDmaWrites.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
+    };
+    if (open != nullptr && overlapsCopy(*open)) return true;
+    return std::any_of(inFlight.begin(), inFlight.end(), [&](const auto& batch) { return overlapsCopy(*batch); });
+}
+
 VkCommandBuffer Recorder::Commands(VkAccessFlags* coveredAccess) {
+    if (ProfilingSmallDma()) {
+        ++SmallDmaStats().commands;
+        if (open != nullptr && open->renderPass.open) ++SmallDmaStats().passEnds;
+    }
     ensureOpen();
     // Work recorded after a draw's render pass or an inline store run must see their writes: the
     // pass's end and the run's trailing barrier go in first (a per-batch run waits for Submit, or
@@ -1998,6 +2096,7 @@ bool Recorder::BatchStampsEnabled() {
 }
 
 void Recorder::CountBarriers(CommandClass which, std::uint32_t count) {
+    if (ProfilingSmallDma()) SmallDmaStats().barriers += count;
     if (!DrawOrGpuProfiled()) return;
     classBarriers[static_cast<std::size_t>(which)].fetch_add(count, std::memory_order_relaxed);
 }
@@ -2008,6 +2107,7 @@ bool Recorder::MergeBarriers() {
 }
 
 void Recorder::CountMerged(CommandClass which) {
+    if (ProfilingSmallDma()) ++SmallDmaStats().merged;
     if (!DrawOrGpuProfiled()) return;
     classMerged[static_cast<std::size_t>(which)].fetch_add(1, std::memory_order_relaxed);
 }
@@ -3522,6 +3622,7 @@ void Recorder::Submit() {
     dropStaleHoldKept();
     if (open == nullptr) return;
     GuestMemory::AssertGpuLockHeld("Recorder::Submit");
+    if (ProfilingSmallDma()) ++SmallDmaStats().copySubmits;
     if (!open->keyStores.empty()) recordKeyStores(false);
     if (open->renderPass.open) endOpenRenderPass();
     const bool segments = segmentMode();
@@ -3580,6 +3681,10 @@ void Recorder::Submit() {
     TraceLoadWrite("submitted", this, batch->serial);
     batch->diagnosticSubmitted.store(true, std::memory_order_release);
     batch->submittedAt = std::chrono::steady_clock::now();
+    if (batch->firstSmallDma != std::chrono::steady_clock::time_point{}) {
+        ++SmallDmaStats().batches;
+        SmallDmaStats().submitDelayNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(batch->submittedAt - batch->firstSmallDma).count());
+    }
     if (DrawProfiled()) {
         const auto us = std::chrono::duration<double, std::micro>(batch->submittedAt - submitStart).count();
         ++submitCount;
@@ -3674,6 +3779,7 @@ void Recorder::FinishUpTo(std::uint64_t serial) {
 }
 
 void Recorder::Sync(bool waitUnlocked) {
+    if (ProfilingSmallDma()) ++SmallDmaStats().copySyncs;
     PerformanceTimer frameTiming("Recorder.Sync");
     const auto source = std::exchange(announcedSource, 4);
     const void* site = std::exchange(announcedSite, nullptr);
@@ -3698,6 +3804,22 @@ void Recorder::FlushDeferredReleases() {
 }
 
 void Recorder::SyncThrough(std::uint64_t address, std::size_t bytes, bool waitUnlocked) {
+    if (ProfilingSmallDma()) ++SmallDmaStats().copyThroughs;
+    struct DestinationSync {
+        bool hit;
+        std::chrono::steady_clock::time_point started;
+        ~DestinationSync() {
+            if (hit) SmallDmaStats().destSyncNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+        }
+    } destinationSync{SmallDmaDestinationOverlaps(address, bytes), std::chrono::steady_clock::now()};
+    if (destinationSync.hit) {
+        ++SmallDmaStats().destSyncs;
+        const auto info = DescribePendingWrite(address, bytes);
+        if (info.has_value()) {
+            SmallDmaStats().destOpen += info->open ? 1 : 0;
+            SmallDmaStats().destBatches += info->batchesToFinish;
+        }
+    }
     if (bytes == 0) return;
     const auto end = address + bytes;
     if (completionDepth != 0 && !CompletionStoreSyncs()) {
@@ -4083,6 +4205,7 @@ void Recorder::finish(std::unique_ptr<Batch> batch, bool wait, int source, bool 
         std::lock_guard ringLock(completedMutex);
         auto& entry = completed[batch->serial % completed.size()];
         entry.serial = batch->serial;
+        entry.smallDmaCopies = batch->smallDmaWrites.size();
         entry.gpuStartNs = batch->gpuStartNs;
         entry.gpuEndNs = batch->gpuEndNs;
         entry.submittedAt = batch->submittedAt;

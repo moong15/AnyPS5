@@ -635,9 +635,23 @@ struct VulkanDevice::State {
             retiredRanges.pop_front();
             double busyMs = 0, firstNs = 0, lastNs = 0;
             bool stamped = false;
+            double previousBatchEndNs = 0;
             std::uint64_t checked = 0, overwritten = 0;
             for (const auto& batch : batches) {
                 if (batch.gpuEndNs > batch.gpuStartNs) {
+                    auto& dma = Graphics::Recorder::SmallDmaStats();
+                    const auto busyNs = static_cast<std::uint64_t>(batch.gpuEndNs - batch.gpuStartNs);
+                    const auto gapNs = previousBatchEndNs > 0 && batch.gpuStartNs > previousBatchEndNs ? static_cast<std::uint64_t>(batch.gpuStartNs - previousBatchEndNs) : 0;
+                    if (batch.smallDmaCopies != 0) {
+                        ++dma.copyBatchCount;
+                        dma.copyBatchGpuNs += busyNs;
+                        dma.gapBeforeCopyNs += gapNs;
+                    } else {
+                        ++dma.otherBatchCount;
+                        dma.otherBatchGpuNs += busyNs;
+                        dma.gapBeforeOtherNs += gapNs;
+                    }
+                    previousBatchEndNs = batch.gpuEndNs;
                     busyMs += (batch.gpuEndNs - batch.gpuStartNs) / 1e6;
                     firstNs = stamped ? std::min(firstNs, batch.gpuStartNs) : batch.gpuStartNs;
                     lastNs = stamped ? std::max(lastNs, batch.gpuEndNs) : batch.gpuEndNs;
@@ -2671,8 +2685,17 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
     // The GPU path. Results still on the GPU: the source's must be stored before the transfer reads
     // it, the destination's would be stored over the copy later (a flush into an import records
     // the retile and notes it as a pending write, which is why it comes after the CPU decision).
-    Graphics::StorageTexture::FlushPending(source, bytes, nullptr, "buffer copy source", Graphics::PublishScope::Whole);
-    Graphics::StorageTexture::FlushPending(destination, bytes, nullptr, "buffer copy destination", Graphics::PublishScope::PartialUnits);
+    const auto sourceFlushStart = std::chrono::steady_clock::now();
+    const bool sourceStored = Graphics::StorageTexture::FlushPending(source, bytes, nullptr, "buffer copy source", Graphics::PublishScope::Whole);
+    const auto destinationFlushStart = std::chrono::steady_clock::now();
+    const bool destinationStored = Graphics::StorageTexture::FlushPending(destination, bytes, nullptr, "buffer copy destination", Graphics::PublishScope::PartialUnits);
+    if (Graphics::Recorder::ProfilingSmallDma()) {
+        auto& stats = Graphics::Recorder::SmallDmaStats();
+        stats.sourceFlushNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(destinationFlushStart - sourceFlushStart).count());
+        stats.destinationFlushNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - destinationFlushStart).count());
+        stats.sourceStored += sourceStored ? 1 : 0;
+        stats.destinationStored += destinationStored ? 1 : 0;
+    }
     // Looked up after the sync (its completions' write-backs can refresh the import table and
     // retire an import) and the flushes (which may import memory themselves).
     const Graphics::HostImport* destinationImport = Graphics::HostImportFor(context, destination, bytes);

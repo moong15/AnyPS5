@@ -23,6 +23,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -870,6 +871,8 @@ struct WindowCopy {
 void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_t generation);
 #endif
 
+std::atomic<std::uint64_t> targetWriteSerial{0};
+
 struct WriteTracker {
     std::mutex mutex;
     bool initialized = false;
@@ -1098,6 +1101,7 @@ struct WriteTracker {
     std::vector<std::uint32_t> unstampedStores;
 
     void noteUnstampedStore(std::uint64_t address, std::uint64_t end) {
+        if (MemoryProfiled()) targetWriteSerial.fetch_add(1, std::memory_order_relaxed);
         if (unstampedStores.empty()) unstampedStores.assign(UnstampedSlots, 0);
         const auto first = address / WriteBlockBytes;
         const auto last = (end - 1) / WriteBlockBytes;
@@ -1201,6 +1205,7 @@ struct WriteTracker {
     // page a walk found are all writes the summary's walk has not seen. The clean walk marks its
     // blocks before it starts, so its own dirty pages drop the mark again (see walkSummary).
     void stamp(std::uint64_t block, std::uint32_t stampGeneration, StampKind kind) {
+        if (MemoryProfiled()) targetWriteSerial.fetch_add(1, std::memory_order_relaxed);
         const bool cpu = kind == StampKind::Cpu || kind == StampKind::ImportWindow;
         const bool stored = kind != StampKind::ImportWindow;
 #ifdef _WIN32
@@ -1233,10 +1238,12 @@ WriteTracker& Tracker() {
 // Takes the tracker mutex; under APS5_PROFILE_DRAW an acquisition that found it held is counted
 // ('tracker waits N / M' in [guestmem]), which says whether walking outside the lock would pay.
 std::unique_lock<std::mutex> lockTracker(WriteTracker& tracker) {
+    const TargetRefreshScope targetWait(TargetRefreshStep::TrackerWait);
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return std::unique_lock(tracker.mutex);
     std::unique_lock lock(tracker.mutex, std::try_to_lock);
     if (!lock.owns_lock()) {
+        TargetRefreshSample::Add("tracker_contended");
         trackerWaits.fetch_add(1, std::memory_order_relaxed);
         lock.lock();
     }
@@ -1600,10 +1607,12 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
 }
 
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::Collect);
     return collectWrites(address, bytes, true, __builtin_return_address(0));
 }
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::Collect);
     return collectWrites(address, bytes, false, __builtin_return_address(0));
 }
 
@@ -1788,6 +1797,7 @@ bool Watched(std::uint64_t address, std::size_t bytes) {
 }
 
 bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t generation) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::Validate);
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
@@ -1799,6 +1809,7 @@ bool UnchangedSince(std::uint64_t address, std::size_t bytes, std::uint64_t gene
 }
 
 bool UnchangedSinceAll(std::span<const UnchangedQuery> queries) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::Validate);
     auto& tracker = Tracker();
     const auto lock = lockTracker(tracker);
     tracker.initialize();
@@ -2022,6 +2033,7 @@ bool walkHints(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop) {
 #endif
 
 std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::CompareMemo);
 #ifdef _WIN32
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return 0;
     constexpr std::uint64_t page = 4096;
@@ -2089,6 +2101,7 @@ bool WrittenSince(std::uint64_t address, std::size_t bytes, std::uint64_t genera
 }
 
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu) {
+    const TargetRefreshScope targetScope(TargetRefreshStep::BlockStates);
     std::fill(changed.begin(), changed.end(), BlockWritten);
     std::fill(cpu.begin(), cpu.end(), std::uint8_t{1});
     auto& tracker = Tracker();
@@ -2113,6 +2126,18 @@ namespace {
 // threads (the presenter) report untagged.
 constexpr std::size_t GpuLockSiteCount = static_cast<std::size_t>(GpuLockSite::Count);
 constexpr const char* GpuLockSiteNames[GpuLockSiteCount] = {"other", "dispatch", "indirect", "draw", "hook", "wait", "label", "flush", "present", "fill", "copy", "end", "try", "import", "shader", "presync", "writeback", "host_write", "lifecycle"};
+
+thread_local bool traceHolds = false;
+thread_local GpuLockSite holdSite = GpuLockSite::Other;
+thread_local PerformanceTrace::TraceThread* holdTrace = nullptr;
+thread_local std::chrono::steady_clock::time_point holdStart{};
+
+void TraceHoldBegan(std::size_t site, PerformanceTrace::TraceThread* trace) {
+    if (!traceHolds) return;
+    if (holdSite == GpuLockSite::Other) holdSite = static_cast<GpuLockSite>(site);
+    holdTrace = trace;
+    holdStart = std::chrono::steady_clock::now();
+}
 
 // Hold-side holder matrix: nanoseconds held per (holder thread, site), added by EndHold. Column 0
 // is every untagged thread (the presenter, game threads); the queue workers take a column each on
@@ -2229,6 +2254,99 @@ HolderBlocking& Blocking() {
     return blocking;
 }
 
+constexpr std::size_t HolderPhaseCount = static_cast<std::size_t>(GpuHolderPhase::Count);
+constexpr std::array<const char*, HolderPhaseCount> HolderPhaseNames{"other", "target_refresh", "resource_complete", "resource_revalidate", "resource_upload", "resource_images", "resource_mark", "resource_writeback"};
+thread_local GpuHolderPhase holderPhase = GpuHolderPhase::Other;
+struct HolderPhaseRow {
+    std::uint64_t heldNs = 0;
+    std::uint64_t blockedNs = 0;
+    std::uint64_t drawBlockedNs = 0;
+};
+struct HolderPhases {
+    std::mutex mutex;
+    std::array<std::array<std::array<HolderPhaseRow, HolderPhaseCount>, GpuLockSiteCount>, HolderColumns> rows{};
+    std::size_t holder = 0, site = 0, phase = 0, waiters = 0, drawWaiters = 0;
+    bool active = false;
+    std::chrono::steady_clock::time_point changed = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point reported = changed;
+    void Accumulate(std::chrono::steady_clock::time_point now) {
+        if (active) {
+            const auto ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - changed).count());
+            auto& row = rows[holder][site][phase];
+            row.heldNs += ns;
+            row.blockedNs += ns * waiters;
+            row.drawBlockedNs += ns * drawWaiters;
+        }
+        changed = now;
+    }
+};
+HolderPhases& PhaseHolders() {
+    static HolderPhases phases;
+    return phases;
+}
+void ChangePhaseHolder(bool active, std::size_t site) {
+    auto& phases = PhaseHolders();
+    std::lock_guard lock(phases.mutex);
+    phases.Accumulate(std::chrono::steady_clock::now());
+    phases.active = active;
+    if (active) {
+        auto& stats = LockStats();
+        if (stats.holderColumn < 0) stats.holderColumn = static_cast<int>(HolderColumnFor(stats.tag));
+        phases.holder = static_cast<std::size_t>(stats.holderColumn);
+        phases.site = site;
+        phases.phase = static_cast<std::size_t>(holderPhase);
+    }
+}
+void ChangePhaseWaiters(bool entering, bool draw) {
+    auto& phases = PhaseHolders();
+    std::lock_guard lock(phases.mutex);
+    phases.Accumulate(std::chrono::steady_clock::now());
+    if (entering) {
+        ++phases.waiters;
+        if (draw) ++phases.drawWaiters;
+    } else {
+        --phases.waiters;
+        if (draw) --phases.drawWaiters;
+    }
+}
+void ChangeProfilePhase(GpuHolderPhase phase) {
+    holderPhase = phase;
+    if (!GpuMutex().HeldByThisThread()) return;
+    auto& phases = PhaseHolders();
+    std::lock_guard lock(phases.mutex);
+    phases.Accumulate(std::chrono::steady_clock::now());
+    phases.phase = static_cast<std::size_t>(phase);
+}
+void ReportPhaseHolders() {
+    auto& phases = PhaseHolders();
+    std::unique_ptr<decltype(phases.rows)> rows;
+    double seconds = 0;
+    {
+        std::lock_guard lock(phases.mutex);
+        const auto now = std::chrono::steady_clock::now();
+        seconds = std::chrono::duration<double>(now - phases.reported).count();
+        if (seconds < 10) return;
+        phases.Accumulate(now);
+        rows = std::make_unique<decltype(phases.rows)>(phases.rows);
+        phases.rows = {};
+        phases.reported = now;
+    }
+    for (std::size_t h = 0; h < HolderColumns; ++h) {
+        const auto tag = Holders().tags[h].load(std::memory_order_relaxed);
+        for (std::size_t s = 0; s < GpuLockSiteCount; ++s) {
+            std::string text;
+            for (std::size_t p = 0; p < HolderPhaseCount; ++p) {
+                const auto& row = (*rows)[h][s][p];
+                if (row.heldNs == 0 && row.blockedNs == 0) continue;
+                char entry[192];
+                std::snprintf(entry, sizeof(entry), " %s=%.3f/%.3f/%.3f", HolderPhaseNames[p], static_cast<double>(row.heldNs) / 1e6, static_cast<double>(row.blockedNs) / 1e6, static_cast<double>(row.drawBlockedNs) / 1e6);
+                text += entry;
+            }
+            if (!text.empty()) AgcDriver::ProfilePrint_nid_no_patch("[target-lock] %.3f s holder=0x%x site=%s phase=held_ms/all_waiter_ms/draw_waiter_ms:%s\n", seconds, tag, GpuLockSiteNames[s], text.c_str());
+        }
+    }
+}
+
 void ChangeHolderWaiters(bool entering) {
     auto& blocking = Blocking();
     std::lock_guard lock(blocking.mutex);
@@ -2238,13 +2356,14 @@ void ChangeHolderWaiters(bool entering) {
 }
 
 struct HolderWait {
-    explicit HolderWait(bool enabled) : enabled(enabled) {
-        if (enabled) ChangeHolderWaiters(true);
+    explicit HolderWait(bool enabled, std::size_t site) : enabled(enabled), draw(site == static_cast<std::size_t>(GpuLockSite::Draw)) {
+        if (enabled) { ChangePhaseWaiters(true, draw); ChangeHolderWaiters(true); }
     }
     ~HolderWait() {
-        if (enabled) ChangeHolderWaiters(false);
+        if (enabled) { ChangePhaseWaiters(false, draw); ChangeHolderWaiters(false); }
     }
     bool enabled;
+    bool draw;
 };
 
 void StartHolder(std::size_t site) {
@@ -2267,6 +2386,7 @@ void FinishHolder(std::size_t site, double heldMs) {
 }
 
 void ReportHolders() {
+    ReportPhaseHolders();
     auto& blocking = Blocking();
     std::array<HolderSiteStats, GpuLockSiteCount> snapshot{};
     {
@@ -2289,6 +2409,7 @@ void ReportHolders() {
 }
 
 void BeginHold(std::size_t site) {
+    ChangePhaseHolder(true, site);
     auto& stats = LockStats();
     stats.holdSite = site;
     stats.holdStart = std::chrono::steady_clock::now();
@@ -2296,6 +2417,7 @@ void BeginHold(std::size_t site) {
 }
 
 void EndHold() {
+    ChangePhaseHolder(false, 0);
     auto& stats = LockStats();
     const auto heldNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stats.holdStart).count();
     const auto heldMs = static_cast<double>(heldNs) / 1e6;
@@ -2353,9 +2475,11 @@ void GpuMutexType::acquired() {
 }
 
 bool GpuMutexType::try_lock() {
+    auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
     if (!GpuLockProfiled()) {
         if (!mutex.try_lock()) return false;
         acquired();
+        if (depth == 1 && trace != nullptr) TraceHoldBegan(static_cast<std::size_t>(GpuLockSite::Try), trace);
         return true;
     }
     // The tag is consumed whether or not the try succeeds (a failed try must not name the next
@@ -2368,12 +2492,248 @@ bool GpuMutexType::try_lock() {
         return false;
     }
     acquired();
-    if (depth == 1 && GpuHoldProfiled()) BeginHold(static_cast<std::size_t>(tagged == GpuLockSite::Other ? GpuLockSite::Try : tagged));
+    const auto site = static_cast<std::size_t>(tagged == GpuLockSite::Other ? GpuLockSite::Try : tagged);
+    if (depth == 1 && GpuHoldProfiled()) BeginHold(site);
+    if (depth == 1 && trace != nullptr) TraceHoldBegan(site, trace);
     return true;
 }
 
 namespace {
 std::atomic<void (*)()> gpuUnlockHook{nullptr};
+}
+
+namespace {
+
+constexpr std::size_t TargetStepCount = static_cast<std::size_t>(TargetRefreshStep::Count);
+constexpr std::size_t TargetOutcomeCount = static_cast<std::size_t>(TargetRefreshOutcome::Count);
+constexpr std::array<const char*, TargetStepCount> TargetStepNames{
+    "other", "cpu_prepare", "cpu_pending", "cpu_describe", "cpu_triggers", "cpu_reap", "cpu_sync", "proof", "alias", "alias_check",
+    "flush", "held_reads", "pipeline_lock", "pending_lock", "pending_scan", "collect", "tracker_lock", "keys",
+    "validate", "block_states", "allocate", "compare", "compare_memo", "newest_note", "import", "units",
+    "save_proof", "upload"
+};
+struct TargetRefreshRow {
+    std::uint64_t calls = 0;
+    std::uint64_t wallNs = 0;
+    std::array<std::uint64_t, TargetStepCount> counts{};
+    std::array<std::uint64_t, TargetStepCount> ns{};
+};
+struct TargetRefreshSeen {
+    std::uint64_t image, version, generation, tracker, writes, unwatched;
+};
+struct TargetRefreshStats {
+    unsigned drawsActive = 0;
+    unsigned lookupDepth = 0;
+    std::uint64_t draws = 0, lookups = 0, full = 0, partial = 0, refreshes = 0, attachmentRefreshes = 0;
+    std::uint64_t repeated = 0, stable = 0, stableAttachment = 0, nested = 0, drawLookups = 0;
+    std::array<std::uint64_t, 9> multiplicity{};
+    std::array<std::uint64_t, 3> wrapperNs{}, wrapperCounts{};
+    std::uint64_t lookupRefreshNs = 0;
+    std::array<std::array<TargetRefreshRow, TargetOutcomeCount>, 2> rows{};
+    std::vector<TargetRefreshSeen> seen;
+    std::map<std::string_view, std::uint64_t> events;
+    std::chrono::steady_clock::time_point reported = std::chrono::steady_clock::now();
+};
+thread_local TargetRefreshStats targetStats;
+thread_local TargetRefreshSample* targetSample = nullptr;
+
+bool TargetTimersEnabled() {
+    static const bool enabled = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    return enabled;
+}
+
+void ReportTargetRefresh() {
+    auto& stats = targetStats;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - stats.reported < std::chrono::seconds(10)) return;
+    const auto seconds = std::chrono::duration<double>(now - stats.reported).count();
+    std::string histogram, events;
+    char part[192];
+    for (std::size_t i = 0; i < stats.multiplicity.size(); ++i) {
+        std::snprintf(part, sizeof(part), " %zu:%llu", i, static_cast<unsigned long long>(stats.multiplicity[i]));
+        histogram += part;
+    }
+    for (const auto& [name, count] : stats.events) {
+        std::snprintf(part, sizeof(part), " %s:%llu", name.data(), static_cast<unsigned long long>(count));
+        events += part;
+    }
+    AgcDriver::ProfilePrint_nid_no_patch("[target-refresh] q0x%x %.3f s draw_scopes=%llu lookups=%llu full=%llu partial=%llu refreshes=%llu attachment=%llu repeated_image=%llu stable_repeat=%llu stable_attachment=%llu nested=%llu attachments_per_draw(8=8+) %s; events%s\n",
+        GpuLockThreadTag(), seconds, static_cast<unsigned long long>(stats.draws), static_cast<unsigned long long>(stats.lookups),
+        static_cast<unsigned long long>(stats.full), static_cast<unsigned long long>(stats.partial), static_cast<unsigned long long>(stats.refreshes),
+        static_cast<unsigned long long>(stats.attachmentRefreshes), static_cast<unsigned long long>(stats.repeated), static_cast<unsigned long long>(stats.stable),
+        static_cast<unsigned long long>(stats.stableAttachment), static_cast<unsigned long long>(stats.nested), histogram.c_str(), events.c_str());
+    AgcDriver::ProfilePrint_nid_no_patch("[target-refresh] q0x%x wrapper_exclusive(count/ms): lookup=%llu/%.3f register_clear=%llu/%.3f cmask=%llu/%.3f\n", GpuLockThreadTag(), static_cast<unsigned long long>(stats.wrapperCounts[0]), static_cast<double>(stats.wrapperNs[0]) / 1e6, static_cast<unsigned long long>(stats.wrapperCounts[1]), static_cast<double>(stats.wrapperNs[1]) / 1e6, static_cast<unsigned long long>(stats.wrapperCounts[2]), static_cast<double>(stats.wrapperNs[2]) / 1e6);
+    constexpr const char* outcomes[] = {"changed", "unchanged", "compared", "proved", "aborted"};
+    for (std::size_t a = 0; a < stats.rows.size(); ++a) {
+        for (std::size_t o = 0; o < TargetOutcomeCount; ++o) {
+            const auto& row = stats.rows[a][o];
+            if (row.calls == 0) continue;
+            std::string steps;
+            for (std::size_t s = 0; s < TargetStepCount; ++s) {
+                if (row.counts[s] == 0 && row.ns[s] == 0) continue;
+                std::snprintf(part, sizeof(part), " %s=%llu/%.3f", TargetStepNames[s], static_cast<unsigned long long>(row.counts[s]), static_cast<double>(row.ns[s]) / 1e6);
+                steps += part;
+            }
+            AgcDriver::ProfilePrint_nid_no_patch("[target-refresh] q0x%x %s/%s calls=%llu wall_ms=%.3f exclusive(count/ms):%s\n", GpuLockThreadTag(), a ? "attachment" : "other", outcomes[o], static_cast<unsigned long long>(row.calls), static_cast<double>(row.wallNs) / 1e6, steps.c_str());
+        }
+    }
+    stats.draws = stats.lookups = stats.full = stats.partial = stats.refreshes = stats.attachmentRefreshes = 0;
+    stats.repeated = stats.stable = stats.stableAttachment = stats.nested = 0;
+    stats.rows = {};
+    stats.wrapperNs = {};
+    stats.wrapperCounts = {};
+    stats.multiplicity = {};
+    stats.events.clear();
+    stats.reported = now;
+}
+
+}
+
+void TargetRefreshSample::Charge() {
+    const auto now = std::chrono::steady_clock::now();
+    ns[static_cast<std::size_t>(step)] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - lap).count());
+    lap = now;
+}
+
+TargetRefreshSample::TargetRefreshSample(std::uint64_t identity, const std::uint64_t& imageVersion, const std::uint64_t& imageGeneration) {
+    if (!TargetTimersEnabled() || targetStats.drawsActive == 0) return;
+    enabled = true;
+    image = identity;
+    version = &imageVersion;
+    generation = &imageGeneration;
+    attachment = targetStats.lookupDepth != 0;
+    ++targetStats.refreshes;
+    if (attachment) ++targetStats.attachmentRefreshes;
+    const auto tracker = Tracker().generation.load(std::memory_order_relaxed);
+    const auto writes = targetWriteSerial.load(std::memory_order_relaxed);
+    const auto unwatched = UnwatchSerial();
+    const auto found = std::find_if(targetStats.seen.begin(), targetStats.seen.end(), [&](const auto& seen) { return seen.image == image; });
+    if (found != targetStats.seen.end()) {
+        ++targetStats.repeated;
+        if (found->version == imageVersion && found->generation == imageGeneration && found->tracker == tracker && found->writes == writes && found->unwatched == unwatched) {
+            ++targetStats.stable;
+            if (attachment) ++targetStats.stableAttachment;
+        }
+    }
+    if (targetSample != nullptr) {
+        ++targetStats.nested;
+        previous = targetSample->step;
+        return;
+    }
+    owner = true;
+    counts.fill(0);
+    ns.fill(0);
+    start = lap = std::chrono::steady_clock::now();
+    counts[static_cast<std::size_t>(step)] = 1;
+    targetSample = this;
+}
+
+TargetRefreshSample::~TargetRefreshSample() {
+    if (!enabled) return;
+    if (owner) {
+        Charge();
+        auto& row = targetStats.rows[attachment ? 1 : 0][static_cast<std::size_t>(outcome)];
+        ++row.calls;
+        row.wallNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(lap - start).count());
+        for (std::size_t i = 0; i < TargetStepCount; ++i) {
+            row.counts[i] += counts[i];
+            row.ns[i] += ns[i];
+        }
+        if (targetStats.lookupDepth != 0) targetStats.lookupRefreshNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(lap - start).count());
+        targetSample = nullptr;
+    } else {
+        Step(previous);
+    }
+    const TargetRefreshSeen seen{image, *version, *generation, Tracker().generation.load(std::memory_order_relaxed), targetWriteSerial.load(std::memory_order_relaxed), UnwatchSerial()};
+    const auto found = std::find_if(targetStats.seen.begin(), targetStats.seen.end(), [&](const auto& entry) { return entry.image == image; });
+    if (found != targetStats.seen.end()) *found = seen;
+    else targetStats.seen.push_back(seen);
+}
+
+void TargetRefreshSample::Step(TargetRefreshStep next) {
+    if (!enabled || targetSample == nullptr) return;
+    targetSample->Charge();
+    targetSample->step = next;
+    ++targetSample->counts[static_cast<std::size_t>(next)];
+}
+
+void TargetRefreshSample::Outcome(TargetRefreshOutcome result) {
+    if (owner) outcome = result;
+}
+
+bool TargetRefreshSample::Active() { return targetSample != nullptr; }
+void TargetRefreshSample::Add(const char* name, std::uint64_t value) {
+    if (targetSample != nullptr) targetStats.events[name] += value;
+}
+std::uint64_t TargetRefreshSample::ImageId() {
+    static std::atomic<std::uint64_t> next{0};
+    return next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+TargetRefreshScope::TargetRefreshScope(TargetRefreshStep next) {
+    if (targetSample == nullptr) return;
+    enabled = true;
+    previous = targetSample->step;
+    targetSample->Charge();
+    targetSample->step = next;
+    ++targetSample->counts[static_cast<std::size_t>(next)];
+}
+TargetRefreshScope::~TargetRefreshScope() {
+    if (!enabled) return;
+    targetSample->Charge();
+    targetSample->step = previous;
+}
+TargetRefreshDrawScope::TargetRefreshDrawScope() {
+    if (!TargetTimersEnabled()) return;
+    if (targetStats.drawsActive++ == 0) {
+        ++targetStats.draws;
+        targetStats.drawLookups = 0;
+        targetStats.seen.clear();
+    }
+}
+TargetRefreshDrawScope::~TargetRefreshDrawScope() {
+    if (!TargetTimersEnabled()) return;
+    if (--targetStats.drawsActive == 0) {
+        ++targetStats.multiplicity[std::min<std::size_t>(targetStats.drawLookups, 8)];
+        ReportTargetRefresh();
+    }
+}
+TargetRefreshLookupScope::TargetRefreshLookupScope(bool fullScissor) {
+    if (!TargetTimersEnabled()) return;
+    enabled = true;
+    lap = std::chrono::steady_clock::now();
+    refreshBefore = targetStats.lookupRefreshNs;
+    ++targetStats.lookupDepth;
+    ++targetStats.lookups;
+    ++targetStats.drawLookups;
+    if (fullScissor) ++targetStats.full;
+    else ++targetStats.partial;
+}
+void TargetRefreshLookupScope::Phase(std::size_t next) {
+    if (!enabled) return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - lap).count());
+    const auto refresh = targetStats.lookupRefreshNs - refreshBefore;
+    targetStats.wrapperNs[step] += elapsed >= refresh ? elapsed - refresh : 0;
+    ++targetStats.wrapperCounts[step];
+    lap = now;
+    refreshBefore = targetStats.lookupRefreshNs;
+    step = next;
+}
+TargetRefreshLookupScope::~TargetRefreshLookupScope() {
+    if (!enabled) return;
+    Phase(step);
+    --targetStats.lookupDepth;
+}
+
+GpuHolderPhaseScope::GpuHolderPhaseScope(GpuHolderPhase phase) {
+    if (!GpuHoldProfiled()) return;
+    enabled = true;
+    previous = holderPhase;
+    ChangeProfilePhase(phase);
+}
+GpuHolderPhaseScope::~GpuHolderPhaseScope() {
+    if (enabled) ChangeProfilePhase(previous);
 }
 
 void SetGpuUnlockHook(void (*hook)()) {
@@ -2387,6 +2747,7 @@ std::uint64_t GpuHoldSerial() {
 void GpuMutexType::unlock() {
     const bool outermost = --depth == 0;
     if (outermost) {
+        if (auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr; trace != nullptr && trace == holdTrace) trace->Add("GpuMutex.hold", GpuLockSiteNames[static_cast<std::size_t>(holdSite)], holdStart, std::chrono::steady_clock::now());
         owner.store(nullptr, std::memory_order_relaxed);
         // Still the holder here: the hold ends when the mutex is given up, not before.
         if (GpuHoldProfiled()) EndHold();
@@ -2417,19 +2778,21 @@ void AssertGpuLockHeld(const char* where) {
 }
 
 void GpuMutexType::lock() {
+    auto* threadTrace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
     if (!GpuLockProfiled()) {
-        auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
-        if (trace == nullptr) {
+        std::size_t site = 0;
+        if (threadTrace == nullptr) {
             LockSpinning(mutex, HandoffSpinWindow());
         } else {
-            const auto site = static_cast<std::size_t>(std::exchange(LockStats().nextSite, GpuLockSite::Other));
+            site = static_cast<std::size_t>(std::exchange(LockStats().nextSite, GpuLockSite::Other));
             if (!mutex.try_lock()) {
                 const auto start = std::chrono::steady_clock::now();
                 LockSpinning(mutex, HandoffSpinWindow());
-                trace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, std::chrono::steady_clock::now());
+                threadTrace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, std::chrono::steady_clock::now());
             }
         }
         acquired();
+        if (depth == 1 && threadTrace != nullptr) TraceHoldBegan(site, threadTrace);
         return;
     }
     auto& stats = LockStats();
@@ -2444,12 +2807,13 @@ void GpuMutexType::lock() {
         if (holders) Holders().Snapshot(before);
         const auto start = std::chrono::steady_clock::now();
         {
-            const HolderWait waiter{holders};
+            const HolderWait waiter{holders, site};
             LockSpinning(mutex, HandoffSpinWindow());
         }
         acquired();
         const auto now = std::chrono::steady_clock::now();
-        if (auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr) trace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, now);
+        if (threadTrace != nullptr) threadTrace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, now);
+        if (depth == 1 && threadTrace != nullptr) TraceHoldBegan(site, threadTrace);
         if (holders) {
             HolderMatrixValues after{};
             Holders().Snapshot(after);
@@ -2516,12 +2880,21 @@ void GpuMutexType::lock() {
     }
     acquired();
     if (depth == 1 && GpuHoldProfiled()) BeginHold(site);
+    if (depth == 1 && threadTrace != nullptr) TraceHoldBegan(site, threadTrace);
 }
 
 void TagGpuLockSite(GpuLockSite site) {
     // Off the profiled path the tag is never read, so the thread-local is not touched either.
     if (!GpuLockProfiled() && !PerformanceTrace::Recording()) return;
     LockStats().nextSite = site;
+}
+
+GpuLockSite SwapLastGpuLockSite(GpuLockSite site) {
+    return std::exchange(holdSite, site);
+}
+
+void SetTraceGpuHolds(bool enabled) {
+    traceHolds = enabled;
 }
 
 void MarkPresenterThread() {

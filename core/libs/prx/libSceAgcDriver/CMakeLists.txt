@@ -410,6 +410,33 @@ if(BUILD_TESTING)
         set_tests_properties(agc_handoff_spin PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+
+    add_test_executable(agc_range_index_tests tests/RangeIndex.cpp)
+    target_include_directories(agc_range_index_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_range_index_tests PRIVATE libc)
+    configure_windows_unwind(agc_range_index_tests)
+    add_test(NAME agc_range_index COMMAND agc_range_index_tests)
+    set_tests_properties(agc_range_index PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_range_index PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(agc_pipeline_library_single_flight_tests EXCLUDE_FROM_ALL
+            tests/PipelineLibrarySingleFlight.cpp
+    )
+    target_include_directories(agc_pipeline_library_single_flight_tests PRIVATE
+            $<TARGET_PROPERTY:libSceAgcDriver,INCLUDE_DIRECTORIES>
+    )
+    target_link_libraries(agc_pipeline_library_single_flight_tests PRIVATE libSceAgcDriver shader_recompiler_agc_driver libc libkernel)
+    configure_windows_unwind(agc_pipeline_library_single_flight_tests)
+    set_target_properties(agc_pipeline_library_single_flight_tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME agc_pipeline_library_single_flight COMMAND agc_pipeline_library_single_flight_tests)
+    set_tests_properties(agc_pipeline_library_single_flight PROPERTIES
+            ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    if(WIN32)
+        set_tests_properties(agc_pipeline_library_single_flight PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
 
 if(WIN32)
@@ -1608,6 +1635,7 @@ configure_windows_unwind(agc_host_import_retire_tests)
 if(BUILD_TESTING)
     set_target_properties(agc_host_import_retire_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_host_import_retire COMMAND agc_host_import_retire_tests)
+    set_tests_properties(agc_host_import_retire PROPERTIES TIMEOUT 30)
     if(WIN32)
         set_tests_properties(agc_host_import_retire PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
@@ -2023,6 +2051,7 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         endif()
     endforeach()
+    set_tests_properties(agc_driver_host_import_proofs PROPERTIES TIMEOUT 30)
     set_property(TEST agc_driver_pipelined_dma APPEND PROPERTY ENVIRONMENT "APS5_NO_GPU_SMALL_DMA_COPY=1")
     add_test(NAME agc_host_write_helper COMMAND agc_driver_host_write_ordering_tests --helper)
     add_test(NAME agc_host_write_helper_off COMMAND agc_driver_host_write_ordering_tests --helper)
@@ -2378,6 +2407,12 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_draw_cache_reuse_off agc_driver_draw_cache_reuse_verify agc_driver_draw_cache_reuse_inline PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test(NAME agc_driver_draw_data_hit_user_words_verify COMMAND agc_driver_draw_data_hit_user_words_tests)
+    set_tests_properties(agc_driver_draw_data_hit_user_words_verify PROPERTIES ENVIRONMENT "APS5_VERIFY_DRAW_DATA_HITS=1" SKIP_RETURN_CODE 77)
+    if(WIN32)
+        set_tests_properties(agc_driver_draw_data_hit_user_words_verify PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 
     add_test(NAME agc_driver_stencil_replay_no_gpl COMMAND agc_driver_stencil_replay_tests)
     set_tests_properties(agc_driver_stencil_replay_no_gpl PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_GPL=1" TIMEOUT 30 SKIP_RETURN_CODE 77)
@@ -2399,6 +2434,7 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     set_tests_properties(agc_driver_queued_index_read_order PROPERTIES TIMEOUT 60)
+    set_tests_properties(agc_driver_pipelined_indirect_draw PROPERTIES TIMEOUT 60)
     set_property(TEST agc_driver_queued_index_read_order APPEND PROPERTY ENVIRONMENT "APS5_NO_GPU_SMALL_DMA_COPY=1")
 
     foreach(agcTest IN ITEMS agc_spirv_narrow_constant_store_tests agc_spirv13_image_tests agc_spirv_optimizer_tests agc_driver_constant_store_tests)

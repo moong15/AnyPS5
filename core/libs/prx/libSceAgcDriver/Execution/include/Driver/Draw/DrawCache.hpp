@@ -124,6 +124,7 @@ struct StageCapture {
     std::uint64_t forgetSerial = 0;
     std::uint32_t pushOffset = 0;
     ShaderRecompiler::SrtUserDataUse userDataUse;
+    std::uint64_t userDataMask = ~std::uint64_t{0};
     std::shared_ptr<const ShaderRecompiler::SourceHandle> prepared;
     std::vector<ShaderRecompiler::BufferBaseWord> bufferBaseWords;
 };

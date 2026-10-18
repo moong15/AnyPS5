@@ -1187,6 +1187,10 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .stencilReferenceDword = artifact.stencilReferenceDword,
         .variantId = artifact.variantId
     };
+    for (const auto reg : variant.bindings.layout.userDataRegisters) {
+        const auto index = reg - request.context.userDataBaseRegister;
+        result.userDataRegisterReads |= reg >= request.context.userDataBaseRegister && index < 64u ? std::uint64_t{1} << index : ~std::uint64_t{0};
+    }
     const auto exports = request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{};
     const auto planIdentity = bindingPlanIdentity(variant, snapshot, exports);
     const std::span<const std::byte> artifactIdentity{variant.artifactIdentity.data(), variant.artifactIdentity.size()};

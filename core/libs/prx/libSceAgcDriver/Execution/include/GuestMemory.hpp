@@ -1,6 +1,8 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_GUESTMEMORY_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_GUESTMEMORY_HPP
 
+#include <array>
+#include <chrono>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -149,6 +151,103 @@ constexpr std::uint8_t BlockUnchanged = 0;
 constexpr std::uint8_t BlockWritten = 1;
 bool ChangedBlocks(std::uint64_t address, std::size_t bytes, std::span<const std::uint64_t> generations, std::span<std::uint8_t> changed, std::span<std::uint8_t> cpu = {});
 
+enum class TargetRefreshStep : std::size_t {
+    Other, CpuPrepare, CpuPending, CpuDescribe, CpuTriggers, CpuReap, CpuSync, Proof, Alias, AliasCheck,
+    Flush, HeldReads, PipelineWait, PendingWait, PendingScan, Collect, TrackerWait, Keys,
+    Validate, BlockStates, Allocate, Compare, CompareMemo, NewestNote, Import, Units,
+    SaveProof, Upload, Count
+};
+
+enum class TargetRefreshOutcome : std::size_t { Changed, Unchanged, Compared, Proved, Aborted, Count };
+
+class TargetRefreshScope {
+public:
+    explicit TargetRefreshScope(TargetRefreshStep step);
+    ~TargetRefreshScope();
+    TargetRefreshScope(const TargetRefreshScope&) = delete;
+    TargetRefreshScope& operator=(const TargetRefreshScope&) = delete;
+private:
+    bool enabled = false;
+    TargetRefreshStep previous = TargetRefreshStep::Other;
+};
+
+class TargetRefreshDrawScope {
+public:
+    TargetRefreshDrawScope();
+    ~TargetRefreshDrawScope();
+    TargetRefreshDrawScope(const TargetRefreshDrawScope&) = delete;
+    TargetRefreshDrawScope& operator=(const TargetRefreshDrawScope&) = delete;
+};
+
+class TargetRefreshLookupScope {
+public:
+    explicit TargetRefreshLookupScope(bool fullScissor);
+    ~TargetRefreshLookupScope();
+    void Phase(std::size_t step);
+    TargetRefreshLookupScope(const TargetRefreshLookupScope&) = delete;
+    TargetRefreshLookupScope& operator=(const TargetRefreshLookupScope&) = delete;
+private:
+    bool enabled = false;
+    std::size_t step = 0;
+    std::uint64_t refreshBefore = 0;
+    std::chrono::steady_clock::time_point lap;
+};
+
+class TargetRefreshSample {
+public:
+    TargetRefreshSample(std::uint64_t image, const std::uint64_t& version, const std::uint64_t& generation);
+    ~TargetRefreshSample();
+    void Step(TargetRefreshStep step);
+    void Outcome(TargetRefreshOutcome outcome);
+    static bool Active();
+    static void Add(const char* name, std::uint64_t value = 1);
+    static std::uint64_t ImageId();
+    TargetRefreshSample(const TargetRefreshSample&) = delete;
+    TargetRefreshSample& operator=(const TargetRefreshSample&) = delete;
+private:
+    friend class TargetRefreshScope;
+    void Charge();
+    bool owner = false;
+    bool enabled = false;
+    bool attachment = false;
+    std::uint64_t image = 0;
+    const std::uint64_t* version = nullptr;
+    const std::uint64_t* generation = nullptr;
+    TargetRefreshOutcome outcome = TargetRefreshOutcome::Aborted;
+    TargetRefreshStep step = TargetRefreshStep::Other;
+    TargetRefreshStep previous = TargetRefreshStep::Other;
+    std::chrono::steady_clock::time_point start;
+    std::chrono::steady_clock::time_point lap;
+    std::array<std::uint64_t, static_cast<std::size_t>(TargetRefreshStep::Count)> counts;
+    std::array<std::uint64_t, static_cast<std::size_t>(TargetRefreshStep::Count)> ns;
+};
+
+template <typename TAction>
+decltype(auto) MeasureTargetRefresh(TargetRefreshStep step, TAction&& action) {
+    const TargetRefreshScope scope(step);
+    return std::forward<TAction>(action)();
+}
+
+struct TargetRefreshCounter {
+    explicit TargetRefreshCounter(const char* name) : name(name) {}
+    ~TargetRefreshCounter() { TargetRefreshSample::Add(name, value); }
+    const char* name;
+    std::uint64_t value = 0;
+};
+
+enum class GpuHolderPhase : std::size_t { Other, TargetRefresh, ResourceComplete, ResourceRevalidate, ResourceUpload, ResourceImages, ResourceMark, ResourceWriteback, Count };
+
+class GpuHolderPhaseScope {
+public:
+    explicit GpuHolderPhaseScope(GpuHolderPhase phase);
+    ~GpuHolderPhaseScope();
+    GpuHolderPhaseScope(const GpuHolderPhaseScope&) = delete;
+    GpuHolderPhaseScope& operator=(const GpuHolderPhaseScope&) = delete;
+private:
+    GpuHolderPhase previous = GpuHolderPhase::Other;
+    bool enabled = false;
+};
+
 // Serializes device work: draws, dispatches, presentation and the deferred write-backs below. The
 // mutex is recursive; it is wrapped so every acquisition (std::lock_guard at any site) measures how
 // long it waited: the graphics worker's frame is mostly spent waiting for this lock behind the
@@ -201,6 +300,8 @@ std::uint32_t GpuLockThreadTag();
 // the line shows who holds the mutex, not only who waits for it.
 enum class GpuLockSite : std::uint8_t { Other = 0, Dispatch, Indirect, Draw, Hook, Wait, Label, Flush, Present, Fill, Copy, End, Try, Import, Shader, Presync, Writeback, HostWrite, Lifecycle, Count };
 void TagGpuLockSite(GpuLockSite site);
+GpuLockSite SwapLastGpuLockSite(GpuLockSite site);
+void SetTraceGpuHolds(bool enabled);
 // A GPU wait (a fence or timeline wait that found its work unfinished) made while the calling
 // thread holds GpuMutex: counted on the thread's [lock] line as 'locked GPU waits' (APS5_PROFILE_DRAW).
 void NoteLockedGpuWait(double ms);

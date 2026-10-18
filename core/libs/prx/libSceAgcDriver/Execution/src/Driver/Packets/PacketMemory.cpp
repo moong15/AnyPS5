@@ -315,7 +315,10 @@ bool Driver::enqueueDmaPacket(std::span<const std::uint32_t> packet, std::uint32
     if (Pm4::DmaSource(packet) == 0 || Pm4::DmaSource(packet) == 3) Graphics::RequireNoMultisampleTarget(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u), packet[6] & 0x3ffffffu, "a DMA copy");
     const auto copy = Pm4::DecodeMemoryCopy(packet);
     if (!copy.has_value() || copy->destination % 4 != 0 || copy->bytes % 4 != 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->source), copy->bytes) || !GuestMemory::Accessible(reinterpret_cast<const void*>(copy->destination), copy->bytes, true)) return false;
-    if (smallCopySourcePending(copy->source, copy->bytes, true)) return false;
+    if (smallCopySourcePending(copy->source, copy->bytes, true)) {
+        ++Graphics::Recorder::SmallDmaStats().heldBack;
+        return false;
+    }
     DrawPipeline::Queue0().Enqueue([this, queue, copy = *copy] {
         DrawPipeline::Queue0().ReleaseRunningReads();
         GuestMemory::SetCurrentPacket(0x50, queue);
@@ -349,14 +352,44 @@ bool Driver::smallCopySourcePending(std::uint64_t source, std::size_t bytes, boo
 
 bool Driver::copyBehindPendingSource(std::uint32_t queue, std::uint64_t destination, std::uint64_t source, std::size_t bytes) {
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(source), bytes) || !GuestMemory::Accessible(reinterpret_cast<const void*>(destination), bytes, true) || !smallCopySourcePending(source, bytes, false)) return false;
+    auto& stats = Graphics::Recorder::SmallDmaStats();
+    ++stats.attempts;
+    const auto lockStart = std::chrono::steady_clock::now();
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
+    stats.lockNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lockStart).count());
     const auto localDevice = device.Load();
     if (localDevice == nullptr) return false;
     recordDeferredLabels(localDevice.get(), queue);
-    if (!localDevice->StoresPendingOver(source, bytes) || !localDevice->GpuCopyPossible(destination, source, bytes)) return false;
+    if (!localDevice->StoresPendingOver(source, bytes) || !localDevice->GpuCopyPossible(destination, source, bytes)) {
+        ++stats.refused;
+        return false;
+    }
+    if (auto* recorder = Graphics::Recorder::Active()) {
+        if (const auto sourceInfo = recorder->DescribePendingWrite(source, bytes); sourceInfo.has_value()) {
+            if (sourceInfo->open) ++stats.sourceOpen;
+            else if (sourceInfo->signaled) ++stats.sourceSignaled;
+            else ++stats.sourceInFlight;
+        }
+    }
+    const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> sourceRange{{{source, source + bytes}}};
+    if (Graphics::StorageTexture::AnyPendingOverlaps(sourceRange)) ++stats.sourceImage;
+    if (Graphics::AnyShadowedOverlaps(source, bytes)) ++stats.sourceShadow;
+    struct ProfileCopy {
+        bool previous = Graphics::Recorder::ProfilingSmallDma();
+        ProfileCopy() { Graphics::Recorder::ProfilingSmallDma() = true; }
+        ~ProfileCopy() { Graphics::Recorder::ProfilingSmallDma() = previous; }
+    } profileCopy;
+    const auto recordStart = std::chrono::steady_clock::now();
     const auto outcome = localDevice->CopyBuffer(destination, source, bytes, 0, std::numeric_limits<std::size_t>::max(), 0, 0, queue, [](std::span<const std::byte>, std::uint64_t) {});
     if (outcome.path != 1 && outcome.path != 3) throw std::runtime_error("AGC driver: a DMA_DATA copy of up to 64 KiB that GpuCopyPossible accepted took copy path " + std::to_string(outcome.path));
+    stats.recordNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - recordStart).count());
+    if (auto* recorder = Graphics::Recorder::Active()) recorder->NoteSmallDmaDestination(destination, bytes);
+    ++stats.copies;
+    stats.bytes += bytes;
+    if (outcome.path == 3) ++stats.aliases;
+    if (!Graphics::Recorder::PendingLabelSince().has_value()) ++stats.noDeadline;
+    if (Graphics::Recorder::RecordedWorkSinceSubmit() == 0) ++stats.noWork;
     ++copiesBehindPendingSources;
     return true;
 }

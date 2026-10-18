@@ -1714,10 +1714,10 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         }
     }
 #endif
-    const auto inserted = state.imports.emplace(base, entry);
-    if (inserted.second) ++state.inserted;
+    const auto [placed, added] = state.imports.emplace(base, entry);
+    if (added) ++state.inserted;
     owner.armed = false;
-    return &inserted.first->second;
+    return &placed->second;
 }
 
 // The readable registered range containing [begin, end), or null.
@@ -3151,39 +3151,92 @@ ImportMissMemoStats ImportMissMemoCounters() {
     return {HostImportMissMemo::Enabled(), state.missMemoHits, state.missMemoStores};
 }
 
-const HostImport* HostImportFor(const Context& context, std::uint64_t address, std::size_t bytes) {
-    if (context.hostImportAlignment == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return nullptr;
+static const HostImport* hostImportFor(const Context& context, std::uint64_t address, std::size_t bytes, HostImportLookupCache* cache) {
+    if (context.hostImportAlignment == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) {
+        if (cache != nullptr) *cache = {};
+        return nullptr;
+    }
+    GuestMemory::TargetRefreshSample::Add("import_probe_calls");
+    static const bool probeTiming = std::getenv("APS5_PROFILE_IMPORT_PROBE") != nullptr;
+    const bool timed = probeTiming && GuestMemory::TargetRefreshSample::Active();
+    auto lap = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto phase = [&](const char* name) {
+        if (!timed) return;
+        const auto now = std::chrono::steady_clock::now();
+        GuestMemory::TargetRefreshSample::Add(name, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - lap).count()));
+        lap = now;
+    };
     ensurePinWaiter();
     auto& state = Imports();
+    phase("import_probe_setup_ns");
     std::lock_guard lock(state.mutex);
+    phase("import_probe_lock_ns");
     const bool memoEnabled = HostImportMissMemo::Enabled();
 #ifdef _WIN32
     settleUnwatchedImports(context, state);
 #endif
+    const auto remember = [&](const HostImport* entry) {
+        if (cache != nullptr) {
+            if (entry != nullptr && !importsStale(context, state)) *cache = {entry, context.device, address, bytes, state.epoch, state.inserted};
+            else *cache = {};
+        }
+        return entry;
+    };
+    if (cache != nullptr && cache->import != nullptr && cache->device == context.device && cache->address == address && cache->bytes == bytes && cache->epoch == state.epoch && cache->inserted == state.inserted && !importsStale(context, state)) {
+        GuestMemory::TargetRefreshSample::Add("import_probe_fast_hit");
+        cache->import->lastUse = ++state.useCounter;
+        cache->import->lastUse = ++state.useCounter;
+        phase("import_probe_lookup_ns");
+        return cache->import;
+    }
     // A hit is only valid while the registry has not changed since the imports were reconciled.
     if (!importsStale(context, state)) {
         if (const auto* entry = findImport(state, address, address + bytes)) {
+            GuestMemory::TargetRefreshSample::Add("import_probe_fast_hit");
             entry->lastUse = ++state.useCounter;
-            return entry;
+            phase("import_probe_lookup_ns");
+            return remember(entry);
         }
+        GuestMemory::TargetRefreshSample::Add("import_probe_miss");
         if (memoEnabled) {
             const auto before = importMissStamp(context, state);
             if (state.missMemo.Contains(address, address + bytes, before) && HostImportMissMemo::Stable(before, importMissStamp(context, state))) {
                 ++state.missMemoHits;
-                return nullptr;
+                GuestMemory::TargetRefreshSample::Add("import_probe_memo_hit");
+                GuestMemory::TargetRefreshSample::Add("import_probe_unresolved");
+                phase("import_probe_lookup_ns");
+                return remember(nullptr);
             }
         }
+    } else {
+        GuestMemory::TargetRefreshSample::Add("import_probe_stale");
     }
+    phase("import_probe_lookup_ns");
     const auto before = memoEnabled ? importMissStamp(context, state) : HostImportMissMemo::Stamp{};
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+    phase("import_probe_lease_ns");
     refreshImports(context, state, lease);
+    phase("import_probe_reconcile_ns");
     bool structuralMiss = false;
     const auto* entry = importAccess(context, state, address, address + bytes, lease, nullptr, memoEnabled ? &structuralMiss : nullptr);
     if (structuralMiss) {
         const auto after = importMissStamp(context, state);
-        if (after.generation == state.refreshedGeneration && state.missMemo.Store(address, address + bytes, before, after)) ++state.missMemoStores;
+        if (after.generation == state.refreshedGeneration && state.missMemo.Store(address, address + bytes, before, after)) {
+            ++state.missMemoStores;
+            GuestMemory::TargetRefreshSample::Add("import_probe_memo_store");
+        }
     }
-    return entry;
+    phase("import_probe_resolve_ns");
+    GuestMemory::TargetRefreshSample::Add(entry != nullptr ? "import_probe_resolved" : "import_probe_unresolved");
+    return remember(entry);
+}
+
+const HostImport* HostImportFor(const Context& context, std::uint64_t address, std::size_t bytes) {
+    return hostImportFor(context, address, bytes, nullptr);
+}
+
+const HostImport* HostImportForCached(const Context& context, std::uint64_t address, std::size_t bytes, HostImportLookupCache& cache) {
+    return hostImportFor(context, address, bytes, &cache);
 }
 
 const HostImport* ExistingHostImportFor(const Context& context, std::uint64_t address, std::size_t bytes) {
@@ -5293,11 +5346,20 @@ bool HostImportsUnchanged(const Context& context, const HostImportsProof& proof)
     return state.device == proof.device && state.epoch == proof.epoch && state.refreshedGeneration == proof.refreshedGeneration && !importsStale(context, state);
 }
 
+bool HostImportsReconciledUnchanged(const Context& context, const HostImportsProof& proof) {
+    if (proof.device == VK_NULL_HANDLE || proof.device != context.device) return false;
+    auto& state = Imports();
+    std::lock_guard lock(state.mutex);
+    if (state.device != proof.device) return false;
+    if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != state.refreshedGeneration) refreshImports(context, state, GuestAllocations::GuestAllocationsAcquire_nid_postfix());
+    return state.device == proof.device && state.epoch == proof.epoch && state.inserted == proof.inserted;
+}
+
 HostImportsProof HostImportsIdentity(const Context& context) {
     auto& state = Imports();
     std::lock_guard lock(state.mutex);
     if (importsStale(context, state)) return {};
-    return {state.device, state.epoch, state.refreshedGeneration};
+    return {state.device, state.epoch, state.refreshedGeneration, state.inserted};
 }
 
 }

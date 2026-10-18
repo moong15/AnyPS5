@@ -4,14 +4,19 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <thread>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -37,6 +42,24 @@ constexpr std::array<VkDynamicState, 15> dynamicStates{
 
 using Key = std::vector<std::byte>;
 
+bool profiling() {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    return profile;
+}
+
+bool singleFlight() {
+    static const bool enabled = std::getenv("APS5_NO_PIPELINE_SINGLE_FLIGHT") == nullptr;
+    return enabled;
+}
+
+struct PartBuild {
+    bool finished = false;
+    VkPipeline handle = VK_NULL_HANDLE;
+    std::exception_ptr error;
+};
+
+using InFlight = std::pair<std::size_t, Key>;
+
 struct DeviceLibraries {
     PFN_vkDestroyPipeline destroyPipeline = nullptr;
     PFN_vkDestroyPipelineLayout destroyLayout = nullptr;
@@ -44,6 +67,7 @@ struct DeviceLibraries {
     std::vector<VkShaderModule> modules;
     std::map<Key, VkPipelineLayout> layouts;
     std::array<std::map<Key, VkPipeline>, 4> parts;
+    std::map<InFlight, std::shared_ptr<PartBuild>> inFlight;
     PipelineLibraryCounters counters;
 };
 
@@ -52,6 +76,7 @@ struct LibraryStore {
     std::map<VkDevice, DeviceLibraries> devices;
     std::condition_variable idle;
     std::condition_variable work;
+    std::condition_variable parts;
     std::deque<std::pair<VkDevice, std::function<void()>>> jobs;
     std::map<VkDevice, std::size_t> pending;
     std::map<VkDevice, std::size_t> activeBuilds;
@@ -104,6 +129,14 @@ Key Combined(const Key& part, const Key& context) {
     append(part);
     append(context);
     return key;
+}
+
+void reportDiscard(std::size_t part, std::uint64_t total) {
+    static std::atomic<unsigned> reported{0};
+    if (!profiling()) return;
+    const auto count = reported.fetch_add(1) + 1;
+    if (count > 16) return;
+    std::fprintf(stderr, "[pipeline-library] discarded a duplicate of part %zu, %llu so far\n", part, static_cast<unsigned long long>(total));
 }
 
 }
@@ -191,6 +224,49 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             libraries.push_back(found->second);
             continue;
         }
+        std::shared_ptr<PartBuild> owned;
+        std::shared_ptr<PartBuild> awaited;
+        if (singleFlight()) {
+            const auto claimed = device.inFlight.emplace(std::make_pair(part, key), std::make_shared<PartBuild>());
+            (claimed.second ? owned : awaited) = claimed.first->second;
+        }
+        if (awaited != nullptr) {
+            store.parts.wait(lock, [&] { return awaited->finished; });
+            ++device.counters.waited;
+            if (awaited->error != nullptr) std::rethrow_exception(awaited->error);
+            ++device.counters.shared[part];
+            libraries.push_back(awaited->handle);
+            continue;
+        }
+        // The claim owns the build: it publishes the pipeline to every waiter and releases the key
+        // on the way out, including when the creation throws, so no request waits for a build that
+        // ended. With the claim off a part another thread built meanwhile is kept and this one is
+        // dropped, the path APS5_NO_PIPELINE_SINGLE_FLIGHT=1 restores.
+        struct OwnedBuild {
+            LibraryStore& store;
+            DeviceLibraries& device;
+            InFlight flight;
+            std::shared_ptr<PartBuild> build;
+            std::unique_lock<std::mutex>& lock;
+            bool open;
+            void Complete(VkPipeline pipeline) {
+                if (!open) return;
+                open = false;
+                build->handle = pipeline;
+                build->finished = true;
+                device.inFlight.erase(flight);
+                store.parts.notify_all();
+            }
+            ~OwnedBuild() {
+                if (!open) return;
+                open = false;
+                if (!lock.owns_lock()) lock.lock();
+                build->error = std::current_exception();
+                build->finished = true;
+                device.inFlight.erase(flight);
+                store.parts.notify_all();
+            }
+        } ownedBuild{store, device, InFlight{part, key}, owned, lock, owned != nullptr};
         PerformanceTimer timing("Vulkan.GraphicsPipelineLibrary");
         VkGraphicsPipelineLibraryCreateInfoEXT library{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, flags[part] == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT ? &rendering : &shaderRendering};
         library.flags = flags[part];
@@ -226,7 +302,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         VkPipeline handle = VK_NULL_HANDLE;
         // Built without the store's mutex: a draw whose parts are resident is not held behind
         // another thread's build, and builds from several threads (the registration prebuild, the
-        // journal replay) run at once; a part another thread built meanwhile is kept, this one dropped.
+        // journal replay) run at once. Requests for keys that differ are not serialized either.
         lock.unlock();
         VkResult created;
         {
@@ -234,10 +310,16 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
             created = context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &create, nullptr, &handle);
         }
         lock.lock();
-        Check(created, "vkCreateGraphicsPipelines library");
+        if (created != VK_SUCCESS) {
+            ++device.counters.failed;
+            Check(created, "vkCreateGraphicsPipelines library");
+        }
         if (const auto raced = cache.find(key); raced != cache.end()) {
             device.destroyPipeline(context.device, handle, nullptr);
+            ++device.counters.discarded;
+            reportDiscard(part, device.counters.discarded);
             libraries.push_back(raced->second);
+            ownedBuild.Complete(VK_NULL_HANDLE);
             continue;
         }
         cache.emplace(key, handle);
@@ -252,6 +334,7 @@ VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPip
         }
         ++device.counters.built[part];
         libraries.push_back(handle);
+        ownedBuild.Complete(handle);
     }
     if (partsOnly) return VK_NULL_HANDLE;
     PerformanceTimer timing("Vulkan.GraphicsPipelineLink");

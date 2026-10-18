@@ -1,6 +1,7 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/HashSlotMap.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineJournal.hpp"
@@ -5418,6 +5419,41 @@ void sampledBudgetReportTests() {
     Require(!SampledBudgetReportDue(4000 * MiB, 2048 * MiB, seconds(9)), "a budget change is reported again within 10 s of the last report");
 }
 
+void hashSlotMapTests() {
+    AgcDriver::HashSlotMap<std::uint64_t> map(16);
+    for (const std::uint64_t key : {15ull, 31ull, 47ull, 0x1000ull}) *map.try_emplace(key).first = key;
+    Require(map.size() == 4 && !map.try_emplace(31).second && *map.find(31) == 31, "a key inserted again was not found as it was");
+    Require(map.erase(15) && map.find(15) == nullptr && map.size() == 3, "an erased key is still found");
+    Require(*map.find(31) == 31 && *map.find(47) == 47 && *map.find(0x1000) == 0x1000, "an erase lost the entries probed past it");
+    Require(!map.erase(15) && map.find(0x2000) == nullptr, "an absent key was found or erased");
+    const auto key = [](std::uint64_t index) { return index * 0x9e3779b97f4a7c15ull; };
+    for (std::uint64_t index = 1; index <= 1000; ++index) *map.try_emplace(key(index)).first = index;
+    bool found = true;
+    for (std::uint64_t index = 1; index <= 1000; ++index) found = found && map.find(key(index)) != nullptr && *map.find(key(index)) == index;
+    Require(found && map.size() == 1003, "growth lost a key");
+    for (std::uint64_t index = 1; index <= 1000; index += 2) map.erase(key(index));
+    for (std::uint64_t index = 1; index <= 1000; ++index) found = found && (map.find(key(index)) != nullptr) == (index % 2 == 0);
+    Require(found && map.size() == 503 && *map.find(31) == 31, "erasing half the keys lost or kept the wrong ones");
+    Require(*map.try_emplace(0).first == 0 && map.find(0) != nullptr && map.find(1) == map.find(0), "key 0 is not kept as 1");
+    map.clear();
+    Require(map.size() == 0 && map.find(31) == nullptr, "a cleared map still finds a key");
+}
+
+void hashSlotMapCollisionTests() {
+    AgcDriver::HashSlotMap<std::vector<std::uint32_t>> map(16);
+    const std::vector<std::uint32_t> older{0xffffffffu, 2, 4, 6};
+    const std::vector<std::uint32_t> newer{0xffffffffu, 2, 4, 8};
+    constexpr std::uint64_t shared = 0x0123456789abcdefull;
+    *map.try_emplace(shared).first = older;
+    const auto collision = map.try_emplace(shared);
+    Require(!collision.second && map.size() == 1, "a key with another key's hash took a slot of its own");
+    const auto* held = map.find(shared);
+    Require(held != nullptr && *held == older && *held != newer, "a lookup served a key the slot does not hold");
+    *collision.first = newer;
+    Require(map.size() == 1 && *map.find(shared) == newer, "the newer of two keys with one hash did not replace the older");
+    Require(map.erase(shared) && map.find(shared) == nullptr && !map.erase(shared) && map.size() == 0, "a hash two keys shared was not erased");
+}
+
 void misalignedShaderDataTests() {
     mock = MockVulkan{};
     auto context = mockContext();
@@ -8842,6 +8878,8 @@ int main(int argc, char** argv) {
         sampledTextureBudgetTests();
         storageTextureBudgetTests();
         sampledBudgetReportTests();
+        hashSlotMapTests();
+        hashSlotMapCollisionTests();
         meshArgumentTests();
         meshIndexBufferTests();
         stagingPoolBudgetTests();

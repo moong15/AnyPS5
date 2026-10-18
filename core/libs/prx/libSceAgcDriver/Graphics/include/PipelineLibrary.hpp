@@ -55,6 +55,10 @@ struct PipelineLibraryCounters {
     std::array<std::uint64_t, 4> built{};
     std::uint64_t linked = 0;
     std::uint64_t optimized = 0;
+    std::array<std::uint64_t, 4> shared{};
+    std::uint64_t discarded = 0;
+    std::uint64_t failed = 0;
+    std::uint64_t waited = 0;
 };
 
 PipelineLibraryCounters PipelineLibraryCountersOf(VkDevice device);

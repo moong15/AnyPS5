@@ -2138,6 +2138,7 @@ DescribedSetLayouts DescribeSetLayouts(const Context& context, std::span<const C
 }
 
 void ShaderResources::buildComplete() {
+    const GuestMemory::GpuHolderPhaseScope holderPhase(GuestMemory::GpuHolderPhase::ResourceComplete);
     PerformanceTimer frameTiming("Resources.Complete");
     Require(!completed, "cannot update a published descriptor heap");
     const auto stageStart = std::chrono::steady_clock::now();
@@ -2160,7 +2161,10 @@ void ShaderResources::buildComplete() {
         Require(textures.size() == plannedSampledImages && storageTextures.size() == plannedStorageImages, "image lookups disagree with the descriptor plan");
         resolveImageTables();
         timing.bindingsMs += phase(BuildPhase::Images);
-        guestMemory.UploadFinish(usesBda);
+        {
+            const GuestMemory::GpuHolderPhaseScope uploadPhase(GuestMemory::GpuHolderPhase::ResourceUpload);
+            guestMemory.UploadFinish(usesBda);
+        }
         timing.uploadMs += phase(BuildPhase::Upload);
         if (usesBda) bda = std::make_unique<BdaResources>(context, guestMemory);
         else if (usesFaultBuffer) bda = std::make_unique<BdaResources>(context);
@@ -2327,29 +2331,36 @@ void ShaderResources::noteReusable() {
     // Taken whether or not the object turns out reusable: the lookups' records are this build's.
     captureValidation();
     reusable = false;
+    importsReconcilable = false;
     directRegions.clear();
     if (guestMemory.HasCopiedWrites() || HoldsLease() || usesBda || !multisampleSources.empty() || (bda != nullptr && LoopGuardEnabled())) return;
     if (std::any_of(textures.begin(), textures.end(), [](const std::shared_ptr<Texture>& texture) { return texture != nullptr && texture->RefreshedPerUse(); })) return;
     if (TemplateDataRefresh() && std::any_of(allocations.begin(), allocations.end(), [](const Allocation& allocation) { return allocation.buffer != nullptr && !allocation.guest && allocation.role != ShaderRecompiler::DescriptorRole::ImageTableMap && allocation.size > MaxRefreshBytes; })) return;
     const auto regions = guestMemory.DirectRegions();
     if (!regions.has_value()) return;
+    bool mirrored = false;
     for (const auto& [begin, end] : *regions) {
         // No reconcile here: the upload just took these imports, and the set is about to be recorded
         // against them.
         auto serial = HostImportSerial(context, begin, static_cast<std::size_t>(end - begin), false);
         // Read-only image mirrors (exe ranges) are as stable as imports; their serials have the top
         // bit set, so the two spaces never collide.
+        const bool imported = serial != 0;
         if (serial == 0) serial = ImageMirrorSerial(context, begin, static_cast<std::size_t>(end - begin));
         if (serial == 0) return;
         directRegions.push_back({begin, end, serial});
+        mirrored = mirrored || !imported;
     }
+    bool bounded = false;
     for (const auto& cut : guestMemory.CutRegions()) {
         for (auto& region : directRegions) {
             if (region.begin != cut.begin) continue;
             region.regionEnd = cut.end;
             region.committedEnd = cut.committedEnd;
+            bounded = true;
         }
     }
+    importsReconcilable = !mirrored && !bounded;
     reusable = true;
 }
 
@@ -3130,39 +3141,52 @@ void CountCpuWriteSync(unsigned before, unsigned after, bool ready, bool sync, d
 }
 
 bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std::size_t bytes) {
+    const GuestMemory::TargetRefreshScope prepareScope(GuestMemory::TargetRefreshStep::CpuPrepare);
     if (bytes == 0 || Recorder::InCompletion()) return false;
     auto* recorder = Recorder::Active();
     if (recorder == nullptr) return false;
     const auto drawWriters = DrawCopiedWriters();
     const auto triggers = [&] {
+        const GuestMemory::TargetRefreshScope triggerScope(GuestMemory::TargetRefreshStep::CpuTriggers);
+        GuestMemory::TargetRefreshCounter inspected("copied_writers");
         unsigned mask = 0;
         const auto overlaps = [&](const auto& writers) {
-            return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->WritesOverlap(address, bytes); });
+            return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { ++inspected.value; return writer->WritesOverlap(address, bytes); });
         };
         if (context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) mask |= 1u;
         if (overlaps(*drawWriters)) mask |= 2u;
         if (Recorder::PendingCompletionLabels() != 0 && recorder->PendingLabelIn(address, bytes)) mask |= 4u;
+        GuestMemory::TargetRefreshSample::Add(mask == 0 ? "trigger_zero" : "trigger_nonzero");
         return mask;
     };
-    if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && Recorder::PendingCompletionLabels() == 0) return false;
-    if (!recorder->PendingWriteOverlaps(address, bytes)) return false;
+    if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && Recorder::PendingCompletionLabels() == 0) {
+        GuestMemory::TargetRefreshSample::Add("cpu_empty");
+        return false;
+    }
+    if (!GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::CpuPending, [&] { return recorder->PendingWriteOverlaps(address, bytes); })) {
+        GuestMemory::TargetRefreshSample::Add("cpu_pending_negative");
+        return false;
+    }
     const auto before = triggers();
-    if (before == 0) return false;
+    if (before == 0) {
+        GuestMemory::TargetRefreshSample::Add("cpu_no_trigger");
+        return false;
+    }
     static const bool noPrecise = std::getenv("APS5_NO_PRECISE_CPU_WRITE_SYNC") != nullptr;
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
-    const auto producer = profile ? recorder->DescribeWaitWrite(address, bytes) : std::nullopt;
+    const auto producer = profile ? GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::CpuDescribe, [&] { return recorder->DescribeWaitWrite(address, bytes); }) : std::nullopt;
     bool retired = false;
     if (!noPrecise) {
         const auto batches = recorder->InFlightBatches();
-        recorder->Reap();
+        GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::CpuReap, [&] { recorder->Reap(); });
         retired = recorder->InFlightBatches() != batches;
     }
     const auto after = noPrecise ? before : triggers();
-    const bool sync = after != 0 && (noPrecise || recorder->PendingWriteOverlaps(address, bytes));
+    const bool sync = after != 0 && (noPrecise || GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::CpuPending, [&] { return recorder->PendingWriteOverlaps(address, bytes); }));
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (sync) {
         Recorder::CountSync(4);
-        recorder->SyncThrough(address, bytes);
+        GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::CpuSync, [&] { recorder->SyncThrough(address, bytes); });
     }
     if (profile) CountCpuWriteSync(before, after, producer.has_value() && producer->signaled, sync, sync ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() : 0);
     return sync || retired;
@@ -3179,6 +3203,7 @@ const ShaderRecompiler::DescriptorBinding* ShaderResources::tableImages(std::spa
 }
 
 bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report) {
+    const GuestMemory::GpuHolderPhaseScope holderPhase(GuestMemory::GpuHolderPhase::ResourceRevalidate);
     if (report != nullptr) *report = {ProofPath::Full, ProofFailure::Other};
     if (!reusable || shaders.empty()) return false;
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -3389,7 +3414,8 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
                 if (region.overlaps || AnyShadowedOverlaps(region.begin, static_cast<std::size_t>(region.end - region.begin))) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region");
             }
         }
-        if (HostImportsUnchanged(context, importsProof)) {
+        static const bool reconcileImports = std::getenv("APS5_NO_IMPORT_PROOF_RECONCILE") == nullptr;
+        if (importsReconcilable && reconcileImports ? HostImportsReconciledUnchanged(context, importsProof) : HostImportsUnchanged(context, importsProof)) {
             if (profile) Revalidations().importSkips.fetch_add(1, std::memory_order_relaxed);
         } else {
             if (!serialLoop()) return finish(fast, false, ProofFailure::Imports);
@@ -3514,23 +3540,46 @@ bool chargeShaderKey(ChurnCounts& profile, const ResourceCache::Key& key, std::s
 
 }
 
+bool ResourceCache::FastKeyHash() {
+    static const bool fast = std::getenv("APS5_NO_FAST_RESOURCE_KEY_HASH") == nullptr;
+    return fast;
+}
+
+std::uint64_t ResourceCache::hashKey(const Key& key) {
+    if (!FastKeyHash()) return static_cast<std::uint64_t>(KeyHash{}(key));
+    constexpr std::uint64_t prime = 1099511628211ull;
+    std::uint64_t lanes[4] = {14695981039346656037ull, 0x9e3779b97f4a7c15ull, 0xc2b2ae3d27d4eb4full, 0x165667b19e3779f9ull};
+    const auto pair = [&](std::size_t at) { return key[at] | static_cast<std::uint64_t>(key[at + 1]) << 32u; };
+    std::size_t at = 0;
+    for (; at + 8 <= key.size(); at += 8) {
+        lanes[0] = (lanes[0] ^ pair(at)) * prime;
+        lanes[1] = (lanes[1] ^ pair(at + 2)) * prime;
+        lanes[2] = (lanes[2] ^ pair(at + 4)) * prime;
+        lanes[3] = (lanes[3] ^ pair(at + 6)) * prime;
+    }
+    for (; at < key.size(); ++at) lanes[at & 3u] = (lanes[at & 3u] ^ key[at]) * prime;
+    std::uint64_t hash = key.size();
+    for (const auto lane : lanes) hash = (hash ^ lane ^ (lane >> 29u)) * 0x9e3779b97f4a7c15ull;
+    return hash ^ (hash >> 32u);
+}
+
 std::shared_ptr<ShaderResources> ResourceCache::Find(const Key& key) {
     resourceCacheFinds.fetch_add(1, std::memory_order_relaxed);
+    const auto hash = hashKey(key);
     std::lock_guard lock(mutex);
-    const auto found = index.find(key);
-    if (found == index.end()) {
-        noteReturn(key);
+    const auto found = index.find(hash, key);
+    if (found == nullptr) {
+        noteReturn(hash);
         noteMiss(key);
         return nullptr;
     }
-    entries.splice(entries.begin(), entries, found->second);
-    noteUse(key);
-    return found->second->second;
+    entries.splice(entries.begin(), entries, *found);
+    noteUse(hash);
+    return (*found)->resources;
 }
 
-void ResourceCache::noteEvicted(const Key& key) {
+void ResourceCache::noteEvicted(std::uint64_t hash) {
     if (fixedCapacity) return;
-    const auto hash = KeyHash{}(key);
     if (const auto found = evictedKeys.find(hash); found != evictedKeys.end()) evictedOrder.erase(found->second);
     evictedOrder.push_front(hash);
     evictedKeys[hash] = evictedOrder.begin();
@@ -3552,9 +3601,9 @@ void ResourceCache::noteEvicted(const Key& key) {
     std::fprintf(stderr, "[rescache] capacity %zu -> %zu entries: keys it evicted keep coming back\n", previous, capacity);
 }
 
-void ResourceCache::noteUse(const Key& key) {
+void ResourceCache::noteUse(std::uint64_t hash) {
     if (fixedCapacity || capacity <= baseEntries) return;
-    usedKeys.insert(KeyHash{}(key));
+    usedKeys.insert(hash);
     if (++usesSinceCheck < capacity * shrinkWindow) return;
     const auto used = usedKeys.size();
     const auto uses = usesSinceCheck;
@@ -3569,9 +3618,9 @@ void ResourceCache::noteUse(const Key& key) {
     std::fprintf(stderr, "[rescache] capacity %zu -> %zu entries: %zu keys served the last %zu uses\n", previous, capacity, used, uses);
 }
 
-void ResourceCache::noteReturn(const Key& key) {
+void ResourceCache::noteReturn(std::uint64_t hash) {
     if (fixedCapacity) return;
-    const auto found = evictedKeys.find(KeyHash{}(key));
+    const auto found = evictedKeys.find(hash);
     if (found == evictedKeys.end()) return;
     evictedOrder.erase(found->second);
     evictedKeys.erase(found);
@@ -3696,73 +3745,75 @@ void ResourceCache::noteMiss(const Key& key) {
 }
 
 void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> resources, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
-    std::lock_guard lock(mutex);
     if (!resources->HasCachedStorageImages()) return;
-    if (const auto found = index.find(key); found != index.end()) {
-        if (evicted != nullptr) evicted->push_back(std::move(found->second->second));
-        entries.erase(found->second);
-        index.erase(found);
+    const auto hash = hashKey(key);
+    std::lock_guard lock(mutex);
+    entries.push_front({key, hash, std::move(resources)});
+    const auto [slot, inserted] = index.insert(hash, key, entries.begin());
+    if (!inserted) {
+        if (evicted != nullptr) evicted->push_back(std::move((*slot)->resources));
+        entries.erase(*slot);
     }
-    entries.emplace_front(key, std::move(resources));
-    index.emplace(key, entries.begin());
+    *slot = entries.begin();
     if (capacity == 0) {
         const char* value = std::getenv("APS5_RESOURCE_CACHE_ENTRIES");
         const auto parsed = value ? std::strtoull(value, nullptr, 10) : 0ull;
         fixedCapacity = parsed != 0;
         capacity = fixedCapacity ? static_cast<std::size_t>(parsed) : baseEntries;
     }
-    noteUse(key);
+    noteUse(hash);
     while (entries.size() > capacity) {
-        noteEvicted(entries.back().first);
-        if (evicted != nullptr) evicted->push_back(std::move(entries.back().second));
-        index.erase(entries.back().first);
+        noteEvicted(entries.back().hash);
+        if (evicted != nullptr) evicted->push_back(std::move(entries.back().resources));
+        index.erase(entries.back().hash, entries.back().key);
         entries.pop_back();
     }
-    if (entries.front().second->TableElements() == 0) return;
+    if (entries.front().resources->TableElements() == 0) return;
     std::uint64_t tables = 0;
-    for (const auto& entry : entries) tables += entry.second->TableElements();
+    for (const auto& entry : entries) tables += entry.resources->TableElements();
     for (auto it = std::prev(entries.end()); tables > TableElementBudget() && it != entries.begin();) {
-        const auto elements = it->second->TableElements();
+        const auto elements = it->resources->TableElements();
         if (elements == 0) {
             --it;
             continue;
         }
         tables -= elements;
-        if (evicted != nullptr) evicted->push_back(std::move(it->second));
-        index.erase(it->first);
+        if (evicted != nullptr) evicted->push_back(std::move(it->resources));
+        index.erase(it->hash, it->key);
         it = std::prev(entries.erase(it));
     }
 }
 
 void ResourceCache::Remove(const Key& key, const ShaderResources* object) {
+    const auto hash = hashKey(key);
     std::lock_guard lock(mutex);
-    if (object != nullptr) {
-        const auto found = index.find(key);
-        if (found == index.end() || found->second->second.get() != object) return;
-    }
-    erase(key);
+    const auto found = index.find(hash, key);
+    if (found == nullptr || (object != nullptr && (*found)->resources.get() != object)) return;
+    entries.erase(*found);
+    index.erase(hash, key);
 }
 
 void ResourceCache::RemoveImage(const StorageTexture* image, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
     std::lock_guard lock(mutex);
     for (auto it = entries.begin(); it != entries.end();) {
-        if (!it->second->ReadsImage(image)) {
+        if (!it->resources->ReadsImage(image)) {
             ++it;
             continue;
         }
-        if (evicted != nullptr) evicted->push_back(std::move(it->second));
-        index.erase(it->first);
+        if (evicted != nullptr) evicted->push_back(std::move(it->resources));
+        index.erase(it->hash, it->key);
         it = entries.erase(it);
     }
 }
 
 bool ResourceCache::Touch(const Key& key) {
     resourceCacheTouches.fetch_add(1, std::memory_order_relaxed);
+    const auto hash = hashKey(key);
     std::lock_guard lock(mutex);
-    const auto found = index.find(key);
-    if (found == index.end()) return false;
-    entries.splice(entries.begin(), entries, found->second);
-    noteUse(key);
+    const auto found = index.find(hash, key);
+    if (found == nullptr) return false;
+    entries.splice(entries.begin(), entries, *found);
+    noteUse(hash);
     return true;
 }
 
@@ -3817,15 +3868,8 @@ std::uint64_t ResourceCache::TableElementBudget() {
 std::uint64_t ResourceCache::TableElements() const {
     std::lock_guard lock(mutex);
     std::uint64_t tables = 0;
-    for (const auto& entry : entries) tables += entry.second->TableElements();
+    for (const auto& entry : entries) tables += entry.resources->TableElements();
     return tables;
-}
-
-void ResourceCache::erase(const Key& key) {
-    const auto found = index.find(key);
-    if (found == index.end()) return;
-    entries.erase(found->second);
-    index.erase(found);
 }
 
 ResourceCache& SharedResourceCache() {
@@ -4466,6 +4510,7 @@ void ShaderResources::applyAnisoOverride() {
 }
 
 void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBinding& binding, Binding& item, std::span<const std::shared_ptr<Sampler>> shaderSamplers) {
+    const GuestMemory::GpuHolderPhaseScope holderPhase(GuestMemory::GpuHolderPhase::ResourceImages);
     auto& counters = TextureCounts();
     // The element's stage-A record, when the pass ran (records follow the plan order exactly).
     const auto nextRecord = [&]() -> const ImageRecord* { return nextImageRecord < imageRecords.size() ? &imageRecords[nextImageRecord++] : nullptr; };
@@ -5290,6 +5335,7 @@ void ShaderResources::WriteBack() {
 }
 
 void ShaderResources::MarkGpuWrites(Recorder& recorder) {
+    const GuestMemory::GpuHolderPhaseScope holderPhase(GuestMemory::GpuHolderPhase::ResourceMark);
     // The ranges this use reads in place through their host imports (read-only and written elements
     // alike, and an address-based build's whole leased heaps), before the writes: a CPU store into
     // one of them (the copy HLE) must not land before the recorded work read it.
@@ -5332,6 +5378,7 @@ void ShaderResources::CheckFaults() const {
 }
 
 void ShaderResources::WriteBackBuffers() {
+    const GuestMemory::GpuHolderPhaseScope holderPhase(GuestMemory::GpuHolderPhase::ResourceWriteback);
     if (bda) bda->CheckFault();
     if (SkipWriteBack()) return;
     guestMemory.WriteBack();

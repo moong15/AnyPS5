@@ -1360,6 +1360,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
 // [draws] target-lookup accounting. `lookup` makes (or finds) the image; DrawWithRecipe refreshes
 // the stored object instead.
 std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, const State& state, const ColorTarget& color, DrawOutcome& outcome, bool profile, const std::function<std::shared_ptr<StorageTexture>()>& lookup) {
+    GuestMemory::TargetRefreshLookupScope targetLookupScope(state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 && state.scissor.extent.width >= color.extent.width && state.scissor.extent.height >= color.extent.height);
     const auto lookupStart = std::chrono::steady_clock::now();
     const auto walkedBefore = profile ? GuestMemory::ThreadCollectedBytes() : 0;
     const auto skippedBefore = profile ? GuestMemory::ThreadSkippedWalks() : 0;
@@ -1373,14 +1374,18 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
     std::shared_ptr<StorageTexture> resident;
     try {
         resident = lookup();
+        targetLookupScope.Phase(1);
         if (resident != nullptr) materializeRegisterClear(context, color, *resident);
+        targetLookupScope.Phase(0);
     } catch (const std::exception& error) {
         static std::mutex reportMutex;
         static std::set<std::uint64_t> reported;
         std::lock_guard lock(reportMutex);
         if (reported.insert(color.address).second) std::fprintf(stderr, "[gpu] color target 0x%llx stays non-resident: %s\n", static_cast<unsigned long long>(color.address), error.what());
     }
+    targetLookupScope.Phase(2);
     if (resident != nullptr) materializeCmaskClear(context, color, resident);
+    targetLookupScope.Phase(0);
     if (profile) {
         const auto lookupUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - lookupStart).count();
         ++outcome.targetLookups;
@@ -2100,6 +2105,7 @@ void PrewarmPipeline(const Context& context, const State& state, std::span<const
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipeOut) {
+    const GuestMemory::TargetRefreshDrawScope targetDrawScope;
     std::vector<std::uint32_t> stencilReferences;
     for (const auto& shader : shaders) {
         if (shader.program != nullptr && !shader.program->stencilReferences.empty()) {
@@ -2757,6 +2763,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
 }
 
 DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots, const DrawRecipe& recipe) {
+    const GuestMemory::TargetRefreshDrawScope targetDrawScope;
     if (context.recorder != nullptr) context.recorder->BoundKeptBytes();
     static_cast<void>(snapshots);
     PerformanceTimer timing("Graphics.DrawWithRecipe");
