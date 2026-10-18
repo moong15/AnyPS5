@@ -743,6 +743,10 @@ struct DecodedColorFormat {
     ShaderRecompiler::ColorExportPacking packing = ShaderRecompiler::ColorExportPacking::None;
 };
 
+const char* PackedColorTargetName(ShaderRecompiler::ColorExportPacking packing) {
+    return packing == ShaderRecompiler::ColorExportPacking::Float11_11_10 ? "11_11_10 float" : "10_11_11 unorm";
+}
+
 // CB_COLOR_INFO FORMAT / NUMBER_TYPE / COMP_SWAP to a Vulkan attachment format. AMD formats list
 // components from the least significant bits, as Vulkan's non-packed formats do.
 DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number, std::uint32_t swap) {
@@ -753,7 +757,7 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
     };
     const bool alternate = swap == 1;
     const auto single = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
-    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12) return fail();
+    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 7 && format != 10 && format != 12 && format != 16) return fail();
     switch (format) {
         case 1:
             if (number == unorm) return single(VK_FORMAT_R8_UNORM, 1);
@@ -791,6 +795,9 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (swap != 0 || (number != floating && number != unorm)) return fail();
             if (number == unorm) return {VK_FORMAT_R32_UINT, 4, 0xe4u, ShaderRecompiler::ColorExportPacking::Unorm10_11_11};
             return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4};
+        case 7:
+            if (swap != 2 || number != floating) return fail();
+            return {VK_FORMAT_R32_UINT, 4, 0xc6u, ShaderRecompiler::ColorExportPacking::Float11_11_10};
         case 9:
             // COLOR_2_10_10_10 keeps red in the low bits, the Vulkan A2B10G10R10 packing.
             if (number != unorm) return fail();
@@ -821,6 +828,9 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16};
             if (number == uint) return {VK_FORMAT_R32G32B32A32_UINT, 16};
             return fail();
+        case 16:
+            if ((swap != 0 && swap != 2) || number != unorm) return fail();
+            return {VK_FORMAT_R5G6B5_UNORM_PACK16, 2, static_cast<std::uint8_t>(swap == 2 ? 0xe4u : 0xc6u)};
         case 17:
             if (swap != 0 || number != unorm) return fail();
             return {VK_FORMAT_A1R5G5B5_UNORM_PACK16, 2, 0xc6u};
@@ -1303,15 +1313,21 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             }
         }
         if (color.packing != ShaderRecompiler::ColorExportPacking::None) {
+            const std::string packed = std::string(color.packing == ShaderRecompiler::ColorExportPacking::Float11_11_10 ? "an " : "a ") + PackedColorTargetName(color.packing);
             const auto slotExport = (exportFormat >> (4u * color.exportIndex)) & 0xfu;
-            if (slotExport == 5 || slotExport == 6) throw std::runtime_error("AGC graphics: color export format " + std::to_string(slotExport) + " into a 10_11_11 unorm target is unsupported");
-            Require(!state.blendEnable, "blending into a 10_11_11 unorm color target is unsupported");
-            Require((exportedMask & 7u) == 7u, "partial writes of a 10_11_11 unorm color target are unsupported");
+            if (slotExport == 5 || slotExport == 6) throw std::runtime_error("AGC graphics: color export format " + std::to_string(slotExport) + " into " + packed + " target is unsupported");
+            Require(!state.blendEnable, "blending into " + packed + " color target is unsupported");
+            Require((exportedMask & 7u) == 7u, "partial writes of " + packed + " color target are unsupported");
         }
         if (state.blendEnable && !reversed && (secondSource(state.srcColorBlendFactor) || secondSource(state.dstColorBlendFactor) || secondSource(state.srcAlphaBlendFactor) || secondSource(state.dstAlphaBlendFactor))) {
             const auto addition = [](VkBlendOp op) { return op == VK_BLEND_OP_ADD || op == VK_BLEND_OP_SUBTRACT || op == VK_BLEND_OP_REVERSE_SUBTRACT; };
             Require(addition(state.colorBlendOp) && addition(state.alphaBlendOp), "dual-source blending with a MIN or MAX operation is unsupported");
             result.dualSourceBlend = true;
+        }
+        if (const auto info = read(cx, 0x31c + slot * 0xfu); state.blendEnable && (info & 0x8000u) == 0 && ((info >> 8u) & 7u) <= 1u) {
+            char detail[80];
+            std::snprintf(detail, sizeof(detail), " (CB_COLOR_INFO 0x%08x, CB_BLEND%u_CONTROL 0x%08x)", info, slot, blend);
+            throw std::runtime_error(std::string("AGC graphics: blending unclamped normalized color is not implemented") + detail);
         }
         result.blends[color.exportIndex] = state;
     }
@@ -1470,9 +1486,9 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     Require(color.samples <= 8u, "color targets with more than eight samples are unsupported");
     Require((1u << ((attrib >> 15u) & 3u)) == color.samples, "color targets with fewer fragments than samples (EQAA) are unsupported");
     const auto multisampleInfo = color.samples > 1 ? 0x0c006000u : 0u;
-    // ROUND_MODE (bit 18) only affects unorm rounding. With DCC_ENABLE (bit 28) the target is written
+    // ROUND_MODE (bit 18) only affects unorm rounding and packed float truncation. With DCC_ENABLE (bit 28) the target is written
     if ((info & ~(0x00039f7cu | 0x00040000u | 0x10000000u | 0x00002000u | multisampleInfo)) != 0) throw std::runtime_error("AGC graphics: color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported (CB_COLOR_INFO 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", info); return std::string(text); }() + ")");
-    Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
+    Require((info & 0x8000u) != 0 || number <= 1u || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
     const auto view = read(cx, 0x31b + stride);
     Require((view & ~0x3fffffffu) == 0, "reserved CB_COLOR_VIEW bits are set");
     const auto slice = view & 0x1fffu;
@@ -1496,7 +1512,11 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
     if (volume) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
-        Require(maxMip == 0, "mipmapped 3D color targets are unsupported");
+        if (maxMip != 0) {
+            char message[384];
+            std::snprintf(message, sizeof(message), "mipmapped 3D color targets are unsupported (slot %u, %ux%ux%u, viewMip %u, maxMip %u, slices %u..%u, CB_COLOR_INFO 0x%08x, ATTRIB2 0x%08x, ATTRIB3 0x%08x, VIEW 0x%08x)", slot, ((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u, color.depth, viewMip, maxMip, slice, lastSlice, info, attrib2, attrib3, view);
+            Require(false, message);
+        }
         Require(slice < color.depth && lastSlice >= slice, "the color view slices are outside the 3D surface");
         color.depthSlice = slice;
         color.layers = std::min(lastSlice + 1u, color.depth) - slice;
@@ -1550,8 +1570,9 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
     color.format = decoded.format;
     color.componentMapping = decoded.componentMapping;
     color.packing = decoded.packing;
-    Require(color.packing == ShaderRecompiler::ColorExportPacking::None || (info & 0x10000000u) == 0, "DCC-compressed 10_11_11 unorm color targets are unsupported");
-    Require(color.packing == ShaderRecompiler::ColorExportPacking::None || (info & 0x00040000u) == 0, "truncating (ROUND_MODE) 10_11_11 unorm color targets are unsupported");
+    if (color.packing != ShaderRecompiler::ColorExportPacking::None && (info & 0x10000000u) != 0) throw std::runtime_error("AGC graphics: DCC-compressed " + std::string(PackedColorTargetName(color.packing)) + " color targets are unsupported");
+    Require(color.packing != ShaderRecompiler::ColorExportPacking::Unorm10_11_11 || (info & 0x00040000u) == 0, "truncating (ROUND_MODE) 10_11_11 unorm color targets are unsupported");
+    Require(color.packing != ShaderRecompiler::ColorExportPacking::Float11_11_10 || (info & 0x00040000u) != 0, "rounding (ROUND_MODE 0) 11_11_10 float color targets are unsupported");
     for (std::uint32_t word = 0; word < 2; ++word) {
         const auto clear = find(cx, 0x323 + word + stride);
         color.clearWords[word] = clear == cx.end() ? 0u : clear->second;
@@ -1650,6 +1671,7 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
         Require(destination.samples == 1, "CB resolve into a multisampled target is unsupported");
         Require(destination.cmaskAddress == 0, "CB resolve into a fast-clear color target is unsupported (the resolve does not update its CMASK)");
         Require(source.format == destination.format && source.extent.width == destination.extent.width && source.extent.height == destination.extent.height, "CB resolve between different formats or extents is unsupported");
+        if (source.packing != ShaderRecompiler::ColorExportPacking::None) throw std::runtime_error("AGC graphics: CB resolves of " + std::string(PackedColorTargetName(source.packing)) + " color targets are unsupported");
         requireCovered(destination);
         pass.source = source;
         pass.targets.push_back(destination);

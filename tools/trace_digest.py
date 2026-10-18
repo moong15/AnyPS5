@@ -5,6 +5,7 @@ import gzip
 import html
 import json
 import sys
+import zlib
 from pathlib import Path
 
 DESCRIPTION = """Digest of an APS5_TRACE_FRAMES / APS5_TRACE_SECONDS capture (aps5-trace-*.json.gz) for an issue or a
@@ -32,7 +33,8 @@ class Trace:
         self.presents = []
         self.folded = collections.defaultdict(float)
         self.batched = []
-        for event in document["traceEvents"]:
+        events = document if isinstance(document, list) else (document.get("traceEvents") or [])
+        for event in events:
             phase = event.get("ph")
             if phase == "M" and event.get("name") == "thread_name":
                 self.threads[event["tid"]] = event["args"]["name"]
@@ -340,4 +342,8 @@ def main(arguments=None):
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (EOFError, OSError, ValueError, zlib.error) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        sys.exit(2)

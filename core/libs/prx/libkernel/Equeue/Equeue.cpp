@@ -655,6 +655,9 @@ KernelEqueueEvent EqueueDescriptorEvent(int descriptor, int16_t filter, uint16_t
         if (!GuestSockets::Ready(static_cast<int>(e->event.ident), e->event.filter == EVFILT_WRITE, &data, &eof)) {
             return false;
         }
+        if (!eof && data < e->lowWater && !GuestSockets::Listening(static_cast<int>(e->event.ident))) {
+            return false;
+        }
         e->event.data = static_cast<intptr_t>(data);
         e->event.flags = static_cast<uint16_t>(eof ? (e->event.flags | EV_EOF) : (e->event.flags & ~EV_EOF));
         return true;

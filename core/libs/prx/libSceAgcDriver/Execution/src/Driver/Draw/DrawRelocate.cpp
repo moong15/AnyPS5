@@ -295,6 +295,7 @@ std::shared_ptr<DispatchVariant> Driver::cloneVariant(const DispatchVariant& var
     copy->words = variant.words;
     copy->forgetSerial = variant.forgetSerial;
     copy->compiled = variant.compiled;
+    copy->meshIndexDescriptor = variant.meshIndexDescriptor;
     copy->shader = variant.shader;
     copy->dataPositions = variant.dataPositions;
     copy->dataSlots = variant.dataSlots;

@@ -46,6 +46,25 @@ STACKS = "# samples=5 depth=64 truncated=1\n# module a.prx 0x1000 0x1\nntdll.dll
 
 
 class TraceDigestTests(unittest.TestCase):
+    def test_cli_reports_unreadable_inputs_without_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compressed = gzip.compress(b'{"traceEvents": []}')
+            files = {"invalid.json": b"{", "broken.json.gz": b"not gzip", "intervals.jsonl": b"{\n",
+                     "truncated.json.gz": compressed[:-4],
+                     "corrupt.json.gz": compressed[:10] + b"\xff" * 4 + compressed[14:]}
+            for name, data in files.items():
+                (root / name).write_bytes(data)
+            for name in ("missing.json", *files):
+                with self.subTest(name=name):
+                    result = subprocess.run([sys.executable, trace_digest.__file__, str(root / name)],
+                                            capture_output=True, text=True, encoding="utf-8", timeout=20)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertTrue(result.stderr.startswith("FAIL: "), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         root = Path(self.directory.name)
@@ -96,6 +115,14 @@ class TraceDigestTests(unittest.TestCase):
         self.assertEqual(thread["thread"], "tid 3")
         self.assertEqual(thread["folded_ms_per_frame"], 1.5)
         self.assertEqual(thread["untraced_ms_per_frame"], 0)
+
+    def test_trace_accepts_event_array_and_empty_document(self):
+        trace_from_array = trace_digest.Trace(EVENTS)
+        self.assertEqual(len(trace_from_array.presents), 3)
+        empty_dict = trace_digest.Trace({})
+        self.assertEqual(empty_dict.presents, [])
+        empty_list = trace_digest.Trace([])
+        self.assertEqual(empty_list.presents, [])
 
     def result(self):
         return trace_digest.digest(trace_digest.load_trace(self.trace), trace_digest.load_summary(None, self.trace),

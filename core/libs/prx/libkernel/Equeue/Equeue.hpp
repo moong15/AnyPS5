@@ -61,6 +61,7 @@ struct KernelEqueueEvent {
     bool enabled = true;
     uint64_t deadlineNs = 0;
     uint64_t intervalNs = 0;
+    std::int64_t lowWater = 0;
     KernelEvent event;
     KernelFilter filter;
     std::deque<KernelEvent> pendingEvents;

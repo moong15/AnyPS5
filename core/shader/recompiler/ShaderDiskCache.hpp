@@ -14,7 +14,7 @@
 
 namespace ShaderRecompiler::ShaderDiskCache {
 
-inline constexpr std::uint32_t FormatVersion = 38;
+inline constexpr std::uint32_t FormatVersion = 39;
 
 // The size in bytes of ArtifactIdentity's result, the digest a specialized module or a prepared
 // binding plan names its base artifact by.

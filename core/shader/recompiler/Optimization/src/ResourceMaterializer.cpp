@@ -334,6 +334,9 @@ bool TableTraced() {
 
 constexpr std::size_t PoisonReasonCount = static_cast<std::size_t>(PoisonReason::Count);
 
+enum class NarrowSkip : std::size_t { Value, NotBuffer, KeyScan, Pending, Unmapped, Count };
+constexpr std::array<const char*, static_cast<std::size_t>(NarrowSkip::Count)> NarrowSkipNames{"value", "not-buffer", "key-scan", "pending-write", "unmapped"};
+
 struct TableCounters {
     std::atomic<std::uint64_t> snapshots{0};
     std::atomic<std::uint64_t> tables{0};
@@ -341,6 +344,9 @@ struct TableCounters {
     std::array<std::atomic<std::uint64_t>, PoisonReasonCount> poison{};
     std::atomic<std::uint64_t> narrowed{0};
     std::atomic<std::uint64_t> narrowSkipped{0};
+    std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(NarrowSkip::Count)> narrowSkips{};
+    std::atomic<std::uint64_t> narrowPositions{0};
+    std::atomic<std::uint64_t> selected{0};
     std::atomic<std::uint64_t> nanoseconds{0};
     std::atomic<long long> lastReport{0};
 };
@@ -368,9 +374,16 @@ void reportTables() {
         if (count == 0) continue;
         poison += " " + std::string(ImageTableAbi::PoisonReasonName(static_cast<PoisonReason>(reason))) + "=" + std::to_string(count);
     }
-    std::fprintf(stderr, "[image-table] (10 s): %llu snapshots, %llu tables, %llu keys, structural poison:%s, narrowing %llu applied / %llu skipped, %.1f ms\n",
-        static_cast<unsigned long long>(snapshots), static_cast<unsigned long long>(counters.tables.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(counters.keys.exchange(0, std::memory_order_relaxed)), poison.empty() ? " none" : poison.c_str(),
-        static_cast<unsigned long long>(counters.narrowed.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(counters.narrowSkipped.exchange(0, std::memory_order_relaxed)), static_cast<double>(counters.nanoseconds.exchange(0, std::memory_order_relaxed)) / 1e6);
+    std::string skips;
+    for (std::size_t reason = 0; reason < counters.narrowSkips.size(); reason++) {
+        const auto count = counters.narrowSkips[reason].exchange(0, std::memory_order_relaxed);
+        if (count == 0) continue;
+        skips += " " + std::string(NarrowSkipNames[reason]) + "=" + std::to_string(count);
+        if (reason == static_cast<std::size_t>(NarrowSkip::KeyScan)) skips += " (up to " + std::to_string(counters.narrowPositions.exchange(0, std::memory_order_relaxed)) + " positions, APS5_IMAGE_TABLE_KEY_SCAN " + std::to_string(TableKeyScanLimit()) + ")";
+    }
+    std::fprintf(stderr, "[image-table] (10 s): %llu snapshots, %llu tables, %llu keys, %llu selected records, structural poison:%s, narrowing %llu applied / %llu skipped%s%s, %.1f ms\n",
+        static_cast<unsigned long long>(snapshots), static_cast<unsigned long long>(counters.tables.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(counters.keys.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(counters.selected.exchange(0, std::memory_order_relaxed)), poison.empty() ? " none" : poison.c_str(),
+        static_cast<unsigned long long>(counters.narrowed.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(counters.narrowSkipped.exchange(0, std::memory_order_relaxed)), skips.empty() ? "" : ":", skips.c_str(), static_cast<double>(counters.nanoseconds.exchange(0, std::memory_order_relaxed)) / 1e6);
 }
 
 enum class RecordState : std::uint8_t { OutsideDomain, Read, Unmapped, Carried };
@@ -492,8 +505,10 @@ private:
     }
 
     void Narrow(const TableColumn& column, ColumnRecords& records) {
-        const auto skip = [&] {
-            tableCounters().narrowSkipped.fetch_add(1, std::memory_order_relaxed);
+        const auto skip = [&](NarrowSkip reason) {
+            auto& counters = tableCounters();
+            counters.narrowSkipped.fetch_add(1, std::memory_order_relaxed);
+            counters.narrowSkips[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
         };
         std::vector<std::uint32_t> values{0u};
         std::vector<std::pair<std::uint64_t, std::uint64_t>> scanned;
@@ -503,7 +518,7 @@ private:
                 try {
                     walker.EvaluateDescriptorSource(plan, domain.source, runtime, key);
                 } catch (const std::exception&) {
-                    skip();
+                    skip(NarrowSkip::Value);
                     return;
                 }
                 values.push_back(key.dwords[0]);
@@ -511,7 +526,7 @@ private:
             }
             const auto keyBuffer = EvaluateBuffer(domain.source);
             if (keyBuffer.Type() != 0u) {
-                skip();
+                skip(NarrowSkip::NotBuffer);
                 return;
             }
             const auto base = keyBuffer.Base48();
@@ -519,38 +534,103 @@ private:
             const std::uint64_t first = domain.offset & ~3u;
             const std::uint64_t positions = size >= first + 4u ? (size - first - 4u) / domain.stride + 1u : 0u;
             if (positions > TableKeyScanLimit() || first > 0xffffffffull) {
-                skip();
+                auto& widest = tableCounters().narrowPositions;
+                auto seen = widest.load(std::memory_order_relaxed);
+                while (seen < positions && !widest.compare_exchange_weak(seen, positions, std::memory_order_relaxed)) {}
+                skip(NarrowSkip::KeyScan);
                 return;
             }
             if (positions != 0u && runtime.pendingWrite != nullptr && runtime.pendingWrite(runtime.userContext, base + first, size - first)) {
-                skip();
+                skip(NarrowSkip::Pending);
                 return;
             }
-            for (std::uint64_t index = 0; index < positions; index++) {
-                const auto address = base + first + index * domain.stride;
-                if (!PageAccessible(address, base, base + size)) {
-                    skip();
-                    return;
+            if (runtime.readWords != nullptr && positions != 0u && domain.stride % 4u == 0u && domain.stride <= 64u) {
+                const auto words = static_cast<std::size_t>(((positions - 1u) * domain.stride) / 4u + 1u);
+                for (std::uint64_t page = (base + first) & ~(PageBytes - 1u); page < base + first + words * 4u; page += PageBytes) {
+                    if (!PageAccessible(std::max(page, base + first), base, base + size)) {
+                        skip(NarrowSkip::Unmapped);
+                        return;
+                    }
                 }
-                values.push_back(Read(address));
+                if (keyWords.size() < words) keyWords.resize(words);
+                if (!runtime.readWords(runtime.userContext, base + first, keyWords.data(), words)) throw std::runtime_error("image table: failed to read guest memory at 0x" + hexText(base + first));
+                const auto step = static_cast<std::size_t>(domain.stride / 4u);
+                values.reserve(values.size() + positions);
+                for (std::size_t index = 0; index < words; index += step) values.push_back(keyWords[index]);
+            } else {
+                for (std::uint64_t index = 0; index < positions; index++) {
+                    const auto address = base + first + index * domain.stride;
+                    if (!PageAccessible(address, base, base + size)) {
+                        skip(NarrowSkip::Unmapped);
+                        return;
+                    }
+                    values.push_back(Read(address));
+                }
             }
             if (positions != 0u) scanned.emplace_back(base, size);
         }
         records.states.assign(records.keys, RecordState::OutsideDomain);
         records.outside = false;
+        const std::uint32_t unwrapped = std::numeric_limits<std::uint32_t>::max() / column.stride;
         for (const auto value : values) {
             const std::uint32_t relative = value * column.stride;
-            const bool aligned = relative % column.stride == 0u;
-            const auto record = relative / column.stride;
-            if (aligned && record < records.keys) {
+            const auto record = value <= unwrapped ? value : relative % column.stride == 0u ? relative / column.stride : records.keys;
+            if (record < records.keys) {
                 records.states[record] = RecordState::Read;
                 continue;
             }
-            if (column.address || ImageTableAbi::ScalarBufferDword(relative + column.addend, column.offset, records.size).has_value()) records.outside = true;
+            if (!records.outside && (column.address || ImageTableAbi::ScalarBufferDword(relative + column.addend, column.offset, records.size).has_value())) records.outside = true;
         }
         records.narrowed = true;
         for (const auto& [base, size] : scanned) tables.ranges.emplace_back(base, size);
         tableCounters().narrowed.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void Select(const TableColumn& column, ColumnRecords& records) {
+        const auto base = records.base;
+        const auto size = records.size;
+        DescriptorValue selection;
+        try {
+            walker.EvaluateDescriptorSource(plan, column.selection, runtime, selection);
+        } catch (const std::exception&) {
+            records.fault = ImageTableAbi::PoisonCode(static_cast<std::uint32_t>(PoisonReason::Unmapped));
+            return;
+        }
+        tableCounters().selected.fetch_add(1, std::memory_order_relaxed);
+        const auto offset = selection.dwords[0];
+        const auto entry = (column.addend + column.offset) & ~3u;
+        records.base = base + ((offset + column.offset) & ~3u) - entry;
+        records.size = entry + static_cast<std::uint64_t>(column.dwordCount) * sizeof(std::uint32_t);
+        records.records = 1u;
+        records.keys = 1u;
+        records.states.assign(1u, RecordState::Read);
+        records.words.assign(1u, 0u);
+        if (offset >= column.foldedAddend && offset > 0xffffffffu - column.foldedCarry) {
+            records.states.front() = RecordState::Carried;
+            return;
+        }
+        DescriptorValue value;
+        value.dwordCount = 8u;
+        std::uint64_t low = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t high = 0;
+        for (std::uint32_t dword = 0; dword < column.dwordCount; dword++) {
+            const auto position = ImageTableAbi::ScalarBufferDword(offset, column.offset + dword * 4u, size);
+            if (!position.has_value()) {
+                value.availableDwordMask |= static_cast<std::uint8_t>(1u << dword);
+                continue;
+            }
+            const auto address = base + *position;
+            if (!PageAccessible(address, base, base + size)) {
+                records.states.front() = RecordState::Unmapped;
+                return;
+            }
+            value.dwords[dword] = Read(address);
+            value.availableDwordMask |= static_cast<std::uint8_t>(1u << dword);
+            low = std::min(low, address);
+            high = std::max(high, address + sizeof(std::uint32_t));
+        }
+        records.words.front() = WordsIndex(value);
+        if (low < high) tables.ranges.emplace_back(low, high - low);
     }
 
     std::uint32_t WordsIndex(const DescriptorValue& value) {
@@ -583,6 +663,10 @@ private:
             }
             records.base = heap.Base48();
             records.size = heap.GetSize();
+            if (column.selected) {
+                Select(column, records);
+                return records;
+            }
             records.records = ImageTableAbi::ScalarBufferRecords(column.addend, column.stride, column.offset + (column.indirect ? 4u : 0u), records.size);
             if (records.size != 0u) tables.ranges.emplace_back(records.base, records.size);
         }
@@ -795,6 +879,7 @@ private:
     std::unordered_map<WordsHash::Key, std::uint32_t, WordsHash> wordsIndex;
     std::unordered_map<std::uint64_t, bool> pages;
     std::unordered_map<std::uint64_t, bool> wholePages;
+    std::vector<std::uint32_t> keyWords;
 };
 
 void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, SrtWalker& walker, ResourceSnapshot& snapshot, std::vector<std::uint8_t>& activeSources) {
@@ -1526,7 +1611,8 @@ void ResourceMaterializer::ApplyStaticInterface(IrProgram& program, bool nativeS
         if (image.table == NoTable) continue;
         tables = true;
         const auto modes = RuntimeImageModes(image);
-        if (modes.empty() || modes.size() > ImageTableAbi::MaxModes) image.tableOperation = TableOperation::Unsupported;
+        const bool storage = image.resourceClass == ImageResourceClass::Storage;
+        if (modes.empty() || modes.size() > ImageTableAbi::MaxModes || (storage && image.mipMode == ImageMipMode::DynamicStorage)) image.tableOperation = TableOperation::Unsupported;
     }
     for (const auto& pair : resources.info.sampledPairs) {
         if (pair.image >= images.size() || pair.sampler >= resources.info.samplers.size()) throw std::runtime_error("static sampled pair is out of range");

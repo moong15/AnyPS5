@@ -83,6 +83,7 @@ struct SpirvTableAccess {
     std::uint32_t dword3 = 0;
     std::uint32_t samplerElement = 0;
     bool active = false;
+    bool uniform = false;
 };
 
 struct SpirvEmitterState {
@@ -107,6 +108,7 @@ struct SpirvEmitterState {
     bool registrationModules = false;
     bool fragmentDescriptorSet = false;
     bool float16DenormPreserve = false;
+    bool robustBufferAccess2 = false;
     std::unordered_set<const IrValue*> sharedLaneValues;
     std::uint32_t laneHalf = 0;
     std::uint32_t spirvVersion = 0x00010300u;

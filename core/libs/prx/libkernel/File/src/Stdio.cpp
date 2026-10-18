@@ -604,6 +604,14 @@ int APS5_VABI chflags_nid_postfix(const char* path, std::uint64_t flags) {
     return 0;
 }
 
+int APS5_VABI nmount_nid_postfix(const KernelIovec* iov, unsigned int niov, int flags) {
+    (void)iov;
+    (void)niov;
+    (void)flags;
+    NotImplemented_nid_no_patch("nmount: mounting file systems");
+    return -1;
+}
+
 int APS5_VABI close_nid_postfix(int d) {
     if (File::IsHostStream(d)) return PosixFailure(GUEST_EBADF);
     int socketError = 0;
@@ -970,7 +978,7 @@ int APS5_VABI sceKernelFdatasync(int fd) {
 }
 
 int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t* status) {
-    if (status == nullptr) throw std::invalid_argument("sceKernelWriteThrottlingStatus: status is null");
+    if (status == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     status[0] = std::numeric_limits<std::uint32_t>::max();
     status[1] = 0;
     status[2] = 0;
@@ -985,6 +993,10 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     File::RefuseArchivedFile(fd, "getdirentries");
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (!File::DirectoryDescriptorPath(fd)) {
+        if (WithoutParameterHandler([fd] { return ::_get_osfhandle(fd); }) == -1) return SceErrorFromErrno(GUEST_EBADF);
+        return SceErrorFromErrno(GUEST_EINVAL);
+    }
     const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
     if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (basep != nullptr) *basep = 0;
@@ -1004,6 +1016,9 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     constexpr std::size_t GuestMaxName = 255;
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    struct stat status{};
+    if (::fstat(fd, &status) != 0) return SceErrorFromErrno(errno);
+    if (!S_ISDIR(status.st_mode)) return SceErrorFromErrno(GUEST_EINVAL);
     const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
     if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     const off_t base = ::lseek(fd, 0, SEEK_CUR);
@@ -1057,7 +1072,7 @@ int APS5_VABI getdents_nid_postfix(int fd, char* buf, int nbytes) {
 
 int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     (void)mode;
-    if (path == nullptr) throw std::invalid_argument("sceKernelMkdir: path is null");
+    if (!path) return SceErrorFromErrno(GUEST_EFAULT);
     if (!*path) return SceErrorFromErrno(GUEST_ENOENT);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
@@ -1274,7 +1289,7 @@ int64_t APS5_VABI pwritev_nid_postfix(int d, const KernelIovec* iov, int iovcnt,
 }
 
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
-    if (from == nullptr || to == nullptr) throw std::invalid_argument("sceKernelRename: path is null");
+    if (!from || !to) return SceErrorFromErrno(GUEST_EFAULT);
     if (*from == '\0' || *to == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     std::filesystem::path source;
     if (const int error = ResolvePathError_nid_no_patch(from, source)) return SceKernelError(error);
@@ -1296,7 +1311,7 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
-    if (path == nullptr) throw std::invalid_argument("sceKernelRmdir: path is null");
+    if (!path) return SceErrorFromErrno(GUEST_EFAULT);
     if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
@@ -1343,7 +1358,7 @@ int APS5_VABI fchmod_nid_postfix(int d, int mode) {
 }
 
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
-    if (path == nullptr) throw std::invalid_argument("sceKernelTruncate: path is null");
+    if (!path) return SceErrorFromErrno(GUEST_EFAULT);
     if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     if (length < 0) return SceErrorFromErrno(GUEST_EINVAL);
     std::filesystem::path native;
@@ -1363,7 +1378,7 @@ int APS5_VABI truncate_nid_postfix(const char* path, std::int64_t length) {
 }
 
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
-    if (path == nullptr) throw std::invalid_argument("sceKernelUtimes: path is null");
+    if (!path) return SceErrorFromErrno(GUEST_EFAULT);
     if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     if (times != nullptr) {
         for (int i = 0; i < 2; ++i) {

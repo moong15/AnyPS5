@@ -353,6 +353,9 @@ struct DrawOutcome {
     // A recorded draw began a render pass of its own, or continued the previous draw's.
     bool passBegun = false;
     bool passContinued = false;
+    bool keyStoresFlushed = false;
+    bool storesFlushed = false;
+    bool addressDraw = false;
     SyncReason reason = SyncNone;
     // Shader validation memo (see CachedFragmentOutputs).
     bool validateMemoized = false;
@@ -461,6 +464,7 @@ struct DrawProfile {
     // Render passes recorded draws began, and draws that continued the previous draw's pass.
     std::uint64_t passesBegun = 0;
     std::uint64_t passesContinued = 0;
+    std::array<DrawPassCounts, 2> passTotals{};
     std::array<std::uint64_t, SyncCount> reasons{};
     // The CPU inside Graphics::Draw, split by outcome: a synchronous draw costs ten times a recorded
     // one, so one average would only show the synchronous population.
@@ -531,6 +535,14 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     if (outcome.completion) ++profile.completion;
     if (outcome.passBegun) ++profile.passesBegun;
     if (outcome.passContinued) ++profile.passesContinued;
+    if (outcome.recorded) {
+        auto& totals = profile.passTotals[outcome.addressDraw ? 1 : 0];
+        ++totals.draws;
+        if (outcome.passBegun) ++totals.passesBegun;
+        if (outcome.passContinued) ++totals.passesContinued;
+        if (outcome.keyStoresFlushed) ++totals.keyStoreFlushes;
+        if (outcome.storesFlushed) ++totals.storeFlushes;
+    }
     ++profile.reasons[outcome.reason];
     (outcome.recorded ? (outcome.waited ? profile.waitedUs : profile.recordedUs) : profile.synchronousUs) += drawUs;
     profile.targetLookups += outcome.targetLookups;
@@ -892,6 +904,12 @@ std::array<std::uint64_t, IndirectPathCount> IndirectDrawCounts() {
     auto& stats = Profile();
     std::lock_guard lock(stats.mutex);
     return stats.indirect;
+}
+
+std::array<DrawPassCounts, 2> DrawPassTotals() {
+    auto& stats = Profile();
+    std::lock_guard lock(stats.mutex);
+    return stats.passTotals;
 }
 
 void CountDrawSkip(DrawSkip kind, double us) {
@@ -1882,9 +1900,15 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         if (!gpuIndirect) return false;
         return (begin < args->arguments + args->RangeBytes() && args->arguments < end) || (args->countIndirect && begin < args->countAddress + 4 && args->countAddress < end);
     };
-    if (recorder->HasQueuedKeyStores() && (resources.HoldsLease() || recorder->AnyQueuedKeyStore(touches))) recorder->FlushKeyStores();
+    if (recorder->HasQueuedKeyStores() && (resources.HoldsLease() || recorder->AnyQueuedKeyStore(touches))) {
+        recorder->FlushKeyStores();
+        outcome.keyStoresFlushed = true;
+    }
     // A queued label store over such memory likewise (Recorder::RecordStore).
-    if (recorder->HasQueuedStores() && (resources.HoldsLease() || recorder->AnyQueuedStore(touches))) recorder->FlushStores();
+    if (recorder->HasQueuedStores() && (resources.HoldsLease() || recorder->AnyQueuedStore(touches))) {
+        recorder->FlushStores();
+        outcome.storesFlushed = true;
+    }
     const auto drawBindings = resources.PrepareDrawBindings(*recorder, record.moved);
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
@@ -1901,7 +1925,11 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         if (target != nullptr) passAttachments.emplace_back(target->Image(), true);
     }
     const bool unknownMemory = addressBased || resources.UsesAddressTable() || resources.HasCopiedWrites();
-    const PassAccess passAccess{passReads, resources.GpuWrites(), passImages, passAttachments, unknownMemory, unknownMemory};
+    static const bool addressReadPasses = std::getenv("APS5_NO_ADDRESS_READ_PASSES") == nullptr;
+    const bool readOnlyBda = addressReadPasses && resources.BdaReadOnly();
+    outcome.addressDraw = addressBased;
+    const bool unknownWrites = ((addressBased || resources.UsesAddressTable()) && !readOnlyBda) || resources.HasCopiedWrites();
+    const PassAccess passAccess{passReads, resources.GpuWrites(), passImages, passAttachments, unknownMemory, unknownWrites};
     const bool fenced = state.depth.has_value() || !record.proxies.empty();
     const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || gpuIndirect || meshIndirect, fenced, passAccess);
     const bool continued = start.continued;
@@ -2255,6 +2283,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                     if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages && binding.role != ShaderRecompiler::DescriptorRole::ImageTable) continue;
                     for (std::size_t offset = 0; offset + 8u <= binding.guestDescriptor.size(); offset += 8u) {
                         const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(offset, 8u);
+                        if (words[0] == 0u && (words[1] & 0xffu) == 0u) continue;
                         const auto texture = DecodeTextureResource(words);
                         Require(!DepthSurfaceAt(context, words, texture), "stencil replay refuses sampled depth-surface feedback");
                     }

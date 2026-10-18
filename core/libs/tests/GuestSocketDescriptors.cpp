@@ -181,7 +181,24 @@ static void DuplicateKeepsSocket() {
     Require(close_nid_postfix(sender) == 0);
 }
 
+static void SocketTypeErrors() {
+    constexpr int PrototypeError = 41;
+    constexpr int ProtocolError = 43;
+    constexpr int FamilyError = 47;
+    constexpr int Inet6 = 28;
+    for (const int family : {Inet, Inet6}) {
+        Require(socket_nid_postfix(family, 99, 0) == -1 && *__error_nid_postfix() == PrototypeError);
+        Require(socket_nid_postfix(family, 4, 0) == -1 && *__error_nid_postfix() == PrototypeError);
+        Require(socket_nid_postfix(family, 0, 0) == -1 && *__error_nid_postfix() == ProtocolError);
+        Require(socket_nid_postfix(family, 99, 6) == -1 && *__error_nid_postfix() == ProtocolError);
+        Require(socket_nid_postfix(family, 1, 17) == -1 && *__error_nid_postfix() == ProtocolError);
+        Require(socket_nid_postfix(family, 2, 6) == -1 && *__error_nid_postfix() == ProtocolError);
+    }
+    Require(socket_nid_postfix(99, 1, 0) == -1 && *__error_nid_postfix() == FamilyError);
+}
+
 int main() {
+    SocketTypeErrors();
     SelectSocketAndFile();
     CloseReleasesNumber();
     DuplicateKeepsSocket();

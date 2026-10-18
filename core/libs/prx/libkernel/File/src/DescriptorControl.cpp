@@ -379,10 +379,8 @@ int RecordLock(int fd, int command, std::intptr_t argument) {
     struct flock host{};
     if (lock.type == ReadLock) host.l_type = F_RDLCK;
     else if (lock.type == WriteLock) host.l_type = F_WRLCK;
-    else if (lock.type == Unlock) host.l_type = F_UNLCK;
+    else if (lock.type == Unlock) host.l_type = current == GetLock ? F_RDLCK : F_UNLCK;
     else return Fail(GuestEinval);
-    if (current == GetLock && lock.type == Unlock)
-        throw std::runtime_error("fcntl: F_GETLK with F_UNLCK is not implemented, fd=" + std::to_string(fd));
     host.l_whence = lock.whence;
     host.l_start = static_cast<off_t>(lock.start);
     host.l_len = static_cast<off_t>(lock.length);

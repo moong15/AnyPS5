@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -192,6 +193,7 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
 void DrawPipeline::run() {
     for (;;) {
         Commit* commit = nullptr;
+        SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
         {
             std::unique_lock lock(mutex);
             committerWaiting = true;
@@ -325,6 +327,7 @@ void DrawPipeline::drain(DrainReason reason, std::uint32_t opcode) {
     if (!Busy()) return;
     if (GuestMemory::GpuMutex().HeldByThisThread()) throw std::runtime_error("draw pipeline drain under the GPU lock (reason " + std::to_string(static_cast<unsigned>(reason)) + ", opcode " + std::to_string(opcode) + ")");
     const auto start = std::chrono::steady_clock::now();
+    SpinUntil(HandoffSpinWindow() * 2, [&] { return !Busy(); });
     std::unique_lock lock(mutex);
     ++idleWaiters;
     idle.wait(lock, [&] { return items.empty(); });

@@ -221,6 +221,7 @@ function(add_shader_recompiler target runtimeTarget)
     endif()
     set(shaderCacheReviewedNames
             BuildBarycentricGeometryShader
+            BuildBarycentricTessellationShaders
             BuildPreparedShaderKey
             BuildRectListShaders
             CaptureResources
