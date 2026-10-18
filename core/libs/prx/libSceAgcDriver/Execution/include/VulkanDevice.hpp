@@ -180,7 +180,7 @@ public:
     // taken instead because the source had no live image, the destination's image differed in
     // shape, or the image copy refused (keys, not imported, released).
     struct CopyAliasing {
-        std::uint64_t aliased, created, noSource, shape, refused;
+        std::uint64_t aliased, created, noSource, shape, refused, refusedLate;
     };
     static CopyAliasing CopyAliasCounts();
     struct ComputePipelineCreation {

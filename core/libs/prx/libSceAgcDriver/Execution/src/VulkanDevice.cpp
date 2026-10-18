@@ -2466,7 +2466,7 @@ bool VulkanDevice::FillBuffer(std::uint64_t address, std::size_t bytes, std::spa
 namespace {
 
 std::atomic<std::uint64_t> copiesVerified{0}, copySourceChanged{0}, copyDestinationChanged{0}, copyReaderMissed{0};
-std::atomic<std::uint64_t> copiesAliased{0}, copyAliasCreated{0}, copyAliasNoSource{0}, copyAliasShape{0}, copyAliasRefused{0};
+std::atomic<std::uint64_t> copiesAliased{0}, copyAliasCreated{0}, copyAliasNoSource{0}, copyAliasShape{0}, copyAliasRefused{0}, copyAliasRefusedLate{0};
 
 // The copy as a device copy between the surfaces' storage images (StorageTexture::CopyFrom): the
 // source range must be exactly a live image's surface, and the destination range either exactly
@@ -2520,7 +2520,12 @@ bool AliasCopy(const Graphics::Context& context, std::uint64_t destination, std:
         copyAliasCreated.fetch_add(1, std::memory_order_relaxed);
     }
     const char* refusal = nullptr;
-    if (!plan.to->CopyFrom(*plan.from, refusal)) throw std::runtime_error(std::string("AGC graphics: an image copy its check allowed was refused: ") + refusal);
+    if (!plan.to->CopyFrom(*plan.from, refusal)) {
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1) < 8) std::fprintf(stderr, "[copy] image copy 0x%llx -> 0x%llx (0x%zx bytes) refused after its check: %s\n", static_cast<unsigned long long>(source), static_cast<unsigned long long>(destination), bytes, refusal);
+        copyAliasRefusedLate.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     copiesAliased.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -2545,7 +2550,7 @@ VulkanDevice::ComputePipelineCreation VulkanDevice::ComputePipelineCounts() {
 }
 
 VulkanDevice::CopyAliasing VulkanDevice::CopyAliasCounts() {
-    return {copiesAliased.load(std::memory_order_relaxed), copyAliasCreated.load(std::memory_order_relaxed), copyAliasNoSource.load(std::memory_order_relaxed), copyAliasShape.load(std::memory_order_relaxed), copyAliasRefused.load(std::memory_order_relaxed)};
+    return {copiesAliased.load(std::memory_order_relaxed), copyAliasCreated.load(std::memory_order_relaxed), copyAliasNoSource.load(std::memory_order_relaxed), copyAliasShape.load(std::memory_order_relaxed), copyAliasRefused.load(std::memory_order_relaxed), copyAliasRefusedLate.load(std::memory_order_relaxed)};
 }
 
 bool VulkanDevice::completionStoresOver(std::uint64_t address, std::size_t bytes) const {
