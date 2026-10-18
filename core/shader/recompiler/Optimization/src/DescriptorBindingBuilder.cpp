@@ -304,6 +304,7 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     const auto unnormalized = ProveUnnormalized(info, snapshot);
     for (std::uint32_t index = 0; index < info.samplers.size(); ++index) {
         if (FoldsTexelOffsets(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::FoldOffsetBase + index, unnormalized.samplers[index] ? 1u : 0u});
+        if (SamplesBaseLevelIfUnnormalized(info.samplers[index])) plan.specialization.push_back({PipelineSpecialization::UnnormalizedBaseLevelBase + index, unnormalized.samplers[index] ? 1u : 0u});
         plan.specialization.push_back({PipelineSpecialization::UnnormalizedBase + index, unnormalized.samplers[index] ? 1u : 0u});
         const bool point = info.samplers[index].forcePointFiltering || ((snapshot.samplers.at(index).dwords[2] >> 20u) & 3u) == 0u;
         plan.specialization.push_back({PipelineSpecialization::UnnormalizedPointBase + index, point ? 1u : 0u});
