@@ -946,7 +946,9 @@ ShaderStages DecodeShaderStages(const QueueState& queue, bool vertexWorkgroup) {
         validate(amplification != 0, "fast launch subgroup amplifies to no primitives");
         const auto maxPrimitives = outputSize == 2u && !fastLaunch ? std::max(primitives * amplification, maxVertices) : primitives * amplification;
         const auto threads = std::max({(groupPrimitives - 1u) * inputStep + inputSize, primitives, maxVertices, maxPrimitives});
-        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, (groupPrimitives - 1u) * inputStep + inputSize, maxVertices, maxPrimitives, ((threads + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, 0, esgsItemSize, outputSize};
+        const auto raster = find(queue.context, 0x205);
+        const auto provokingVertex = raster != queue.context.end() && (raster->second & (1u << 19u)) != 0 ? outputSize - 1u : 0u;
+        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, (groupPrimitives - 1u) * inputStep + inputSize, maxVertices, maxPrimitives, ((threads + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, provokingVertex, esgsItemSize, outputSize};
     }
     return result;
 }

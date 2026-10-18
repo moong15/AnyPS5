@@ -888,6 +888,13 @@ void ShaderStageTests() {
         state = AgcDriver::Graphics::DecodeState(lines);
         mesh = *state.stages.mesh;
         Require(mesh.maxPrimitives == 153 && mesh.threadsPerGroup == 256 && mesh.outputPrimitiveSize == 3 && AgcDriver::Graphics::RasterPrimitiveOf(state) == ShaderRecompiler::RasterPrimitive::Triangle, "the triangle-strip subgroup of the same draw changed");
+        Require(mesh.provokingVertex == 0, "a first-vertex geometry draw does not take its flat inputs and layer from the first vertex of each output primitive");
+        const auto raster = lines.context.at(0x205);
+        lines.context[0x205] = raster | (1u << 19u);
+        Require(AgcDriver::Graphics::DecodeState(lines).stages.mesh->provokingVertex == 2 && AgcDriver::Graphics::DecodeShaderStages(lines).mesh->provokingVertex == 2, "a last-vertex geometry draw does not take its flat inputs and layer from the third vertex of each output triangle");
+        lines.context[0x29b] = 1;
+        Require(AgcDriver::Graphics::DecodeState(lines).stages.mesh->provokingVertex == 1, "a last-vertex geometry draw does not take its flat inputs and layer from the second vertex of each output line");
+        lines.context[0x205] = raster;
         lines.context[0x29b] = 1;
         lines.context[0x2ce] = 1;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(lines); }, "unsupported geometry input or output assembly");
@@ -4906,8 +4913,8 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; }), "invalid compact shader data size");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor = ShaderDataWords({}); binding.guestDescriptor.pop_back(); }), "invalid compact shader data size");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
-    expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "a cache-swizzled V#");
-    for (const auto type : {1u, 2u, 3u}) expectSingleAccepted(changed([&](auto& binding) { binding.guestDescriptor[3] |= type << 30u; }), "a V# with an advisory type");
+    expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "a V# with reserved bit 30");
+    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "an unregistered V# past the range limit");
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor[2] = 32768; }), "an unregistered V# past the range limit");
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "an unmapped V#");
@@ -6034,7 +6041,8 @@ void barycentricEmulationTests() {
         return false;
     };
     Require(!memberBuiltIn(patches.control, spv::BuiltInClipDistance) && !memberBuiltIn(patches.evaluation, spv::BuiltInClipDistance), "a generated tessellation stage declares clip distances the vertex shader does not write");
-    Require(!memberBuiltIn(clippedPatches.control, spv::BuiltInClipDistance) && !memberBuiltIn(clippedPatches.evaluation, spv::BuiltInClipDistance) && variableBuiltIn(clippedPatches.control, spv::BuiltInClipDistance) && variableBuiltIn(clippedPatches.evaluation, spv::BuiltInClipDistance), "generated tessellation stages do not forward clip distances as separate built-in variables");
+    Require(variableBuiltIn(clippedPatches.control, spv::BuiltInClipDistance) && memberBuiltIn(clippedPatches.control, spv::BuiltInClipDistance), "the generated control stage does not read the vertex clip distances as a separate built-in variable and pass them on in its per-vertex block");
+    Require(memberBuiltIn(clippedPatches.evaluation, spv::BuiltInClipDistance) && !variableBuiltIn(clippedPatches.evaluation, spv::BuiltInClipDistance), "the generated evaluation stage does not keep the clip distances in its per-vertex blocks");
     const std::array<CompiledShader, 4> clippedShaders{{{ShaderStage::Vertex, &clipped, 0}, {ShaderStage::TessellationControl, &clippedPatches.control, 0}, {ShaderStage::TessellationEvaluation, &clippedPatches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
     ValidateShaders(clippedShaders, state, subgroup, false, false, false, false, false, false, true);
     vertex.parameterExports.clear();
@@ -7149,6 +7157,27 @@ void ProvokingVertexTests() {
         if (generated == 1) state.stages.tessellation.emplace();
         expectFailure([&] { ValidateProvokingVertex(supported, state); }, "last provoking vertex is unsupported for generated primitive pipelines");
     }
+    auto meshDraw = last;
+    meshDraw.stages.path = ShaderPath::Geometry;
+    meshDraw.stages.mesh.emplace();
+    meshDraw.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST}) {
+        meshDraw.topology = topology;
+        for (const auto& drawn : {std::span<const CompiledShader>{}, std::span<const CompiledShader>(flatShaders), std::span<const CompiledShader>(flatP10Shaders), std::span<const CompiledShader>(smoothShaders), std::span<const CompiledShader>(slotShaders)}) ValidateProvokingVertex(supported, meshDraw, drawn);
+    }
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}) {
+        meshDraw.topology = topology;
+        expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, flatShaders); }, "last provoking vertex is unsupported for triangle strips or fans assembled for a geometry program");
+        auto firstDraw = meshDraw;
+        firstDraw.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+        ValidateProvokingVertex(supported, firstDraw, flatShaders);
+    }
+    meshDraw.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    expectFailure([&] { ValidateProvokingVertex(unsupported, meshDraw, flatShaders); }, "last provoking vertex requires VK_EXT_provoking_vertex with provokingVertexLast enabled");
+    fragment.fragmentParameters = {{0, 0, true, true, false, false, false}};
+    expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, shaders); }, "last provoking vertex with explicit per-vertex flat interpolation is unsupported");
+    meshDraw.stages.tessellation.emplace();
+    expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, flatShaders); }, "last provoking vertex is unsupported for generated primitive pipelines");
     auto rectangle = last;
     rectangle.rectList = true;
     rectangle.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;

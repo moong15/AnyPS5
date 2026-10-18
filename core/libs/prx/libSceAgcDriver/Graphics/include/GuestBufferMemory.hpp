@@ -132,6 +132,7 @@ struct HostImportSettleCounts {
     std::uint64_t rewatched = 0;
     std::uint64_t parked = 0;
     std::uint64_t unmapWaits = 0;
+    std::uint64_t keptCompared = 0;
 };
 HostImportSettleCounts HostImportSettles();
 // Tests: how many imports settleImport has used on the settle queue.
