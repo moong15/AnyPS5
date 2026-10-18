@@ -39,7 +39,17 @@ int APS5_VABI scePlayerSelectionDialogOpen(const void* param) {
  return 0;
 }
 
+int APS5_VABI scePlayerSelectionDialogClose(void) {
+ if (g_status.load() == COMMON_DIALOG_STATUS_NONE) return COMMON_DIALOG_ERROR_NOT_INITIALIZED;
+ g_status = COMMON_DIALOG_STATUS_FINISHED;
+ return 0;
+}
+
 int APS5_VABI scePlayerSelectionDialogUpdateStatus(void) {
+ return g_status.load();
+}
+
+int APS5_VABI scePlayerSelectionDialogGetStatus(void) {
  return g_status.load();
 }
 
