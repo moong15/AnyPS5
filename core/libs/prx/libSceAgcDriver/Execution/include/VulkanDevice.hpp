@@ -355,6 +355,7 @@ private:
     friend struct VulkanDeviceTestAccess;
     bool completionStoresOver(std::uint64_t address, std::size_t bytes) const;
     bool copyWaitsOnCompletions(std::uint64_t address, std::size_t bytes) const;
+    VkPipeline splitComputePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, ComputePipelineObjects& objects, const std::array<std::uint32_t, 3>& base);
     ShaderRecompiler::SpirvTarget buildTarget() const;
     Graphics::Context buildContext() const;
     // Body of Dispatch and DispatchIndirect: `arguments` 0 dispatches x, y, z groups.

@@ -378,6 +378,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSigninDialog>")
     endif()
 
+    add_test_executable(guest_usb_storage_dialog_tests tests/GuestUsbStorageDialog.cpp)
+    target_include_directories(guest_usb_storage_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_usb_storage_dialog_tests PRIVATE libSceUsbStorageDialog libc)
+    configure_windows_unwind(guest_usb_storage_dialog_tests)
+    add_test(NAME guest_usb_storage_dialog COMMAND guest_usb_storage_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_usb_storage_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceUsbStorageDialog>")
+    endif()
+
     add_test_executable(guest_netctl_ap_dialog_tests tests/GuestNetCtlApDialog.cpp)
     target_include_directories(guest_netctl_ap_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_netctl_ap_dialog_tests PRIVATE libSceNetCtlApDialog libc)

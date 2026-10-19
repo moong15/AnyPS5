@@ -52,9 +52,14 @@ constexpr std::uint32_t kInternalFlag = 0x80000000u;
 constexpr std::uint16_t kAcmModuleId = 0x010b;
 constexpr std::uint16_t kTrophy2ModuleId = 0x0110;
 constexpr std::uint16_t kVoiceChatModuleId = 0x0114;
+constexpr std::uint16_t kPerfModuleId = 0x0005;
+constexpr std::uint16_t kVrSetupDialogModuleId = 0x0130;
 constexpr std::uint16_t kProprietaryVoiceChatHelperModuleId = 0x0132;
 constexpr std::uint16_t kPsmlModuleId = 0x0137;
+constexpr std::uint32_t kAgcDriverModuleId = 0x80000080;
+constexpr std::uint32_t kNgs2InternalModuleId = 0x80000090;
 constexpr std::uint32_t kAgcModuleId = 0x80000094;
+constexpr std::uint32_t kHdrScopesInternalModuleId = 0x800000bd;
 
 #ifdef __linux__
 struct Mapping {
@@ -271,6 +276,37 @@ int main() {
     Require(sceSysmoduleIsLoaded(kProprietaryVoiceChatHelperModuleId) == 0);
     Require(sceSysmoduleUnloadModule(kProprietaryVoiceChatHelperModuleId) == 0);
     Require(sceSysmoduleIsLoaded(kProprietaryVoiceChatHelperModuleId) == kModuleUnloaded);
+
+    Require(sceSysmoduleIsLoaded(kPerfModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleUnloadModule(kPerfModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModule(kPerfModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kPerfModuleId) == 0);
+    Require(sceSysmoduleUnloadModule(kPerfModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kPerfModuleId) == kModuleUnloaded);
+
+    Require(sceSysmoduleIsLoaded(kVrSetupDialogModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleUnloadModule(kVrSetupDialogModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModule(kVrSetupDialogModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kVrSetupDialogModuleId) == 0);
+    Require(sceSysmoduleUnloadModule(kVrSetupDialogModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kVrSetupDialogModuleId) == kModuleUnloaded);
+
+    Require(sceSysmoduleUnloadModuleInternal(kAgcDriverModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModuleInternal(kAgcDriverModuleId) == 0);
+    Require(sceSysmoduleLoadModuleInternal(kAgcDriverModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kAgcDriverModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kAgcDriverModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kAgcDriverModuleId) == kModuleUnloaded);
+
+    Require(sceSysmoduleUnloadModuleInternal(kNgs2InternalModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModuleInternal(kNgs2InternalModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kNgs2InternalModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kNgs2InternalModuleId) == kModuleUnloaded);
+
+    Require(sceSysmoduleUnloadModuleInternal(kHdrScopesInternalModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModuleInternal(kHdrScopesInternalModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kHdrScopesInternalModuleId) == 0);
+    Require(sceSysmoduleUnloadModuleInternal(kHdrScopesInternalModuleId) == kModuleUnloaded);
 
     Require(sceSysmoduleUnloadModuleInternal(kAgcModuleId) == kModuleUnloaded);
     Require(sceSysmoduleLoadModuleInternal(kAgcModuleId) == 0);

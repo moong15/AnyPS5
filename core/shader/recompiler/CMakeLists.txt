@@ -239,6 +239,9 @@ function(add_shader_recompiler target runtimeTarget)
             ImageTableAbi::PoisonCode
             ImageTableAbi::PoisonReasonName
             ImageTableAbi::TableHeader
+            PipelineSpecialization::IsWorkgroupOffset
+            PipelineSpecialization::WorkgroupOffsetBase
+            PipelineSpecialization::WorkgroupOffsetWords
             PixelInput
             PixelInputBit
             RayTracingStrict
@@ -351,5 +354,10 @@ function(add_shader_recompiler target runtimeTarget)
         configure_windows_unwind(spirv_validator_exit_tests)
         add_test(NAME spirv_validator_exit COMMAND spirv_validator_exit_tests)
         set_tests_properties(spirv_validator_exit PROPERTIES TIMEOUT 30)
+        if(MINGW)
+            target_link_libraries(spirv_validator_exit_tests PRIVATE libc)
+            set_tests_properties(spirv_validator_exit PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
     endif()
 endfunction()
