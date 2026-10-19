@@ -1483,7 +1483,7 @@ void verifySpecializationDropsDeadConstants() {
         }
         return result;
     };
-    const auto rgba = SpecializeSpirv(module(4u));
+    const auto rgba = SpecializeSpirv(module(5u));
     const auto bgra = SpecializeSpirv(module(6u));
     require(rgba == bgra, "variants that differ only in a folded constant specialized to different SPIR-V");
     const auto result = contents(rgba);
@@ -1491,6 +1491,12 @@ void verifySpecializationDropsDeadConstants() {
     require(result.constants.contains(21u), "specialization removed the constant an array type's length still uses");
     require(result.constants.contains(result.stored) && result.constants.at(result.stored) == 4u, "the store no longer reads the selected value");
     require(SpecializeSpirv(rgba) == rgba, "dead constant removal is not stable");
+    const auto shared = SpecializeSpirv(module(4u));
+    const auto sharedResult = contents(shared);
+    require(sharedResult.constants.contains(sharedResult.stored) && sharedResult.constants.at(sharedResult.stored) == 4u, "constant sharing changed the selected value");
+    require(sharedResult.constants.contains(6u) == (sharedResult.stored == 6u) && sharedResult.names == (sharedResult.stored == 6u ? 1u : 0u), "constant sharing kept an unused selector or removed a live one's name");
+    require(sharedResult.constants.contains(21u), "constant sharing removed the array length");
+    require(SpecializeSpirv(shared) == shared, "constant sharing is not stable");
 }
 
 constexpr std::uint64_t PlanSrtAddress = 0x7f0000010000ull;
@@ -1735,6 +1741,7 @@ IrResourcePlan handBuiltPlan() {
     table.tableColumn = TableColumn{2u, 32u, 16u, 4u, 8u, 0xffu, false, true, {KeyDomain{3u, 4u, 16u, false}, KeyDomain{2u, 8u, 4u, true}}, false};
     table.tableColumn->selected = true;
     table.tableColumn->selection = 2u;
+    table.tableColumn->pointerHops = {PointerHop{0u, 0x10u}, PointerHop{8u, 0x20u}};
     DescriptorSource heap;
     heap.dwordCount = 4u;
     heap.dwords[1] = &readConst(6);
@@ -2224,6 +2231,10 @@ int runPlanLoadingProcess(std::string_view mode) {
     if (mode == "--load-plan-switch") setEnvironment("APS5_TRACE_IMAGE_TABLE", "1");
     if (mode == "--load-plan-off") setEnvironment("APS5_NO_PERF_DISK_PLANS", "1");
     if (mode == "--load-plan-release-off") setEnvironment("APS5_NO_RELEASE_UNDRAWN_PLANS", "1");
+    if (mode == "--load-plan-reuse-off") {
+        setEnvironment("APS5_NO_TABLE_SNAPSHOT_REUSE", "1");
+        setEnvironment("APS5_NO_TABLE_RESOLUTION_REUSE", "1");
+    }
     auto fixtures = planFixtures();
     const auto count = fixtures.size();
     std::vector<std::shared_ptr<const IrResourcePlan>> plans;
@@ -2239,6 +2250,8 @@ int runPlanLoadingProcess(std::string_view mode) {
     }
     if (mode == "--load-plan" || mode == "--load-plan-release-off") {
         require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "the second process ran the front end" + counts);
+    } else if (mode == "--load-plan-reuse-off") {
+        require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "turning the image table reuse off changed the stored plan or variant keys" + counts);
     } else if (mode == "--load-plan-off") {
         require(builds == count && totals.planHits == 0u && totals.planMisses == 0u && totals.planWrites == 0u && totals.hits == count && totals.misses == 0u, "APS5_NO_PERF_DISK_PLANS=1 used the stored plans or missed the stored variants" + counts);
     } else {
@@ -2260,6 +2273,8 @@ int runPlanLoadingProcess(std::string_view mode) {
         std::cout << "second process prepared " << count << " shaders from stored plans without running the front end\n";
     } else if (mode == "--load-plan-release-off") {
         std::cout << "APS5_NO_RELEASE_UNDRAWN_PLANS=1 loaded all " << count << " stored plans and variants\n";
+    } else if (mode == "--load-plan-reuse-off") {
+        std::cout << "with the image table reuse off, a process loaded all " << count << " stored plans and variants with the same output\n";
     } else if (mode == "--load-plan-off") {
         std::cout << "APS5_NO_PERF_DISK_PLANS=1 ran the front end for all " << count << " shaders with the same output\n";
     } else {
@@ -2304,6 +2319,7 @@ void verifyPlanAcrossProcesses(const char* self) {
     run("--load-plan");
     run("--load-plan-release-off");
     run("--load-plan-off");
+    run("--load-plan-reuse-off");
     std::vector<std::byte> entry;
     const auto damaged = planEntryPath(fixtures.front());
     require(ReadWholeFile(damaged, entry), "cannot read a stored plan entry");
@@ -2397,9 +2413,8 @@ void verifyResultMemo(bool benchmark = false) {
         mix(snapshot.uniformFill.words);
         mix(snapshot.uniformFill.value);
         mix(snapshot.tables.shader);
-        mix(0u);
-        mix(0u);
-        mix(1u);
+        mix(snapshot.tables.tables.size());
+        mix(snapshot.tables.ranges.size());
         collision.snapshot.tables.ranges[0] = {1u, (hash * prime) ^ ((hash ^ 1u) * prime)};
         const auto collisions = ResultMemoIdentityCollisions();
         check(collision, false, "equal hash with different identity");
@@ -2407,6 +2422,21 @@ void verifyResultMemo(bool benchmark = false) {
         auto original = *movedCapture;
         original.snapshot.tables.ranges = {{0u, 0u}};
         check(original, false, "collision replaced, original not aliased");
+        auto sharedCollision = *movedCapture;
+        sharedCollision.snapshot.tables.tables.resize(1u);
+        auto& column = sharedCollision.snapshot.tables.tables.front();
+        column.readRanges = SharedValues<std::pair<std::uint64_t, std::uint64_t>>({{0u, 0u}});
+        check(sharedCollision, false, "shared column collision donor");
+        check(sharedCollision, true, "identical shared column");
+        const auto donor = sharedCollision;
+        hash = 0xcbf29ce484222325ull;
+        mix(1u);
+        column.readRanges = SharedValues<std::pair<std::uint64_t, std::uint64_t>>({{1u, (hash * prime) ^ ((hash ^ 1u) * prime)}});
+        require(column.readRanges.Hash() == donor.snapshot.tables.tables.front().readRanges.Hash() && column.readRanges != donor.snapshot.tables.tables.front().readRanges, "shared column fixture did not produce an equal-hash identity collision");
+        const auto sharedCollisions = ResultMemoIdentityCollisions();
+        check(sharedCollision, false, "equal shared column hash with different identity");
+        require(ResultMemoIdentityCollisions() == sharedCollisions + (memo ? 1u : 0u), "the shared column collision was not refused and counted");
+        check(donor, false, "shared column collision replaced, donor not aliased");
         std::array<std::future<std::shared_ptr<const RecompileResult>>, 8> concurrent;
         for (std::size_t index = 0; index < concurrent.size(); ++index) {
             concurrent[index] = std::async(std::launch::async, [&, index] {

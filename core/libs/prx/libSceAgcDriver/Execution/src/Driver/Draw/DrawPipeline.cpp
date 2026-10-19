@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -200,7 +201,7 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
 }
 
 void DrawPipeline::run() {
-    if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("draw committer", TraceThread::DefaultCapacity / 8);
+    PerformanceTrace::BindThread("draw committer");
     GuestMemory::SetTraceGpuHolds(true);
     for (;;) {
         Commit* commit = nullptr;

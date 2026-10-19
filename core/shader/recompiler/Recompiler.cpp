@@ -326,6 +326,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     translateOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
     const auto supports = [&](spv::Capability capability) { return std::ranges::find(request.target.supportedCapabilities, static_cast<std::uint32_t>(capability)) != request.target.supportedCapabilities.end(); };
     translateOptions.nativeFloat16 = supports(spv::CapabilityFloat16) && supports(spv::CapabilityRoundingModeRTE) && supports(spv::CapabilityDenormPreserve);
+    translateOptions.interpolationFunctions = supports(spv::CapabilityInterpolationFunction);
     translateOptions.floatMode = request.context.floatMode;
     translateOptions.inputInfo = inputInfo;
 
@@ -416,6 +417,9 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     deadCodeEliminator.Eliminate(program);
     dumpIr("resources");
     program.Resources().srgbDecodeFormats = request.target.srgbDecodeFormats;
+    if (request.context.convertedSamples) {
+        for (auto& image : program.Resources().info.images) image.convertedSamples = true;
+    }
 
     return program;
 }
@@ -430,6 +434,7 @@ struct ResultMemoEntry {
     std::vector<std::uint64_t> identity;
     std::array<std::size_t, 4> sections;
     std::vector<std::uint32_t> userData;
+    std::vector<ImageTableColumnSnapshot> tableColumns;
 };
 
 struct EmissionFailure {
@@ -602,7 +607,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
                 try {
                     ResourceProgram resource(request, preparation, reclaim);
                     source->plan = std::move(resource.plan);
-                    if (!releaseUndrawnPlans() || (!hasPreparedArtifact && std::ranges::none_of(source->variants, [&](const auto& variant) { return sameLayout(variant->layout, request.layout); }))) {
+                    if (!hasPreparedArtifact && std::ranges::none_of(source->variants, [&](const auto& variant) { return sameLayout(variant->layout, request.layout); })) {
                         source->program = std::move(resource.program);
                     }
                 } catch (...) {
@@ -1344,7 +1349,8 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         result.spirv = artifact.spirv;
     }
     const auto moduleDone = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const auto tables = ResourceMaterializer::ResolveImageTables(variant.info.info, snapshot, artifact.variantId);
+    const auto resolved = ResourceMaterializer::ResolveImageTablesShared(variant.info.info, snapshot, artifact.variantId);
+    const auto& tables = *resolved;
     const auto tablesDone = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     BindingAllocationResult bindings;
     DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request), &tables);
@@ -1384,7 +1390,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         for (const auto& poison : tables.poison) result.imageTablePoison.push_back({poison.words, poison.dwordCount, poison.resource, static_cast<std::uint32_t>(poison.reason)});
         result.imageTableRanges = snapshot.tables.ranges;
         result.imageTableReadRanges.reserve(snapshot.tables.tables.size());
-        for (const auto& table : snapshot.tables.tables) result.imageTableReadRanges.push_back(table.readRanges);
+        for (const auto& table : snapshot.tables.tables) result.imageTableReadRanges.push_back(table.readRanges.Copy());
         result.imageTableShader = snapshot.tables.shader;
         result.imageTableFaults = tables.faults;
     }
@@ -1491,7 +1497,7 @@ RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& 
     return result;
 }
 
-RecompileResult RecompileImpl(const RecompileRequest& request) {
+RecompileResult recompileOnce(const RecompileRequest& request) {
     static_cast<void>(RequestInputInfo(request));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
@@ -1509,6 +1515,17 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
     return materializeVariant(*source, request, snapshot);
 }
 
+RecompileResult RecompileImpl(const RecompileRequest& request) {
+    try {
+        return recompileOnce(request);
+    } catch (const ConvertedSampleRequired&) {
+        if (request.context.convertedSamples) throw;
+    }
+    auto converted = request;
+    converted.context.convertedSamples = true;
+    return recompileOnce(converted);
+}
+
 // APS5_NO_RESULT_MEMO=1: every Recompile(request, capture) materializes its own result as before.
 bool ResultMemo() {
     static const bool resultMemo = std::getenv("APS5_NO_RESULT_MEMO") == nullptr;
@@ -1519,7 +1536,11 @@ constexpr std::size_t ResultMemoEntries = 256;
 constexpr std::size_t ResultMemoIdentityBytes = 16u * 1024u * 1024u;
 
 std::size_t memoIdentityBytes(const ResultMemoEntry& entry) {
-    return entry.identity.size() * sizeof(std::uint64_t) + entry.userData.size() * sizeof(std::uint32_t);
+    auto bytes = entry.identity.size() * sizeof(std::uint64_t) + entry.userData.size() * sizeof(std::uint32_t) + entry.tableColumns.size() * sizeof(ImageTableColumnSnapshot);
+    for (const auto& column : entry.tableColumns) {
+        bytes += column.codes.size() * sizeof(std::uint32_t) + column.words.size() * sizeof(DescriptorValue) + column.readRanges.size() * sizeof(std::pair<std::uint64_t, std::uint64_t>);
+    }
+    return bytes;
 }
 
 struct ResultMemoCounters {
@@ -1619,14 +1640,10 @@ std::uint64_t snapshotHash(const CompiledVariant& variant, const RecompileReques
         mix(table.keys);
         mix(table.fault);
         mix(table.outside ? 1u : 0u);
-        mixWords(table.codes);
-        mix(table.readRanges.size());
-        for (const auto& [base, size] : table.readRanges) {
-            mix(base);
-            mix(size);
-        }
+        mix(table.codes.Hash());
+        mix(table.words.Hash());
+        mix(table.readRanges.Hash());
     }
-    mixDescriptors(tables.words);
     mix(tables.ranges.size());
     for (const auto& [base, size] : tables.ranges) {
         mix(base);
@@ -1716,7 +1733,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
                 (forwarded ? counters.forwardedUserChanges : counters.otherUserChanges).fetch_add(1, std::memory_order_relaxed);
             }
         }
-        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->identity == identity) {
+        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->identity == identity && found->second->tableColumns == snapshot.tables.tables) {
             source.memo.splice(source.memo.begin(), source.memo, found->second);
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
@@ -1739,7 +1756,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             };
             if (changed(0)) counters.descriptorChanges.fetch_add(1, std::memory_order_relaxed);
             if (changed(1)) counters.flatChanges.fetch_add(1, std::memory_order_relaxed);
-            if (changed(2)) counters.tableChanges.fetch_add(1, std::memory_order_relaxed);
+            if (changed(2) || previous.tableColumns != snapshot.tables.tables) counters.tableChanges.fetch_add(1, std::memory_order_relaxed);
             if (changed(3)) counters.stateChanges.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -1753,7 +1770,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end()) {
-            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->identity == identity) {
+            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->identity == identity && found->second->tableColumns == snapshot.tables.tables) {
                 source.memo.splice(source.memo.begin(), source.memo, found->second);
                 shared = patchMemoUserData(*variant, found->second->result, snapshot);
             } else {
@@ -1763,7 +1780,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             }
         }
         if (source.memoIndex.find(index) == source.memoIndex.end()) {
-            source.memo.push_front({variant->artifact.variantId, hash, shared, identity, sections, std::vector<std::uint32_t>(snapshot.userData.begin(), snapshot.userData.end())});
+            source.memo.push_front({variant->artifact.variantId, hash, shared, identity, sections, std::vector<std::uint32_t>(snapshot.userData.begin(), snapshot.userData.end()), snapshot.tables.tables});
             source.memoIndex.emplace(index, source.memo.begin());
             source.memoIdentityBytes += memoIdentityBytes(source.memo.front());
             while (source.memo.size() > ResultMemoEntries || source.memoIdentityBytes > ResultMemoIdentityBytes) {

@@ -23,17 +23,31 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::uint6
         if (dispatchRelocationEnabled()) fresh->userData.assign(userData.begin(), userData.end());
 
         std::vector<ShaderRecompiler::MemoryRegion> srtRegions;
+        std::size_t capturedWords = 0;
         for (const auto& region : captured) {
             const bool registered = std::any_of(memory.begin(), memory.end(), [&](const auto& known) { return region.guestAddress >= known.guestAddress && region.guestAddress < known.guestAddress + known.bytes.size(); });
             if (registered) continue;
             srtRegions.push_back(region);
+            capturedWords += region.bytes.size() / sizeof(std::uint32_t);
         }
 
+        fresh->runs.reserve(srtRegions.size());
+        fresh->words.reserve(capturedWords);
+        const auto supplied = shaderMemory->SuppliedBlocks();
         const auto use = capture != nullptr ? capture->userDataUse : ShaderRecompiler::SrtUserDataUse{};
-        tagVariantRuns(*fresh, srtRegions, use, dispatchRelocationEnabled(), 0);
+        const bool relocatable = dispatchRelocationEnabled() && std::none_of(compiledResult->bindings.begin(), compiledResult->bindings.end(), [](const auto& binding) {
+            return binding.role == ShaderRecompiler::DescriptorRole::ImageTable || binding.role == ShaderRecompiler::DescriptorRole::SamplerTable || binding.role == ShaderRecompiler::DescriptorRole::ImageStorageTable;
+        });
+        tagVariantRuns(*fresh, srtRegions, use, relocatable, 0, supplied);
         if (fresh->relocatableWords != 0) {
+            fresh->shared.clear();
             fresh->relocationRuns = std::move(fresh->runs);
-            for (const auto& region : srtRegions) fresh->runs.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
+            std::size_t offset = 0;
+            for (const auto& region : srtRegions) {
+                AppendSharedWords(fresh->shared, fresh->runs.size(), offset, region.bytes, supplied);
+                fresh->runs.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
+                offset += region.bytes.size() / sizeof(std::uint32_t);
+            }
         }
 
         DataWordPositionCounts dataCounts;
@@ -95,7 +109,7 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, std::uint6
                 dispatchOrder.push_front(key);
                 created->order = dispatchOrder.begin();
                 dispatchCache.emplace(key, std::move(created));
-            } else if (found->second != missedEntry && !found->second->variants.empty() && found->second->variants.front()->runs == fresh->runs && found->second->variants.front()->words == fresh->words) {
+            } else if (found->second != missedEntry && !found->second->variants.empty() && found->second->variants.front()->runs == fresh->runs && SameCapturedWords(found->second->variants.front()->words, found->second->variants.front()->shared, fresh->words, fresh->shared)) {
 
                 attachVariant = found->second->variants.front();
             } else {

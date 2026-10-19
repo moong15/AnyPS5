@@ -58,13 +58,13 @@ static int NativeRead(int fd, void* buf, std::size_t n) {
     if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
         throw std::runtime_error("sceKernelRead: nbytes exceeds platform limit");
     }
-    const auto positioned = File::LockPositionedTransfer(fd);
-    const int result = ::_read(fd, buf, static_cast<unsigned int>(n));
-    if (result < 0 && _doserrno == ERROR_NO_DATA) errno = EAGAIN;
-    if (result == 0 && File::DirectoryDescriptorPath(fd)) {
+    if (File::IsDirectoryDescriptor(fd)) {
         errno = EISDIR;
         return -1;
     }
+    const auto positioned = File::LockPositionedTransfer(fd);
+    const int result = ::_read(fd, buf, static_cast<unsigned int>(n));
+    if (result < 0 && _doserrno == ERROR_NO_DATA) errno = EAGAIN;
     return result;
 }
 static int NativeWrite(int fd, const void* buf, std::size_t n) {
@@ -314,6 +314,7 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         const char empty = 0;
         return sceKernelWrite(d, &empty, 0);
     }
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
     auto n = NativeWrite(d, buf, nbytes);
     if (n < 0) return SceIoErrorFromErrno(errno);
     return static_cast<std::int64_t>(n);

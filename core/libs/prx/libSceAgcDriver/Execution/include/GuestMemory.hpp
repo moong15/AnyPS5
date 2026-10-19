@@ -123,6 +123,7 @@ void BumpCollectEpoch();
 // thread reuses a walk for a later item of the same queue that reached the same ordering point
 // while never reusing it for another queue's item.
 void SetCollectScope(std::uint32_t queue, std::uint64_t token);
+void AdoptLatestCollectEpoch();
 std::uint64_t CollectEpoch();
 std::uint64_t CollectEpochBumps();
 std::uint64_t CollectScopeSwitches();
@@ -328,6 +329,7 @@ unsigned long long CodeOffset(const void* address);
 // calls FlushGpuWrites itself.
 void SetFlushHook(void (*hook)(std::uint64_t address, std::size_t bytes));
 void SetReadGuard(void (*guard)(std::uint64_t address, std::size_t bytes));
+void GuardRead(std::uint64_t address, std::size_t bytes);
 void FlushGpuWrites(std::uint64_t address, std::size_t bytes);
 // Moves with every ForgetPages call (the libc invalidator: memory unmapped or re-registered): odd
 // while the call stores its page states, moved past it after, so a reader that loads an even

@@ -114,7 +114,7 @@ VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueSt
         const auto primitive = read(queue.userConfig, 0x242, RegisterBank::UserConfig);
         requireConservativeTriangles(primitive == 4u || primitive == 5u || primitive == 6u || primitive == 21u, primitive == 1u ? "points" : primitive == 2u || primitive == 3u ? "lines" : primitive == 7u || primitive == 17u ? "rectangles" : "other primitive types", "VGT_PRIMITIVE_TYPE", primitive);
     }
-    Require((read(cx, 0x1b3) & 0x44u) == 0, "conservative rasterization with centroid interpolation is unsupported");
+    Require((read(cx, 0x1b3) & 0x44u) == 0 || (read(cx, 0x2f8) & 7u) == 0, "conservative rasterization with centroid interpolation of more than one rasterized sample is unsupported");
     return VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
 }
 
@@ -459,7 +459,6 @@ std::string singleSampleDepthScanRejection(const QueueState& queue) {
 
 constexpr std::uint32_t CoveredCentroidIsCenter = 1u << 29u;
 constexpr std::uint32_t SampleZeroRefusedInputs = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCentroid) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::LinearCentroid) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::SampleCoverage);
-constexpr std::uint32_t PixelCenterPositionInputs = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionX) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionY);
 constexpr std::uint32_t CentroidInputs = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCentroid) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::LinearCentroid);
 
 bool coveredCentroidSupported(const QueueState& queue) {
@@ -538,8 +537,7 @@ bool rasterizesSampleZeroOnly(const Registers& cx, const State& state) {
     if (state.samples <= 1 || state.alphaToCoverage || (read(cx, 0x292) & 1u) == 0) return false;
     const auto inputs = read(cx, 0x1b3) & read(cx, 0x1b4);
     const auto refused = state.perSampleShading ? ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::SampleCoverage) : SampleZeroRefusedInputs;
-    const bool sampleIndexMovesPosition = (inputs & ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary)) != 0 && (inputs & PixelCenterPositionInputs) != 0;
-    return (inputs & refused) == 0 && !sampleIndexMovesPosition;
+    return (inputs & refused) == 0;
 }
 
 void rasterizeSampleZero(State& state) {
@@ -869,7 +867,6 @@ void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offse
     const auto y = (tl >> 16u) & (screen ? 0xffffu : 0x7fffu);
     const auto right = br & 0xffffu;
     const auto bottom = br >> 16u;
-    Require(x <= right && y <= bottom, "inverted scissor rectangle");
     const auto oldRight = static_cast<std::uint32_t>(result.offset.x) + result.extent.width;
     const auto oldBottom = static_cast<std::uint32_t>(result.offset.y) + result.extent.height;
     const auto left = std::max(static_cast<std::uint32_t>(result.offset.x), x);
@@ -899,6 +896,27 @@ std::array<VkSampleLocationEXT, 32> SampleLocations(const State& state) {
                 position = {standard[0], standard[1]};
             }
             locations[pixel * state.samples + sample] = {0.5f + position[0] / 16.0f, 0.5f + position[1] / 16.0f};
+        }
+    }
+    return locations;
+}
+
+std::array<std::uint8_t, 32> PixelSampleLocations(const State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel) {
+    using ShaderRecompiler::PixelInput;
+    using ShaderRecompiler::PixelInputBit;
+    std::array<std::uint8_t, 32> locations{};
+    const bool sampleBarycentrics = (pixel.inputAddr & (PixelInputBit(PixelInput::PerspectiveSample) | PixelInputBit(PixelInput::LinearSample))) != 0u;
+    const bool samplePosition = !state.perSampleShading && (pixel.posX || pixel.posY) && pixel.positionLocation == ShaderRecompiler::PixelPositionLocation::Sample;
+    if (!sampleBarycentrics && !samplePosition) return locations;
+    const auto samples = state.perSampleShading ? state.samples : 1u;
+    for (std::uint32_t pixelIndex = 0; pixelIndex < 4u; ++pixelIndex) {
+        for (std::uint32_t sample = 0; sample < samples; ++sample) {
+            if (state.customSampleLocations) {
+                locations[pixelIndex * 8u + sample] = state.sampleLocations[pixelIndex * 8u + sample];
+            } else if (state.samples != 1) {
+                const auto& standard = state.samples == 2 ? StandardLocations2[sample] : state.samples == 4 ? StandardLocations4[sample] : StandardLocations8[sample];
+                locations[pixelIndex * 8u + sample] = static_cast<std::uint8_t>((standard[0] & 0xf) | ((standard[1] & 0xf) << 4u));
+            }
         }
     }
     return locations;
@@ -1218,6 +1236,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             result.customSampleLocations = false;
         }
         if (color.samples > 1 && result.samples == 1 && result.colors.empty() && !result.depth && !result.alphaToCoverage && (read(cx, 0x292) & 1u) == 0) {
+            Require(result.conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT || (read(cx, 0x1b3) & 0x44u) == 0, "conservative rasterization with centroid interpolation of a draw raised to a multisampled target is unsupported");
             result.samples = color.samples;
             result.customSampleLocations = true;
             result.sampleLocations.fill(0);

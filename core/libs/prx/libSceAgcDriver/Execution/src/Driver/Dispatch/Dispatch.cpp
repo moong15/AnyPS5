@@ -344,17 +344,17 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     } else if (!fromAhead) {
         static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
         try {
-            const auto invocation = InvocationFor(snapshot, codeOffset, request);
+            auto invocation = InvocationFor(snapshot, codeOffset, request);
             timing.Mark("prepared_invocation");
 
             const auto waitedBefore = traceCapSync() ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             for (;;) {
-                shaderMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter(), readsClear ? &CheckCaptureRead : nullptr);
+                shaderMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter(), &QueryPendingSpan, readsClear ? &CheckCaptureRead : nullptr);
                 forgetAtCapture = GuestMemory::ForgetSerial();
                 try {
                     capture = [&] {
                         const SampledReadScope sampling(evidenceReads);
-                        return shaderMemory->Capture(invocation);
+                        return CaptureInvocation(*shaderMemory, snapshot, codeOffset, request, invocation);
                     }();
                     captured = shaderMemory->Regions();
                     if (readsClear) {

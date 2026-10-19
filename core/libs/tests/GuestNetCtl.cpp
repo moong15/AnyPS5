@@ -23,6 +23,8 @@ int APS5_VABI sceNetCtlCheckCallback(void);
 int APS5_VABI sceNetCtlGetInfo(int, NetCtlInfo*);
 int APS5_VABI sceNetCtlGetNatInfo(NetCtlNatInfo*);
 int APS5_VABI sceNetCtlGetState(int*);
+int APS5_VABI sceNetCtlGetStateV6(int*);
+int APS5_VABI sceNetCtlGetResult(int, int*);
 int APS5_VABI sceNetCtlRegisterCallback(NetCtlCallback, void*, int*);
 int APS5_VABI sceNetCtlRegisterCallbackV6(NetCtlCallback, void*, int*);
 void APS5_VABI sceNetCtlTerm(void);
@@ -189,6 +191,13 @@ int main() {
 #endif
     CheckCallbacks();
 
+    Require(sceNetCtlGetStateV6(nullptr) == kErrInvalidAddr);
+    int stateV6 = -1;
+    Require(sceNetCtlGetStateV6(&stateV6) == 0);
+    Require(stateV6 == 0 || stateV6 == kStateIpObtained);
+    Require(sceNetCtlGetResult(0, nullptr) == kErrInvalidAddr);
+    int errorCode = -1;
+    Require(sceNetCtlGetResult(0, &errorCode) == 0 && errorCode == 0);
     NetCtlInfo info{};
     Require(sceNetCtlGetInfo(0, &info) == kErrInvalidCode);
     Require(sceNetCtlGetInfo(22, &info) == kErrInvalidCode);

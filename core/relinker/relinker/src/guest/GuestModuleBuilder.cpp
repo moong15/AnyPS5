@@ -70,7 +70,9 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         if (excludedModules.contains(Io::Utf8Path(path.filename()))) throw Domain::RelinkerException("Excluded module supplied to converter: " + Io::Utf8Path(path));
         if (discovered.contains(path)) throw Domain::RelinkerException("Duplicate module path: " + Io::Utf8Path(path));
         paths.push_back(path);
-        discovered.emplace(path, GuestImageReader().Read(path, std::move(module.Bytes), windows));
+        auto image = GuestImageReader().Read(path, std::move(module.Bytes), windows);
+        image.PatchedRanges = std::move(module.PatchedRanges);
+        discovered.emplace(path, std::move(image));
     }
     const auto neededNames = ReadNeededNames(dynamic);
     std::set<std::string> missingNeeded;
@@ -337,7 +339,9 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             auto converted = Codegen::MakeAmd64OnlyConverter(toRosetta ? Codegen::Amd64OnlyTarget::Rosetta : Codegen::Amd64OnlyTarget::Intel, [&](auto completed, auto total) { progress.Report({Domain::ProgressStage::Lowering, Io::Utf8Path(image.SourcePath), completed, total}); })->Convert(std::move(image.Bytes), image.Headers);
             image.Trampolines = std::move(converted.Trampolines);
             image.Bytes = std::move(converted.Bytes);
+            if (!image.PatchedRanges.empty()) GamePatch::CheckOverlaps(Io::Utf8Path(image.SourcePath), image.PatchedRanges, {.Reports = converted.Reports, .Trampolines = image.Trampolines});
         }
+        if (!image.PatchedRanges.empty()) GamePatch::CheckOverlaps(Io::Utf8Path(image.SourcePath), image.PatchedRanges, {.RelaData = image.Dynamic.RelaData, .RelaPltData = image.Dynamic.RelaPltData});
         const bool sceImage = std::any_of(image.Headers.begin(), image.Headers.end(), [](const Domain::ProgramHeader& header) { return header.Type == 0x61000000; });
         const auto unwindFunctions = sceImage ? UnusedNidFilter::ReadExceptionFunctions(image.Bytes, image.Headers, {}, {}) : std::vector<UnusedNidFilter::StrictCodeRegion>{};
         for (const auto& header : codeHeaders) {
@@ -348,6 +352,10 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             for (const auto offset : syscallScanner.ScanCodeSectionForSyscalls(code, header.MappedAddress, code.size(), Io::Utf8Path(image.SourcePath))) {
                 if (offset > code.size() || code.size() - offset < 2u)
                     throw Domain::RelinkerException("Syscall trap patch exceeds guest executable segment", header.MappedAddress + offset);
+                if (!image.PatchedRanges.empty()) {
+                    const GamePatch::WriterRange trap{header.Offset + offset, 2, "syscall trap"};
+                    GamePatch::CheckOverlaps(Io::Utf8Path(image.SourcePath), image.PatchedRanges, {.Traps = std::span<const GamePatch::WriterRange>(&trap, 1)});
+                }
                 image.Bytes[header.Offset + offset] = 0x0F;
                 image.Bytes[header.Offset + offset + 1] = 0x0B;
             }
@@ -393,7 +401,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
                 const auto symbolIndex = static_cast<std::size_t>(info >> 32);
                 if (!systemImports[index].contains(symbolIndex)) continue;
                 const auto& symbol = image.Symbols[symbolIndex];
-                imports.push_back({symbol.Name, symbol.Library, {}, 0, {}, Io::ReadU64(*table, position), {}, false});
+                imports.push_back({symbol.Name, symbol.Library, {}, 0, {}, Io::ReadU64(*table, position), {}, false, (symbol.Info >> 4) == 2});
             }
         }
         dynamic.GuestModules.push_back(std::move(runtime));

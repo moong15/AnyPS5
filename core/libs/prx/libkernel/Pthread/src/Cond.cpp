@@ -40,7 +40,7 @@ std::shared_ptr<TimedWait::Condition> resolveCond(PthreadCond* cond, int* clockI
     std::atomic_ref<PthreadCond> slot(*cond);
     auto current = slot.load(std::memory_order_acquire);
     if (current == destroyedCond())
-        throw std::runtime_error("Condition variable has been destroyed");
+        return nullptr;
     if (!current) {
         current = new PthreadCondPrivate();
         slot.store(current, std::memory_order_release);
@@ -84,6 +84,8 @@ int finishWait(std::shared_ptr<TimedWait::Condition>& condition, bool timedOut) 
 }
 
 int waitUntil(std::shared_ptr<TimedWait::Condition> condition, PthreadMutex* mutex, std::optional<std::uint64_t> deadlineNanos, const void* caller) {
+    if (!condition)
+        return SCE_KERNEL_ERROR_EINVAL;
     PthreadMutex m = nullptr;
     if (const int error = mutexOwnership(mutex, &m))
         return error;
@@ -124,6 +126,8 @@ int CondOperations::AbsoluteTimedwait(PthreadCond* cond, PthreadMutex* mutex, co
     KernelUseconds usec = 0;
     int clockId = 0;
     auto condition = resolveCond(cond, &clockId);
+    if (!condition)
+        return SCE_KERNEL_ERROR_EINVAL;
     if (!PosixThread::RelativeMicroseconds(clockId, abstime, &usec))
         throw std::invalid_argument("Invalid absolute condition variable timeout");
     return waitUntil(std::move(condition), mutex, TimedWait::DeadlineNanos(usec), __builtin_return_address(0));
@@ -167,25 +171,34 @@ int APS5_VABI scePthreadCondDestroy(PthreadCond* cond) {
         throw std::invalid_argument("Condition variable pointer is null");
     std::lock_guard lock(condInitializationMutex);
     if (*cond == destroyedCond())
-        throw std::runtime_error("Condition variable has already been destroyed");
+        return SCE_KERNEL_ERROR_EINVAL;
     delete *cond;
     std::atomic_ref<PthreadCond>(*cond).store(destroyedCond(), std::memory_order_release);
     return 0;
 }
 
 int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
-    resolveCond(cond)->NotifyOne();
+    const auto resolved = resolveCond(cond);
+    if (!resolved)
+        return SCE_KERNEL_ERROR_EINVAL;
+    resolved->NotifyOne();
     return 0;
 }
 
 int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
-    resolveCond(cond)->NotifyAll();
+    const auto resolved = resolveCond(cond);
+    if (!resolved)
+        return SCE_KERNEL_ERROR_EINVAL;
+    resolved->NotifyAll();
     return 0;
 }
 
 int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {
     (void)thread;
-    resolveCond(cond)->NotifyAll();
+    const auto resolved = resolveCond(cond);
+    if (!resolved)
+        return SCE_KERNEL_ERROR_EINVAL;
+    resolved->NotifyAll();
     return 0;
 }
 

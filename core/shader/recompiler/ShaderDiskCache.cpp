@@ -110,8 +110,8 @@ static_assert(sizeof(IrResourcePlan) == 728, "IrResourcePlan changed: update Enc
 static_assert(sizeof(IrValue) == 152, "IrValue changed: update the plan value encoder");
 static_assert(sizeof(GuestRegister) == 8, "GuestRegister changed: update the plan value encoder");
 static_assert(sizeof(MemoryInfo) == 80, "MemoryInfo changed: update the plan encoder");
-static_assert(sizeof(DescriptorSource) == 168, "DescriptorSource changed: update the plan encoder");
-static_assert(sizeof(TableColumn) == 88, "TableColumn changed: update the plan encoder");
+static_assert(sizeof(DescriptorSource) == 192, "DescriptorSource changed: update the plan encoder");
+static_assert(sizeof(TableColumn) == 112, "TableColumn changed: update the plan encoder");
 static_assert(sizeof(KeyDomain) == 16, "KeyDomain changed: update the plan encoder");
 static_assert(sizeof(ResourceBlock) == 80, "ResourceBlock changed: update the plan encoder");
 static_assert(sizeof(SrtRead) == 16, "SrtRead changed: update the plan encoder");
@@ -142,7 +142,7 @@ constexpr std::size_t fieldCount() {
 
 static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
-static_assert(fieldCount<ImageResource>() == 38, "ImageResource changed: update the info encoder");
+static_assert(fieldCount<ImageResource>() == 39, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: update the info encoder");
 static_assert(fieldCount<SampledResourcePair>() == 3, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
@@ -151,7 +151,7 @@ static_assert(fieldCount<IrResourcePlan>() == 25, "IrResourcePlan changed: updat
 static_assert(fieldCount<GuestRegister>() == 2, "GuestRegister changed: update the plan value encoder");
 static_assert(fieldCount<MemoryInfo>() == 31, "MemoryInfo changed: update the plan encoder");
 static_assert(fieldCount<DescriptorSource>() == 3, "DescriptorSource changed: update the plan encoder");
-static_assert(fieldCount<TableColumn>() == 17, "TableColumn changed: update the plan encoder");
+static_assert(fieldCount<TableColumn>() == 18, "TableColumn changed: update the plan encoder");
 static_assert(fieldCount<KeyDomain>() == 4, "KeyDomain changed: update the plan encoder");
 static_assert(fieldCount<ResourceBlock>() == 4, "ResourceBlock changed: update the plan encoder");
 static_assert(fieldCount<SrtRead>() == 2, "SrtRead changed: update the plan encoder");
@@ -724,6 +724,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
         out.Value(image.flatLineCompatible);
         out.Value(image.flatVolumeLineCompatible);
         out.Value(image.foldTexelOffsetsOnly);
+        out.Value(image.convertedSamples);
         out.Value(image.byElements);
         out.Value(image.byComponents);
         out.Value(image.packedFormat);
@@ -826,6 +827,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(image.flatLineCompatible);
         in.Value(image.flatVolumeLineCompatible);
         in.Value(image.foldTexelOffsetsOnly);
+        in.Value(image.convertedSamples);
         in.Value(image.byElements);
         in.Value(image.byComponents);
         in.Value(image.packedFormat);
@@ -1169,6 +1171,10 @@ bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
         out.Value(column.indirect);
         out.Value(column.indirectOffset);
         out.Value(column.indirectImmediate);
+        out.List(column.pointerHops, [](Writer& hops, const PointerHop& hop) {
+            hops.Value(hop.offset);
+            hops.Value(hop.immediate);
+        });
         out.Value(column.foldedAddend);
         out.Value(column.foldedCarry);
         out.Value(column.selected);
@@ -1327,6 +1333,10 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
         in.Value(column.indirect);
         in.Value(column.indirectOffset);
         in.Value(column.indirectImmediate);
+        in.List(column.pointerHops, 8, [](Reader& hops, PointerHop& hop) {
+            hops.Value(hop.offset);
+            hops.Value(hop.immediate);
+        });
         in.Value(column.foldedAddend);
         in.Value(column.foldedCarry);
         in.Value(column.selected);
@@ -1397,6 +1407,8 @@ constexpr std::string_view NeutralSwitches[] = {
     "APS5_NO_SPECIALIZED_DISK_CACHE",
     "APS5_SPECIALIZED_DISK_CACHE_ENTRIES",
     "APS5_SPECIALIZED_DISK_CACHE_MAX_MIB",
+    "APS5_NO_TABLE_RESOLUTION_REUSE",
+    "APS5_NO_TABLE_SNAPSHOT_REUSE",
 };
 
 const std::vector<std::byte>& switchKey() {

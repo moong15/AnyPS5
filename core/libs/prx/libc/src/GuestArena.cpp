@@ -19,6 +19,7 @@
 #endif
 #include <cstdio>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -33,10 +34,17 @@
 namespace GuestArena {
 namespace {
 
+std::atomic<void (*)(std::uintptr_t, std::size_t)> hostReadHook{nullptr};
+
 #ifdef _WIN32
 std::atomic<std::uint64_t> commitGeneration{1};
 std::atomic<void (*)(std::uintptr_t, std::size_t, std::uint64_t)> privateMappingObserver{nullptr};
 #endif
+std::atomic<void (*)(std::uintptr_t, std::size_t)> accessObserver{nullptr};
+
+void noteAccess(const void* pointer, std::size_t bytes) {
+    if (const auto callback = accessObserver.load(std::memory_order_acquire)) callback(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+}
 
 #ifdef ANYPS5_ENABLE_ASAN
 constexpr std::uintptr_t GuestArenaOffset = 0x0000100000000000ull;
@@ -413,6 +421,7 @@ std::invalid_argument OutsideArena(const char* operation, const void* pointer, s
 #ifdef _WIN32
 void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t bytes, std::uint32_t protection) {
     WindowsMappings::Get().SetProtection(address, bytes, protection);
+    noteAccess(reinterpret_cast<const void*>(address), bytes);
 }
 
 bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address) {
@@ -474,6 +483,7 @@ void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_
     if (const auto callback = privateMappingObserver.load(std::memory_order_acquire)) {
         for (const auto& [address, size] : created) callback(address, size, generation);
     }
+    noteAccess(pointer, bytes);
 }
 
 void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
@@ -484,11 +494,13 @@ void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
 void GuestArenaMap_nid_postfix(void* pointer, std::size_t bytes, void* section, std::uint64_t offset, std::uint32_t protection) {
     if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("shared mapping", pointer, bytes);
     WindowsMappings::Get().Map(pointer, bytes, section, offset, protection, Arena::Get().WriteWatched(), false);
+    noteAccess(pointer, bytes);
 }
 
 void GuestArenaMapDirect_nid_postfix(void* pointer, std::size_t bytes, void* section, std::uint64_t offset, std::uint32_t protection) {
     if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("direct memory mapping", pointer, bytes);
     WindowsMappings::Get().Map(pointer, bytes, section, offset, protection, Arena::Get().WriteWatched(), true);
+    noteAccess(pointer, bytes);
 }
 
 void* GuestArenaMapAlias_nid_postfix(std::uintptr_t address, std::size_t bytes) {
@@ -534,6 +546,7 @@ void GuestArenaSetProtection_nid_postfix(std::uintptr_t address, std::size_t byt
     if (!Arena::Get().Contains(reinterpret_cast<void*>(address), bytes)) throw OutsideArena("set protection", reinterpret_cast<void*>(address), bytes);
     if (mprotect(reinterpret_cast<void*>(address), bytes, PosixProtection(protection)) != 0)
         throw std::system_error(errno, std::generic_category(), "guest arena protection failed");
+    noteAccess(reinterpret_cast<const void*>(address), bytes);
 }
 
 void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_t protection, std::size_t granule) {
@@ -546,6 +559,7 @@ void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_
         if (marked) Arena::Get().Release(pointer, bytes);
         throw;
     }
+    noteAccess(pointer, bytes);
 }
 
 void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
@@ -556,6 +570,20 @@ void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
 
 bool GuestArenaWriteWatched_nid_postfix() {
     return Arena::Get().WriteWatched();
+}
+
+void GuestArenaSetAccessObserver_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes)) {
+    accessObserver.store(callback, std::memory_order_release);
+}
+
+void GuestArenaSetHostReadHook_nid_no_patch(void (*hook)(std::uintptr_t, std::size_t)) {
+    hostReadHook.store(hook, std::memory_order_release);
+}
+
+void GuestArenaPrepareHostRead_nid_no_patch(const void* pointer, std::size_t bytes) {
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uintptr_t>::max() - address) return;
+    if (const auto hook = hostReadHook.load(std::memory_order_acquire)) hook(address, bytes);
 }
 
 namespace {
