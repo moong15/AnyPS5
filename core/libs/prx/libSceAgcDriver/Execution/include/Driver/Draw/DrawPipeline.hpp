@@ -62,6 +62,7 @@ public:
     // commit's own read is the point: its commit is the first to run after the packets that came
     // before it, so a write recorded while it waits is ordered after the read it belongs to.
     static bool HeldReads(std::uint64_t address, std::size_t bytes);
+    static std::size_t QueuedReadRanges();
     void ReleaseRunningReads();
 
 private:
@@ -87,6 +88,7 @@ private:
     std::deque<Item> items;
     std::exception_ptr failure;
     std::atomic<std::size_t> outstanding{0};
+    std::atomic<std::size_t> queuedReads{0};
     std::uint32_t idleWaiters = 0;
     bool committerWaiting = false;
     bool stopped = false;

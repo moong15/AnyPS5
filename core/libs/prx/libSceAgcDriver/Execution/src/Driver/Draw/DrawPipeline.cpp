@@ -31,6 +31,12 @@ thread_local const std::vector<DrawPipeline::Range>* committingOrderedReads = nu
 std::atomic<std::uint64_t> heldReadRanges{0};
 std::atomic<std::uint64_t> heldReadQueries{0};
 std::atomic<std::uint64_t> heldReadHits{0};
+std::atomic<std::uint64_t> heldReadsUnlocked{0};
+
+bool heldReadFastPath() {
+    static const bool enabled = std::getenv("APS5_NO_HELD_READ_FAST_PATH") == nullptr;
+    return enabled;
+}
 
 const char* commitStageName(GuestMemory::GpuLockSite site) {
     switch (site) {
@@ -145,6 +151,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     writesComplete &= std::all_of(writes.begin(), writes.end(), [](const Range& range) { return range.first < range.second; });
     heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
     items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads, writesComplete});
+    queuedReads.fetch_add(items.back().reads.size(), std::memory_order_relaxed);
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) {
         thread = std::thread([this] { run(); });
@@ -186,8 +193,8 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
     const auto perCommit = commits == 0 ? 0.0 : static_cast<double>(commitNs) / 1e3 / static_cast<double>(commits);
     const auto perDraw = enqueued == 0 ? 0.0 : static_cast<double>(fullWaitNs) / 1e3 / static_cast<double>(enqueued);
     const auto queued = enqueued == 0 ? 0.0 : static_cast<double>(depthSum) / static_cast<double>(enqueued);
-    char reads[64];
-    std::snprintf(reads, sizeof(reads), " %llu read ranges, %llu stores held", static_cast<unsigned long long>(heldReadRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadHits.exchange(0, std::memory_order_relaxed)));
+    char reads[192];
+    std::snprintf(reads, sizeof(reads), " %llu read ranges, %llu stores held, %llu held-read queries scanned the queue, %llu answered without its lock", static_cast<unsigned long long>(heldReadRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadHits.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadQueries.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadsUnlocked.exchange(0, std::memory_order_relaxed)));
     drainText += reads;
     // The recorder's commit-wait totals are cumulative; this line reports the interval's share.
     static AgcDriver::Graphics::Recorder::CommitWaitStatistics previousWaits{0, 0.0, 0.0};
@@ -246,6 +253,7 @@ void DrawPipeline::run() {
         {
             std::lock_guard lock(mutex);
             if (trace != nullptr) retired = std::chrono::steady_clock::now();
+            queuedReads.fetch_sub(items.front().reads.size(), std::memory_order_relaxed);
             items.pop_front();
             if (trace != nullptr) released = std::chrono::steady_clock::now();
             ++commits;
@@ -376,10 +384,17 @@ std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
 bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
     GuestMemory::TargetRefreshCounter inspected("held_read_ranges");
     const GuestMemory::TargetRefreshScope heldScope(GuestMemory::TargetRefreshStep::HeldReads);
-    if (bytes == 0 || std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") != nullptr) return false;
+    static const bool ordered = std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") == nullptr;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    const bool fast = heldReadFastPath();
+    if (bytes == 0 || !(fast ? ordered : std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") == nullptr)) return false;
     const auto end = address + bytes;
     if (committingOrderedReads != nullptr && std::any_of(committingOrderedReads->begin(), committingOrderedReads->end(), [&](const Range& range) { return range.first <= address && end <= range.second; })) return false;
     auto& pipeline = Queue0();
+    if (fast && pipeline.queuedReads.load(std::memory_order_acquire) == 0) {
+        if (profile) heldReadsUnlocked.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     const auto lock = GuestMemory::MeasureTargetRefresh(GuestMemory::TargetRefreshStep::PipelineWait, [&] { return std::unique_lock(pipeline.mutex); });
     heldReadQueries.fetch_add(1, std::memory_order_relaxed);
     for (const auto& item : pipeline.items) {
@@ -393,9 +408,15 @@ bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
     return false;
 }
 
+std::size_t DrawPipeline::QueuedReadRanges() {
+    return Queue0().queuedReads.load(std::memory_order_acquire);
+}
+
 void DrawPipeline::ReleaseRunningReads() {
     std::lock_guard lock(mutex);
-    if (!items.empty()) items.front().reads.clear();
+    if (items.empty()) return;
+    queuedReads.fetch_sub(items.front().reads.size(), std::memory_order_relaxed);
+    items.front().reads.clear();
 }
 
 std::optional<std::uint64_t> DrawPipeline::PendingLabel(std::uint64_t address, std::size_t bytes) {
