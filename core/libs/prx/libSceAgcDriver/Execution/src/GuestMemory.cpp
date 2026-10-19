@@ -1,12 +1,15 @@
+#include "prx/libSceAgcDriver/Execution/include/ThreadScratch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteWatchCoverage.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
+#include "prx/libc/include/HostThreadSlot.hpp"
 #include <mutex>
 #include <array>
 #include <chrono>
@@ -145,7 +148,10 @@ struct MemoryCounter {
     }
 };
 
-thread_local std::uint64_t collectedDirtyRuns = 0;
+std::uint64_t& collectedDirtyRuns() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
 
 struct MemorySiteCounter {
     std::atomic<std::uintptr_t> caller{0};
@@ -212,14 +218,14 @@ struct MemoryCounters {
 };
 
 struct MemoryProfile {
-    std::mutex threadsMutex;
+    AgcDriver::Mutex threadsMutex;
     std::vector<const MemoryCounters*> threads;
     MemoryCounters retired;
     MemoryCounters shared;
     MemorySiteTotals retiredSites;
     std::atomic<std::int64_t> lastReport{0};
     // Sampled callers of Read and Write (module offsets), to name what touches guest memory most.
-    std::mutex callersMutex;
+    AgcDriver::Mutex callersMutex;
     std::array<std::pair<unsigned long long, std::uint64_t>, 16> callers{};
     std::array<std::pair<unsigned long long, std::uint64_t>, 16> writeCallers{};
 };
@@ -288,19 +294,19 @@ void CountCaller(std::array<std::pair<unsigned long long, std::uint64_t>, 16>& c
     }
 }
 
-// Attribution tags (see the header): the packet a queue worker executes and the read site the
-// driver code named. Plain thread-locals; a store per packet costs nothing measurable.
-thread_local PacketTag currentPacket{NoPacket, 0xffffffffu};
-thread_local ReadSite currentReadSite = ReadSite::Unknown;
+struct CurrentPacketSlot {};
+struct CurrentReadSiteSlot {};
+constexpr std::uint64_t NoPacketBits = NoPacket | (std::uint64_t{0xffffffffu} << 32u);
 // Sampled reads by site (every 256th Read/ReadCommitted, like the callers), for the [guestmem] line.
 std::atomic<std::uint64_t> readSiteSamples[static_cast<std::size_t>(ReadSite::Count)] = {};
 
 void SetCurrentPacket(std::uint32_t opcode, std::uint32_t queue) {
-    currentPacket = {opcode, queue};
+    HostThreadSlot<std::uint64_t, CurrentPacketSlot>::Set((opcode | (std::uint64_t{queue} << 32u)) ^ NoPacketBits);
 }
 
 PacketTag CurrentPacket() {
-    return currentPacket;
+    const auto bits = HostThreadSlot<std::uint64_t, CurrentPacketSlot>::Get() ^ NoPacketBits;
+    return {static_cast<std::uint32_t>(bits), static_cast<std::uint32_t>(bits >> 32u)};
 }
 
 const char* ReadSiteName(ReadSite site) {
@@ -310,11 +316,13 @@ const char* ReadSiteName(ReadSite site) {
 }
 
 ReadSite SetReadSite(ReadSite site) {
-    return std::exchange(currentReadSite, site);
+    const auto previous = HostThreadSlot<ReadSite, CurrentReadSiteSlot>::Get();
+    HostThreadSlot<ReadSite, CurrentReadSiteSlot>::Set(site);
+    return previous;
 }
 
 ReadSite CurrentReadSite() {
-    return currentReadSite;
+    return HostThreadSlot<ReadSite, CurrentReadSiteSlot>::Get();
 }
 
 std::size_t CaptureCallerOffsets(std::span<unsigned long long> frames, unsigned skip) {
@@ -355,7 +363,7 @@ std::size_t CaptureCallerOffsets(std::span<unsigned long long> frames, unsigned 
 void CountReadCaller(const void* returnAddress) {
     thread_local std::uint32_t sampled = 0;
     // Sampled at the same rate as the callers, in step with them (CountCaller advances the counter).
-    if ((sampled + 1) % 256 == 0) readSiteSamples[static_cast<std::size_t>(currentReadSite)].fetch_add(256, std::memory_order_relaxed);
+    if ((sampled + 1) % 256 == 0) readSiteSamples[static_cast<std::size_t>(CurrentReadSite())].fetch_add(256, std::memory_order_relaxed);
     CountCaller(Profile().callers, sampled, 256, returnAddress);
 }
 
@@ -371,14 +379,14 @@ bool MemoryProfiled() {
 
 class TimedAccess {
 public:
-    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, const void* caller = nullptr) : kind(kind), bytes(bytes), caller(caller), dirtyBefore(collectedDirtyRuns), held(MemoryProfiled() && GpuMutex().HeldByThisThread()), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    TimedAccess(MemoryCounterKind kind, std::uint64_t bytes, const void* caller = nullptr) : kind(kind), bytes(bytes), caller(caller), dirtyBefore(collectedDirtyRuns()), held(MemoryProfiled() && GpuMutex().HeldByThisThread()), start(MemoryProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
     void Completed() const { completed = true; }
     ~TimedAccess() {
         if (!MemoryProfiled()) return;
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
         CounterFor(kind).Add(bytes, elapsed, SharedMemoryCounters());
-        if (caller != nullptr && (kind == CounterRead || kind == CounterCollect)) LocalMemoryCounters().AddSite(kind, caller, bytes, elapsed, kind == CounterCollect && completed && collectedDirtyRuns == dirtyBefore, held);
+        if (caller != nullptr && (kind == CounterRead || kind == CounterCollect)) LocalMemoryCounters().AddSite(kind, caller, bytes, elapsed, kind == CounterCollect && completed && collectedDirtyRuns() == dirtyBefore, held);
         auto& state = Profile();
         const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         auto last = state.lastReport.load();
@@ -788,7 +796,7 @@ bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
 #endif
         }
     };
-    thread_local const Bounds bounds;
+    const auto& bounds = ThreadScratch<Bounds, Bounds>();
     const auto frame = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
     return bounds.high != 0 && frame >= bounds.low && frame < bounds.high && address >= frame && address < bounds.high && bytes <= bounds.high - address;
 }
@@ -806,7 +814,8 @@ bool pageStateRecorded(std::uintptr_t address, std::size_t bytes) {
 bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
     constexpr std::size_t limit = 4096;
     if (bytes > limit || HostMapping::QueryFd() >= 0 || pageStateRecorded(address, bytes)) return false;
-    thread_local std::array<std::byte, limit> scratch;
+    struct ScratchTag { std::array<std::byte, limit> value = {}; };
+    auto& scratch = ThreadScratch<ScratchTag, ScratchTag>().value;
     iovec local{scratch.data(), bytes};
     iovec remote{reinterpret_cast<void*>(address), bytes};
     static const pid_t self = getpid();
@@ -922,7 +931,7 @@ void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_
 std::atomic<std::uint64_t> targetWriteSerial{0};
 
 struct WriteTracker {
-    std::mutex mutex;
+    AgcDriver::Mutex mutex;
     bool initialized = false;
     bool watched = false;
     static constexpr std::size_t CoarseBlocks = 64;
@@ -1329,7 +1338,7 @@ WriteTracker& Tracker() {
 
 // Takes the tracker mutex; under APS5_PROFILE_DRAW an acquisition that found it held is counted
 // ('tracker waits N / M' in [guestmem]), which says whether walking outside the lock would pay.
-std::unique_lock<std::mutex> lockTracker(WriteTracker& tracker) {
+std::unique_lock<AgcDriver::Mutex> lockTracker(WriteTracker& tracker) {
     const TargetRefreshScope targetWait(TargetRefreshStep::TrackerWait);
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return std::unique_lock(tracker.mutex);
@@ -1365,7 +1374,7 @@ void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_
 // thread that never bumped is given a new epoch for every collect: its walks are never reused (the
 // presenter, game threads inside the flush hook), as nothing orders the CPU's writes for it.
 std::atomic<std::uint64_t> nextCollectEpoch{1};
-thread_local std::uint64_t threadCollectEpoch = 0;
+struct CollectEpochSlot {};
 std::atomic<std::uint64_t> lastBumpedEpoch{0};
 
 // The dirty summary's token (see WriteTracker::cleanSince): a value no other scope holds, taken at
@@ -1373,16 +1382,25 @@ std::atomic<std::uint64_t> lastBumpedEpoch{0};
 // any other ordering point. A thread that never bumps one keeps 0 and its collects always walk
 // (nothing orders its CPU writes), exactly as its epochs are never reused.
 std::atomic<std::uint32_t> nextSummaryToken{1};
-thread_local std::uint32_t threadSummaryToken = 0;
+std::uint32_t& threadSummaryToken() {
+    struct Value { std::uint32_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
 
 // What the dirty summary saved the calling thread, for the [draws] readTarget line: the collects it
 // covered whole and the bytes the walks that did run covered after it. Taken with the profile's
 // other thread counters, and kept unconditionally: two thread-local adds per collect is nothing.
-thread_local std::uint64_t threadSummarySkips = 0;
-thread_local std::uint64_t threadSummaryWalkedBytes = 0;
+std::uint64_t& threadSummarySkips() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
+std::uint64_t& threadSummaryWalkedBytes() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
 
 std::uint64_t currentCollectEpoch() {
-    if (threadCollectEpoch != 0) return threadCollectEpoch;
+    if (const auto epoch = HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get(); epoch != 0) return epoch;
     return nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
@@ -1399,18 +1417,32 @@ struct ThreadCollectMemo {
     std::array<WriteTracker::Memo, 64> entries{};
     std::size_t next = 0;
 };
-thread_local ThreadCollectMemo threadCollectMemo;
+ThreadCollectMemo& threadCollectMemo() {
+    struct Slot {};
+    auto* memo = HostThreadSlot<ThreadCollectMemo*, Slot>::Get();
+    if (memo == nullptr) {
+        ShaderRecompiler::ThreadOwned(memo);
+        HostThreadSlot<ThreadCollectMemo*, Slot>::Set(memo);
+    }
+    return *memo;
+}
 
 // Walks the calling thread's memo replaced, and the bytes they would have covered: what a caller
 // spends on its own (see ThreadSkippedWalks). Kept with the profile so an unprofiled run pays
 // nothing for them.
-thread_local std::uint64_t threadSkippedWalks = 0;
-thread_local std::uint64_t threadSkippedBytes = 0;
+std::uint64_t& threadSkippedWalks() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
+std::uint64_t& threadSkippedBytes() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
 
 void noteSkippedWalk(std::size_t bytes) {
     if (!MemoryProfiled()) return;
-    ++threadSkippedWalks;
-    threadSkippedBytes += bytes;
+    ++threadSkippedWalks();
+    threadSkippedBytes() += bytes;
 }
 
 struct EpochCollectMap {
@@ -1440,7 +1472,8 @@ struct EpochCollectMap {
 };
 
 EpochCollectMap::Scopes& epochCollectMap(std::uint64_t epoch) {
-    thread_local EpochCollectMap* slot = nullptr;
+    struct SlotTag { EpochCollectMap* value = nullptr; };
+    auto& slot = ThreadScratch<SlotTag, SlotTag>().value;
     auto& map = ShaderRecompiler::ThreadOwned(slot);
     return map.slot(epoch);
 }
@@ -1468,7 +1501,7 @@ void stampWrittenRun(void* context, std::uintptr_t begin, std::uintptr_t end) {
     const auto kind = runs.kind;
     if (end <= begin) return;
     ++runs.stamped;
-    if (MemoryProfiled()) ++collectedDirtyRuns;
+    if (MemoryProfiled()) ++collectedDirtyRuns();
     const auto generation = tracker.generation.load(std::memory_order_relaxed);
     if (kind != StampKind::Driver) tracker.noteCpuStore(begin, end, generation);
     else tracker.noteWalkStore(begin, end, generation);
@@ -1633,7 +1666,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
                 return tracker.generation.load(std::memory_order_relaxed);
             }
         }
-        for (const auto& entry : threadCollectMemo.entries) {
+        for (const auto& entry : threadCollectMemo().entries) {
             if (entry.epoch == epoch && entry.unwatched == unwatched && entry.begin <= first && stop <= entry.end) {
                 // The current generation, not the memoized one: blocks stamped since (MarkWritten, an
                 // overlapping collect) were written before this caller reads, and an older value would
@@ -1658,7 +1691,7 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         }
     }
 #ifndef _WIN32
-    if (useMemo && threadCollectEpoch != 0 && bytes <= WriteBlockBytes) {
+    if (useMemo && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0 && bytes <= WriteBlockBytes) {
         const auto begin = first & ~(WriteBlockBytes - 1);
         const auto end = (stop + WriteBlockBytes - 1) & ~(WriteBlockBytes - 1);
         if (end > begin && tracker.covers(begin, end - begin)) {
@@ -1670,15 +1703,15 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
     // The dirty summary decides what the walk has to cover: a range it covers entirely is not walked
     // at all, and a range it covers in part is walked over the blocks that are left. The collect
     // counter takes the walked bytes, so a skipped walk is not counted as walked pages.
-    const std::uint32_t summaryToken = dirtySummaryEnabled() && useMemo && threadSummaryToken != 0 ? threadSummaryToken : 0;
+    const std::uint32_t summaryToken = dirtySummaryEnabled() && useMemo && threadSummaryToken() != 0 ? threadSummaryToken() : 0;
     const DirtySummary summary(tracker, first, stop, summaryToken);
     if (summary.Skips() && summary.token != 0) {
-        ++threadSummarySkips;
+        ++threadSummarySkips();
         summarySkips.fetch_add(1, std::memory_order_relaxed);
     } else {
         const std::uint64_t walked = summary.Walked();
         const TimedAccess timed(CounterCollect, walked, caller);
-        threadSummaryWalkedBytes += walked;
+        threadSummaryWalkedBytes() += walked;
         if (summary.token != 0) summaryWalkedBytes.fetch_add(walked, std::memory_order_relaxed);
         if (!walkSummary(tracker, summary)) return 0;
         timed.Completed();
@@ -1688,7 +1721,8 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         const auto serial = unwatchSerial.load(std::memory_order_relaxed);
         if (sharedCollectMemo()) tracker.memo[tracker.nextMemo++ % tracker.memo.size()] = {first, stop, epoch, serial};
         else {
-            threadCollectMemo.entries[threadCollectMemo.next++ % threadCollectMemo.entries.size()] = {first, stop, epoch, serial};
+            auto& memo = threadCollectMemo();
+            memo.entries[memo.next++ % memo.entries.size()] = {first, stop, epoch, serial};
             if (epochCollectMapEnabled()) {
                 auto& entry = epochCollectMap(epoch).ranges[first];
                 if (entry.unwatched != serial || entry.end < stop) entry = {first, stop, epoch, serial};
@@ -1711,10 +1745,11 @@ std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
 }
 
 void BumpCollectEpoch() {
-    threadCollectEpoch = nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
-    threadSummaryToken = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto epoch = nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    HostThreadSlot<std::uint64_t, CollectEpochSlot>::Set(epoch);
+    threadSummaryToken() = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
     auto last = lastBumpedEpoch.load(std::memory_order_relaxed);
-    while (last < threadCollectEpoch && !lastBumpedEpoch.compare_exchange_weak(last, threadCollectEpoch, std::memory_order_release, std::memory_order_relaxed)) {}
+    while (last < epoch && !lastBumpedEpoch.compare_exchange_weak(last, epoch, std::memory_order_release, std::memory_order_relaxed)) {}
     collectEpochBumps.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1726,13 +1761,13 @@ void BumpCollectEpoch() {
 void SetCollectScope(std::uint32_t queue, std::uint64_t token) {
     constexpr std::uint64_t ScopeBit = std::uint64_t{1} << 63;
     constexpr std::uint64_t TokenMask = 0x00ffffffffffffffull;
-    threadCollectEpoch = ScopeBit | ((token & TokenMask) << 8) | std::min<std::uint32_t>(queue, 0xffu);
-    threadSummaryToken = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
+    HostThreadSlot<std::uint64_t, CollectEpochSlot>::Set(ScopeBit | ((token & TokenMask) << 8) | std::min<std::uint32_t>(queue, 0xffu));
+    threadSummaryToken() = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
     collectScopeSwitches.fetch_add(1, std::memory_order_relaxed);
 }
 
 std::uint64_t ThreadCollectEpoch() {
-    return collectMemoEnabled() ? threadCollectEpoch : 0;
+    return collectMemoEnabled() ? HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() : 0;
 }
 
 std::uint64_t UnwatchSerial() {
@@ -1741,9 +1776,9 @@ std::uint64_t UnwatchSerial() {
 
 void AdoptLatestCollectEpoch() {
     const auto latest = lastBumpedEpoch.load(std::memory_order_acquire);
-    if (latest > threadCollectEpoch) {
-        threadCollectEpoch = latest;
-        threadSummaryToken = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (latest > HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get()) {
+        HostThreadSlot<std::uint64_t, CollectEpochSlot>::Set(latest);
+        threadSummaryToken() = nextSummaryToken.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 }
 
@@ -1756,7 +1791,7 @@ std::uint64_t CollectScopeSwitches() {
 }
 
 std::uint64_t CollectEpoch() {
-    return collectMemoEnabled() ? threadCollectEpoch : 0;
+    return collectMemoEnabled() ? HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() : 0;
 }
 
 namespace {
@@ -2084,7 +2119,10 @@ std::uint64_t NewestStamp(std::uint64_t address, std::size_t bytes) {
 #ifdef _WIN32
 namespace {
 
-thread_local ThreadCollectMemo threadHintMemo;
+ThreadCollectMemo& threadHintMemo() {
+    struct Value { ThreadCollectMemo value = ThreadCollectMemo{}; };
+    return ThreadScratch<Value, Value>().value;
+}
 
 bool walkHints(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop) {
     auto cursor = first;
@@ -2092,7 +2130,7 @@ bool walkHints(WriteTracker& tracker, std::uint64_t first, std::uint64_t stop) {
     while (cursor < stop) {
         std::size_t count = tracker.pages.size();
         if (!GuestArena::GuestArenaCollectWrites_nid_postfix(static_cast<std::uintptr_t>(cursor), static_cast<std::size_t>(stop - cursor), tracker.pages.data(), &count, true)) return false;
-        if (MemoryProfiled() && count != 0) ++collectedDirtyRuns;
+        if (MemoryProfiled() && count != 0) ++collectedDirtyRuns();
         if (count != 0 && !marked) ++tracker.generation;
         marked = marked || count != 0;
         for (std::size_t i = 0; i < count; ++i) tracker.hintBlocks[tracker.blockOf(reinterpret_cast<std::uintptr_t>(tracker.pages[i]))] = tracker.generation;
@@ -2119,7 +2157,7 @@ std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
     tracker.initialize();
     if (!tracker.watched || !tracker.hinted(first, stop)) return 0;
     const auto unwatched = unwatchSerial.load(std::memory_order_relaxed);
-    const bool memoized = collectMemoEnabled() && std::any_of(threadHintMemo.entries.begin(), threadHintMemo.entries.end(), [&](const WriteTracker::Memo& entry) {
+    const bool memoized = collectMemoEnabled() && std::any_of(threadHintMemo().entries.begin(), threadHintMemo().entries.end(), [&](const WriteTracker::Memo& entry) {
         return entry.epoch == epoch && entry.unwatched == unwatched && entry.begin <= first && stop <= entry.end;
     });
     if (memoized) {
@@ -2128,7 +2166,7 @@ std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
         const TimedAccess timed(CounterCollect, bytes, __builtin_return_address(0));
         if (!walkHints(tracker, first, stop)) return 0;
         timed.Completed();
-        if (collectMemoEnabled()) threadHintMemo.entries[threadHintMemo.next++ % threadHintMemo.entries.size()] = {first, stop, epoch, unwatched};
+        if (collectMemoEnabled()) threadHintMemo().entries[threadHintMemo().next++ % threadHintMemo().entries.size()] = {first, stop, epoch, unwatched};
     }
     return tracker.newestHint(first, stop);
 #else
@@ -2309,7 +2347,7 @@ struct HolderSiteStats {
 };
 
 struct HolderBlocking {
-    std::mutex mutex;
+    AgcDriver::Mutex mutex;
     std::array<HolderSiteStats, GpuLockSiteCount> sites{};
     std::size_t waiters = 0;
     std::size_t site = 0;
@@ -2337,7 +2375,7 @@ struct HolderPhaseRow {
     std::uint64_t drawBlockedNs = 0;
 };
 struct HolderPhases {
-    std::mutex mutex;
+    AgcDriver::Mutex mutex;
     std::array<std::array<std::array<HolderPhaseRow, HolderPhaseCount>, GpuLockSiteCount>, HolderColumns> rows{};
     std::size_t holder = 0, site = 0, phase = 0, waiters = 0, drawWaiters = 0;
     bool active = false;
@@ -2533,25 +2571,27 @@ std::string WaitedBehindReport(const HolderMatrixValues& waited) {
 
 }
 
-// The owner token is a thread-local's address: unique per live thread and free to read.
 namespace {
-const void* ThreadToken() {
-    thread_local char token;
-    return &token;
-}
-
 std::atomic<std::uint64_t> gpuHoldSerial{0};
 }
 
+void GpuMutexType::enter() {
+    if (!HeldByThisThread()) LockSpinning(mutex, HandoffSpinWindow());
+}
+
+bool GpuMutexType::tryEnter() {
+    return HeldByThisThread() || mutex.try_lock();
+}
+
 void GpuMutexType::acquired() {
-    owner.store(ThreadToken(), std::memory_order_relaxed);
+    owner.store(CurrentThreadToken(), std::memory_order_relaxed);
     if (++depth == 1) gpuHoldSerial.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool GpuMutexType::try_lock() {
     auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
     if (!GpuLockProfiled()) {
-        if (!mutex.try_lock()) return false;
+        if (!tryEnter()) return false;
         acquired();
         if (depth == 1 && trace != nullptr) TraceHoldBegan(static_cast<std::size_t>(GpuLockSite::Try), trace);
         return true;
@@ -2561,7 +2601,7 @@ bool GpuMutexType::try_lock() {
     auto& stats = LockStats();
     const auto tagged = std::exchange(stats.nextSite, GpuLockSite::Other);
     ++stats.tries;
-    if (!mutex.try_lock()) {
+    if (!tryEnter()) {
         ++stats.triesFailed;
         return false;
     }
@@ -2825,8 +2865,8 @@ void GpuMutexType::unlock() {
         owner.store(nullptr, std::memory_order_relaxed);
         // Still the holder here: the hold ends when the mutex is given up, not before.
         if (GpuHoldProfiled()) EndHold();
+        mutex.unlock();
     }
-    mutex.unlock();
     // After the release, so what the hook does (destroying a batch's kept objects) is neither part
     // of the hold nor waited for by the next holder.
     if (outermost) {
@@ -2836,7 +2876,7 @@ void GpuMutexType::unlock() {
 }
 
 bool GpuMutexType::HeldByThisThread() const {
-    return owner.load(std::memory_order_relaxed) == ThreadToken();
+    return owner.load(std::memory_order_relaxed) == CurrentThreadToken();
 }
 
 std::uint32_t GpuMutexType::DepthOnThisThread() const {
@@ -2856,12 +2896,12 @@ void GpuMutexType::lock() {
     if (!GpuLockProfiled()) {
         std::size_t site = 0;
         if (threadTrace == nullptr) {
-            LockSpinning(mutex, HandoffSpinWindow());
+            enter();
         } else {
             site = static_cast<std::size_t>(std::exchange(LockStats().nextSite, GpuLockSite::Other));
-            if (!mutex.try_lock()) {
+            if (!tryEnter()) {
                 const auto start = std::chrono::steady_clock::now();
-                LockSpinning(mutex, HandoffSpinWindow());
+                enter();
                 threadTrace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, std::chrono::steady_clock::now());
             }
         }
@@ -2875,14 +2915,14 @@ void GpuMutexType::lock() {
     ++stats.siteAcquisitions[site];
     // An uncontended (or recursive) acquisition costs no clock reads for the wait; only a wait is
     // timed. The hold timer (outermost acquisitions only) starts once the mutex is held.
-    if (!mutex.try_lock()) {
+    if (!tryEnter()) {
         const bool holders = GpuHoldProfiled();
         HolderMatrixValues before{};
         if (holders) Holders().Snapshot(before);
         const auto start = std::chrono::steady_clock::now();
         {
             const HolderWait waiter{holders, site};
-            LockSpinning(mutex, HandoffSpinWindow());
+            enter();
         }
         acquired();
         const auto now = std::chrono::steady_clock::now();
@@ -2988,19 +3028,19 @@ std::uint64_t ThreadCollectedBytes() {
 }
 
 std::uint64_t ThreadSummarySkips() {
-    return threadSummarySkips;
+    return threadSummarySkips();
 }
 
 std::uint64_t ThreadSummaryWalkedBytes() {
-    return threadSummaryWalkedBytes;
+    return threadSummaryWalkedBytes();
 }
 
 std::uint64_t ThreadSkippedWalks() {
-    return MemoryProfiled() ? threadSkippedWalks : 0;
+    return MemoryProfiled() ? threadSkippedWalks() : 0;
 }
 
 std::uint64_t ThreadSkippedBytes() {
-    return MemoryProfiled() ? threadSkippedBytes : 0;
+    return MemoryProfiled() ? threadSkippedBytes() : 0;
 }
 
 std::uint32_t GpuLockThreadTag() {

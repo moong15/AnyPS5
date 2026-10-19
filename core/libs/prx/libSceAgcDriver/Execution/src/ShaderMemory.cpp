@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/ThreadScratch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -762,7 +763,8 @@ bool SameCapturedWords(std::span<const std::uint32_t> left, std::span<const Shar
 std::size_t VouchSharedRegions(std::span<const SharedWords> shared, std::size_t regions, ShaderMemory::PendingWriteQuery pending, std::vector<VouchedRegions>& vouched) {
     vouched.clear();
     if (shared.empty() || regions == 0) return 0;
-    thread_local std::vector<std::pair<const ShaderRecompiler::SrtGuestWords*, bool>>* blocksSlot = nullptr;
+    struct BlocksSlotTag { std::vector<std::pair<const ShaderRecompiler::SrtGuestWords*, bool>>* value = nullptr; };
+    auto& blocksSlot = ThreadScratch<BlocksSlotTag, BlocksSlotTag>().value;
     auto& blocks = ShaderRecompiler::ThreadOwned(blocksSlot);
     blocks.clear();
     auto& totals = CaptureTotals();

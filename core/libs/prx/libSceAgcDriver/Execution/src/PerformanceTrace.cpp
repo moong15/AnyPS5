@@ -150,13 +150,13 @@ std::size_t PerformanceTrace::BufferBytes() {
 }
 
 void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
-    if (!Configured() || local != nullptr) return;
+    if (!Configured() || Local::Get() != nullptr) return;
     const bool windowed = std::getenv("APS5_TRACE_FRAMES") != nullptr || std::getenv("APS5_TRACE_SECONDS") != nullptr;
     if (windowed && capacity == TraceThread::DefaultCapacity) capacity = TraceThread::ParseCapacity(std::getenv("APS5_TRACE_EVENTS"));
     auto bound = std::make_unique<TraceThread>(name, presentCount, windowed ? capacity : 0, buffering);
     auto& state = session();
     std::lock_guard lock(state.mutex);
-    local = bound.get();
+    Local::Set(bound.get());
     state.threads.push_back(std::move(bound));
 }
 
@@ -262,7 +262,7 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
     std::size_t presenter = 0;
     state.windowBase.resize(state.threads.size());
     for (std::size_t index = 0; index < state.threads.size(); ++index) {
-        if (state.threads[index].get() == local) presenter = index;
+        if (state.threads[index].get() == Local::Get()) presenter = index;
         snapshots.push_back(state.threads[index]->Collect());
         snapshots.back().totals = TraceFormat::Since(snapshots.back().totals, state.windowBase[index]);
     }

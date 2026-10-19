@@ -1,3 +1,4 @@
+#include "prx/libc/include/HostMutex.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
 #include <atomic>
@@ -32,7 +33,7 @@ namespace GuestAllocations {
 namespace {
 
 struct Registry {
-    std::mutex mutex;
+    HostMutex mutex;
     std::map<std::uint64_t, std::shared_ptr<const Range>> ranges;
     bool mainImageRegistered = false;
     std::map<std::uintptr_t, std::uintptr_t> registeredImages;
@@ -68,7 +69,7 @@ void require(bool condition, const char* reason) {
 // invalidator once the generation has moved on, so a cache that observed the old state meanwhile
 // notices either way.
 struct MutationState {
-    std::unique_lock<std::mutex> lock;
+    std::unique_lock<HostMutex> lock;
     std::vector<std::pair<std::uintptr_t, std::size_t>> changed;
     std::vector<std::pair<std::uintptr_t, std::size_t>> gpuMapped;
 };
@@ -129,7 +130,7 @@ bool backWritableImageAnonymously() {
 }
 
 void* GuestAllocationsBegin_nid_postfix() {
-    auto* state = new MutationState{std::unique_lock<std::mutex>(registry().mutex), {}};
+    auto* state = new MutationState{std::unique_lock<HostMutex>(registry().mutex), {}};
     registry().readableLease.reset();
     registry().allLease.reset();
     return state;

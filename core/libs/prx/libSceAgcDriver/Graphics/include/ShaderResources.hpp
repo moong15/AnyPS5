@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_SHADERRESOURCES_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_SHADERRESOURCES_HPP
 
+#include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -119,7 +120,7 @@ private:
     PFN_vkDestroyDescriptorPool destroyPool;
     PFN_vkResetDescriptorPool resetPool;
     PFN_vkFreeDescriptorSets freeDescriptorSets = nullptr;
-    mutable std::mutex mutex;
+    mutable AgcDriver::Mutex mutex;
     std::map<std::vector<std::uint32_t>, VkDescriptorSetLayout> layouts;
     struct Pool {
         VkDescriptorPool handle = VK_NULL_HANDLE;
@@ -758,7 +759,7 @@ private:
     void noteUse(std::uint64_t hash);
     static bool FastKeyHash();
     static std::uint64_t hashKey(const Key& key);
-    mutable std::mutex mutex;
+    mutable AgcDriver::Mutex mutex;
     Entries entries;
     Index index;
     std::size_t capacity = 0;

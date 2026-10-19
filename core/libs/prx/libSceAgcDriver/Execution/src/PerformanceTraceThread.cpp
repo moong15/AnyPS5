@@ -3,7 +3,6 @@
 namespace AgcDriver {
 
 std::atomic<bool> PerformanceTrace::recording{false};
-thread_local TraceThread* PerformanceTrace::local = nullptr;
 
 }
 
@@ -12,5 +11,5 @@ extern "C" bool AgcDriverTraceRecording_nid_postfix() {
 }
 
 extern "C" AgcDriver::TraceThread* AgcDriverTraceThread_nid_postfix() {
-    return AgcDriver::PerformanceTrace::local;
+    return AgcDriver::PerformanceTrace::Local::Get();
 }

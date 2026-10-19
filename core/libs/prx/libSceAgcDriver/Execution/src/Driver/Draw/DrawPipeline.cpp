@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/ThreadScratch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -27,7 +28,10 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point since) {
 
 // HeldReads: the read ranges the queue holds, and how often a store asked about one (hits are
 // deferred write-backs that waited for a queued index read).
-thread_local const std::vector<DrawPipeline::Range>* committingOrderedReads = nullptr;
+const std::vector<DrawPipeline::Range>*& committingOrderedReads() {
+    struct Value { const std::vector<DrawPipeline::Range>* value = nullptr; };
+    return ThreadScratch<Value, Value>().value;
+}
 std::atomic<std::uint64_t> heldReadRanges{0};
 std::atomic<std::uint64_t> heldReadQueries{0};
 std::atomic<std::uint64_t> heldReadHits{0};
@@ -71,7 +75,8 @@ std::size_t DrawPipeline::QueuedItems() {
 }
 
 bool& DrawPipeline::Active() {
-    static thread_local bool active = false;
+    struct ActiveTag { bool value = false; };
+    auto& active = ThreadScratch<ActiveTag, ActiveTag>().value;
     return active;
 }
 
@@ -100,7 +105,8 @@ void DrawPipeline::BumpEpoch(std::uint32_t queue) {
 void DrawPipeline::FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken) {
     static const bool scoped = std::getenv("APS5_NO_TARGET_WALK_SKIP") == nullptr;
     if (!scoped) {
-        static thread_local std::uint64_t followed = 0;
+        struct FollowedTag { std::uint64_t value = 0; };
+        auto& followed = ThreadScratch<FollowedTag, FollowedTag>().value;
         if (followed == sharedToken) return;
         followed = sharedToken;
         GuestMemory::BumpCollectEpoch();
@@ -109,8 +115,10 @@ void DrawPipeline::FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, s
     // The scope belongs to the item being committed, not to the last token that moved: coming back
     // to a queue whose ordering point has not moved must return to that queue's scope, or its
     // items would reuse whichever queue's scope ran in between.
-    static thread_local std::size_t scope = DrawPipeline::QueueCount;
-    static thread_local std::uint64_t token = 0;
+    struct ScopeTag { std::size_t value = DrawPipeline::QueueCount; };
+    auto& scope = ThreadScratch<ScopeTag, ScopeTag>().value;
+    struct TokenTag { std::uint64_t value = 0; };
+    auto& token = ThreadScratch<TokenTag, TokenTag>().value;
     const auto slot = std::min<std::size_t>(queue, DrawPipeline::QueueCount - 1);
     if (scope == slot && token == queueToken) return;
     scope = slot;
@@ -221,7 +229,7 @@ void DrawPipeline::run() {
             committerWaiting = false;
             if (items.empty()) break;
             commit = stopped ? nullptr : &items.front().commit;
-            committingOrderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
+            committingOrderedReads() = items.front().orderedReads ? &items.front().reads : nullptr;
         }
         auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
         const auto outerSite = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(GuestMemory::GpuLockSite::Other) : GuestMemory::GpuLockSite::Other;
@@ -240,7 +248,7 @@ void DrawPipeline::run() {
         } catch (...) {
             fatal = std::current_exception();
         }
-        committingOrderedReads = nullptr;
+        committingOrderedReads() = nullptr;
         const auto site = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(outerSite) : GuestMemory::GpuLockSite::Other;
         if (trace != nullptr) trace->Add("Driver.Commit", commitStageName(site), start, std::chrono::steady_clock::now());
         const auto spent = elapsedNs(start);
@@ -389,7 +397,7 @@ bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
     const bool fast = heldReadFastPath();
     if (bytes == 0 || !(fast ? ordered : std::getenv("APS5_NO_QUEUED_DRAW_READ_ORDER") == nullptr)) return false;
     const auto end = address + bytes;
-    if (committingOrderedReads != nullptr && std::any_of(committingOrderedReads->begin(), committingOrderedReads->end(), [&](const Range& range) { return range.first <= address && end <= range.second; })) return false;
+    if (committingOrderedReads() != nullptr && std::any_of(committingOrderedReads()->begin(), committingOrderedReads()->end(), [&](const Range& range) { return range.first <= address && end <= range.second; })) return false;
     auto& pipeline = Queue0();
     if (fast && pipeline.queuedReads.load(std::memory_order_acquire) == 0) {
         if (profile) heldReadsUnlocked.fetch_add(1, std::memory_order_relaxed);

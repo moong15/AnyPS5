@@ -1,3 +1,5 @@
+#include "prx/libSceAgcDriver/Execution/include/ThreadScratch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
@@ -170,8 +172,8 @@ struct CmaskProof {
     std::uint64_t generation = 0;
 };
 
-std::mutex& cmaskProofMutex() {
-    static std::mutex mutex;
+AgcDriver::Mutex& cmaskProofMutex() {
+    static AgcDriver::Mutex mutex;
     return mutex;
 }
 
@@ -420,7 +422,7 @@ enum DrawKind : std::size_t { KindRecipeHit, KindTemplateHit, KindBuild, KindBda
 constexpr std::array<const char*, KindCount> DrawKindNames{"recipe hit", "template hit", "build", "BDA"};
 
 struct DrawProfile {
-    std::mutex mutex;
+    AgcDriver::Mutex mutex;
     std::array<double, KindCount> kindUs{};
     std::array<std::uint64_t, KindCount> kindCounts{};
     std::uint64_t fullScissorLookups = 0;
@@ -746,8 +748,8 @@ bool ValidationKey(const Context& context, std::span<const CompiledShader> shade
     return keyed;
 }
 
-std::mutex& validationMutex() {
-    static std::mutex mutex;
+AgcDriver::Mutex& validationMutex() {
+    static AgcDriver::Mutex mutex;
     return mutex;
 }
 
@@ -757,7 +759,8 @@ std::map<std::vector<std::uint64_t>, std::string>& validationFailures() {
 }
 
 std::vector<std::uint64_t>& validationKeyScratch() {
-    thread_local std::vector<std::uint64_t>* keySlot = nullptr;
+    struct KeySlotTag { std::vector<std::uint64_t>* value = nullptr; };
+    auto& keySlot = ThreadScratch<KeySlotTag, KeySlotTag>().value;
     auto& key = ShaderRecompiler::ThreadOwned(keySlot);
     key.clear();
     return key;
@@ -1402,7 +1405,7 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
         if (resident != nullptr) materializeRegisterClear(context, color, *resident);
         targetLookupScope.Phase(0);
     } catch (const std::exception& error) {
-        static std::mutex reportMutex;
+        static AgcDriver::Mutex reportMutex;
         static std::set<std::uint64_t> reported;
         std::lock_guard lock(reportMutex);
         if (reported.insert(color.address).second) std::fprintf(stderr, "[gpu] color target 0x%llx stays non-resident: %s\n", static_cast<unsigned long long>(color.address), error.what());
@@ -2218,7 +2221,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         std::unique_ptr<Buffer> dump;
     };
     const int dumpLimit = DumpTargetLimit();
-    static std::mutex dumpMutex;
+    static AgcDriver::Mutex dumpMutex;
     static std::map<std::uint64_t, int> dumped;
     std::vector<TargetBinding> targets(state.colors.size());
     std::vector<VkImageView> targetViews;
