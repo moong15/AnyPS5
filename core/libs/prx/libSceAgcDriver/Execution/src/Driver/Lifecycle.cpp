@@ -296,6 +296,10 @@ bool& Driver::onWorkerThread() {
 
 namespace AgcDriver {
 
+void FlushAsyncLog_nid_no_patch() {
+    AsyncLog::Get().Flush();
+}
+
 std::unique_lock<std::mutex> HoldAsyncLog() {
     return AsyncLog::Get().Hold();
 }

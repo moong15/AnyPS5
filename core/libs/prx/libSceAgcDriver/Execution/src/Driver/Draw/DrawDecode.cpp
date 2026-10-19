@@ -123,10 +123,11 @@ void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const 
     }
 }
 
-std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Submission& submission) {
+std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Submission& submission, const Graphics::Context& context) {
     auto product = std::make_shared<DrawDecode>();
     product->targetStateKey = DrawTargetStateKey(queue);
     product->state = Graphics::DecodeState(queue, VertexWorkgroupRequired(queue, *submission.shaders));
+    Graphics::ApplyDepthRemap(context, product->state);
     DecodeGraphicsPrograms(*product, queue, *submission.shaders, false, true);
     product->pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product->state), Graphics::PixelProgramSkipped(queue));
     product->pixel.targetExportPacking = Graphics::ExportPackings(product->state);
@@ -148,11 +149,11 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     return product;
 }
 
-void Driver::resolveDrawDecode(const QueueState& queue, const Submission& submission, std::shared_ptr<const DrawDecode>& decode, bool registerKey, std::uint64_t drawKey, bool profile) {
+void Driver::resolveDrawDecode(const QueueState& queue, const Submission& submission, const Graphics::Context& context, std::shared_ptr<const DrawDecode>& decode, bool registerKey, std::uint64_t drawKey, bool profile) {
     if (decode == nullptr || verifyDrawRecipe()) {
         std::vector<Graphics::RegisterRead> readLog;
         const Graphics::RegisterReadLogScope logScope(verifyDrawRecipe() && registerKey ? &readLog : nullptr);
-        auto fresh = decodeDraw(queue, submission);
+        auto fresh = decodeDraw(queue, submission, context);
         if (verifyDrawRecipe() && registerKey) {
             std::uint64_t facadeMismatches = 0;
             for (const auto read : readLog) {

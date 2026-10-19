@@ -11,12 +11,14 @@
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 
 #include <mbedtls/asn1.h>
+#include <mbedtls/base64.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
 #include <mbedtls/md.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/oid.h>
+#include <mbedtls/pem.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/platform.h>
 #include <mbedtls/platform_util.h>
@@ -1053,8 +1055,26 @@ int APS5_VABI sceSslGetFingerprint(int sslCtxId, void* sslCert, int hashType, un
     return 0;
 }
 
-int APS5_VABI sceSslGetPem(void) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceSslGetPem(int sslCtxId, void* sslCert, char* buf, std::size_t* bufLen) {
+    if (!bufLen) return ErrorInvalidArg;
+    std::lock_guard lock(State().mutex);
+    auto& context = GetContext(sslCtxId);
+    const auto* crt = RequireCertificate(__func__, sslCtxId, sslCert);
+    PoolScope scope(context.pool);
+    std::size_t required = 0;
+    const auto encode = [&](unsigned char* output, std::size_t capacity, std::size_t* written) {
+        return mbedtls_pem_write_buffer("-----BEGIN CERTIFICATE-----\n", "-----END CERTIFICATE-----\n", crt->raw.p, crt->raw.len, output, capacity, written);
+    };
+    const int sizing = encode(nullptr, 0, &required);
+    if (sizing != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) CheckBackend(sizing, "SSL PEM sizing failed");
+    if (!buf) {
+        *bufLen = required;
+        return 0;
+    }
+    if (*bufLen < required) throw std::length_error("SSL PEM buffer is too small");
+    std::size_t written = 0;
+    CheckBackend(encode(reinterpret_cast<unsigned char*>(buf), required, &written), "SSL PEM encoding failed");
+    *bufLen = written;
     return 0;
 }
 

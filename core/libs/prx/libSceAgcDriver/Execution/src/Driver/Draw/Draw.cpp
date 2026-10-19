@@ -12,6 +12,7 @@
 #include "Optimization/ResourceProgram.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -203,7 +204,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             if (program.merged) InitializeMerged(queue, program, program.mergedPointer, program.mergedPointerRequired, false);
         }
         if (verifyDrawDataHits()) {
-            const auto full = decodeDraw(queue, submission);
+            const auto full = decodeDraw(queue, submission, localDevice->graphicsContext());
             if (!sameDecode(*refreshed, *full)) {
                 std::size_t differing = 0;
                 while (differing < full->programs.size() && differing < refreshed->programs.size() && full->programs[differing].userData == refreshed->programs[differing].userData) ++differing;
@@ -219,6 +220,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             auto current = std::make_shared<DrawDecode>(*decode);
             current->targetStateKey = DrawTargetStateKey(queue);
             current->state = Graphics::DecodeState(queue, VertexWorkgroupRequired(queue, *submission.shaders));
+            Graphics::ApplyDepthRemap(localDevice->graphicsContext(), current->state);
             for (const auto& patch : userPatches) current->programs[patch.program].userData[patch.index] = patch.value;
             decode = std::move(current);
         } catch (const std::exception&) {
@@ -230,7 +232,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             targetRelocated = false;
         }
     }
-    resolveDrawDecode(queue, submission, decode, registerKey, drawKey, profile);
+    resolveDrawDecode(queue, submission, localDevice->graphicsContext(), decode, registerKey, drawKey, profile);
     const auto& graphics = decode->state;
     if (traceIndex) AgcDriver::indexTrace("[index-base] graphics serial=%llu queue=0x%x cursor=%zu topology=%u rectList=%d mesh=%d tessellation=%d target=0x%llx extent=%ux%u scissor=%d,%d,%u,%u\n", static_cast<unsigned long long>(submission.serial), submission.queue, static_cast<std::size_t>(packet.data() - submission.commands.data()), static_cast<unsigned>(graphics.topology), graphics.rectList ? 1 : 0, graphics.stages.mesh ? 1 : 0, graphics.stages.tessellation ? 1 : 0, static_cast<unsigned long long>(graphics.color.address), graphics.renderExtent.width, graphics.renderExtent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.scissor.extent.width, graphics.scissor.extent.height);
     auto pixel = decode->pixel;
@@ -305,6 +307,9 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         decodeReads[i].clear();
         vertexInfos[i] = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, &decodeReads[i], false, 8u - program.firstUserSgpr);
         if (vertexInfos[i]) vertexInfos[i]->paClVsOutCntl = PositionExportLayout(program.snapshot.get(), program.codeOffset, program.binary.code, readRegister(queue.context, 0x207), program.tailContinuation.get()) | graphics.layerExports;
+        if (vertexInfos[i]) {
+            vertexInfos[i]->depthRemapMode = graphics.depthRemap.mode;
+        }
     };
     if (!registerKey) {
         for (std::size_t i = 0; i < programs.size(); ++i) decodeVertexInfo(i);

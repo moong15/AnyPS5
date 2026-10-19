@@ -229,6 +229,22 @@ void UniformSliceDecodes(AgcDriver::VulkanDevice& device, const Shaders& shaders
     Require(Draw(device, shaders, second, {}) == 0u, "the depth drawn into slice 1 after the clear was lost");
 }
 
+void MixedClearedSliceClears(AgcDriver::VulkanDevice& device, const Shaders& shaders) {
+    auto& htile = NewBlock();
+    const Surface first{NewBlock().Address(), 0, htile.Address(), false, VK_FORMAT_D32_SFLOAT, 0};
+    const Surface second{NewBlock().Address(), 0, htile.Address() + HtileFillBytes, false, VK_FORMAT_D32_SFLOAT, 1};
+    Require(Draw(device, shaders, first, {.depthWrite = true}) == Covered, "slice 0 was not cleared to DB_DEPTH_CLEAR (1.0)");
+    Require(Draw(device, shaders, second, {.depthWrite = true}) == Covered, "slice 1 was not cleared to DB_DEPTH_CLEAR (1.0)");
+    Require(Draw(device, shaders, second, {}) == 0u, "the depth drawn into slice 1 was lost");
+    auto* sliceOne = WordsAt(htile, HtileFillBytes);
+    for (std::uint32_t word = 0; word < HtileFillBytes / 4u; ++word) sliceOne[word] = (word / 7u) % 2u == 0u ? 0u : 0xfffffff0u;
+    AgcDriver::GuestMemory::MarkWritten(htile.Address() + HtileFillBytes, HtileFillBytes);
+    Require(Draw(device, shaders, second, {.depthWrite = true}) == Covered, "slice 1 did not take the clear from HTILE words that all have ZMask 0 but different Min/Max Z");
+    Require(AllWords(sliceOne, 0xfffc000fu), "slice 1's bind did not store its cleared HTILE back as expanded");
+    Require(AllWords(WordsAt(htile, 0), 0xfffc000fu), "a bind of slice 1 changed slice 0's HTILE");
+    Require(Draw(device, shaders, second, {}) == 0u, "the depth drawn into slice 1 after the clear was lost");
+}
+
 void RecordedFillClearsWithoutWait(AgcDriver::VulkanDevice& device, const Shaders& shaders) {
     const VkStencilOpState writeFive{VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, 5u};
     const VkStencilOpState equalZero{VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 0xffu, 0u, 0u};
@@ -251,22 +267,6 @@ void RecordedFillClearsWithoutWait(AgcDriver::VulkanDevice& device, const Shader
         if (stencil) Require(Draw(device, shaders, surface, {.depthTest = false, .stencilTest = true, .stencil = equalZero}) == Covered, "a depth and stencil fast clear fill recorded over the HTILE did not clear the stencil to 0");
         Require(Draw(device, shaders, surface, {}) == 0u, "the depth drawn after the clear from the recorded fill was cleared again");
     }
-}
-
-void MixedClearedSliceClears(AgcDriver::VulkanDevice& device, const Shaders& shaders) {
-    auto& htile = NewBlock();
-    const Surface first{NewBlock().Address(), 0, htile.Address(), false, VK_FORMAT_D32_SFLOAT, 0};
-    const Surface second{NewBlock().Address(), 0, htile.Address() + HtileFillBytes, false, VK_FORMAT_D32_SFLOAT, 1};
-    Require(Draw(device, shaders, first, {.depthWrite = true}) == Covered, "slice 0 was not cleared to DB_DEPTH_CLEAR (1.0)");
-    Require(Draw(device, shaders, second, {.depthWrite = true}) == Covered, "slice 1 was not cleared to DB_DEPTH_CLEAR (1.0)");
-    Require(Draw(device, shaders, second, {}) == 0u, "the depth drawn into slice 1 was lost");
-    auto* sliceOne = WordsAt(htile, HtileFillBytes);
-    for (std::uint32_t word = 0; word < HtileFillBytes / 4u; ++word) sliceOne[word] = (word / 7u) % 2u == 0u ? 0u : 0xfffffff0u;
-    AgcDriver::GuestMemory::MarkWritten(htile.Address() + HtileFillBytes, HtileFillBytes);
-    Require(Draw(device, shaders, second, {.depthWrite = true}) == Covered, "slice 1 did not take the clear from HTILE words that all have ZMask 0 but different Min/Max Z");
-    Require(AllWords(sliceOne, 0xfffc000fu), "slice 1's bind did not store its cleared HTILE back as expanded");
-    Require(AllWords(WordsAt(htile, 0), 0xfffc000fu), "a bind of slice 1 changed slice 0's HTILE");
-    Require(Draw(device, shaders, second, {}) == 0u, "the depth drawn into slice 1 after the clear was lost");
 }
 
 void DepthOnlyFillKeepsStencil(AgcDriver::VulkanDevice& device, const Shaders& shaders) {
