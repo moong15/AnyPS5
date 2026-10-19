@@ -10,6 +10,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <array>
 #include <map>
@@ -25,6 +26,14 @@
 #endif
 
 namespace {
+
+bool HostMemoryLedgerNoHeapWalk() {
+    static const bool enabled = [] {
+        const auto* value = std::getenv("APS5_HOST_MEMORY_LEDGER_NO_HEAPWALK");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
 
 std::uint64_t ProcessPrivateBytes() {
 #ifdef _WIN32
@@ -62,6 +71,7 @@ struct ProcessRegions {
     std::size_t walkEntries = 0;
     std::size_t walkFailed = 0;
     std::size_t nonheapGroups = 0;
+    std::uint64_t groupBytes = 0;
     std::uint64_t nonheapBytes = 0;
     std::array<std::size_t, 6> bucketCounts{};
     std::array<std::uint64_t, 6> bucketBytes{};
@@ -203,9 +213,9 @@ ProcessRegions ProcessCommittedRegions() {
             if (value.committed > result.largestHeap.committed) result.largestHeap = value;
         }
     }
-    RefreshHeapRanges(heapRanges, heaps);
+    if (!HostMemoryLedgerNoHeapWalk()) RefreshHeapRanges(heapRanges, heaps);
     result.walkMs = heapRanges.ms;
-    result.walkAge = std::chrono::duration<double>(std::chrono::steady_clock::now() - heapRanges.sampled).count();
+    result.walkAge = HostMemoryLedgerNoHeapWalk() ? 0 : std::chrono::duration<double>(std::chrono::steady_clock::now() - heapRanges.sampled).count();
     result.walkEntries = heapRanges.entries;
     result.walkFailed = heapRanges.failed;
     const auto count = KernelGuestMemoryRanges_nid_no_patch(nullptr, 0);
@@ -249,10 +259,15 @@ ProcessRegions ProcessCommittedRegions() {
         cursor = end;
     }
     result.heapBytes = result.privateBytes - result.guestBytes - result.nonheapBytes;
+    if (HostMemoryLedgerNoHeapWalk()) {
+        result.heapBytes = result.processHeap.committed + result.crtHeap.committed + result.otherHeap.committed;
+        result.nonheapBytes = result.privateBytes - result.guestBytes > result.heapBytes ? result.privateBytes - result.guestBytes - result.heapBytes : 0;
+    }
     constexpr std::array<std::uint64_t, 5> limits{65536, 1048576, 16777216, 67108864, 268435456};
     for (const auto& [base, reservation] : reservations) {
         if (reservation.committed == 0) continue;
         ++result.nonheapGroups;
+        result.groupBytes += reservation.committed;
         const auto bucket = std::upper_bound(limits.begin(), limits.end(), reservation.committed) - limits.begin();
         ++result.bucketCounts[bucket];
         result.bucketBytes[bucket] += reservation.committed;
@@ -337,11 +352,13 @@ void ReportHostMemory(std::FILE* output, std::span<const std::shared_ptr<AgcDriv
         regions.crtSeparate ? "separate" : "process", regions.crtHeap.allocated / mib, regions.crtHeap.committed / mib,
         regions.otherHeaps, regions.otherHeap.allocated / mib, regions.otherHeap.committed / mib, regions.largestHeap.allocated / mib, regions.largestHeap.committed / mib,
         regions.walkMs, regions.walkEntries, regions.walkAge, regions.walkFailed, regions.heapBytes / mib,
-        heapOther / mib, regions.nonheapBytes / mib, regions.nonheapGroups, regions.nonheapBytes / mib);
+        heapOther / mib, regions.nonheapBytes / mib, regions.nonheapGroups, regions.groupBytes / mib);
     constexpr std::array<const char*, 6> labels{"<64K", "64K-1M", "1-16M", "16-64M", "64-256M", ">=256M"};
     for (std::size_t i = 0; i < labels.size(); ++i) std::fprintf(output, "; nh %s %zu %.3f", labels[i], regions.bucketCounts[i], regions.bucketBytes[i] / mib);
     std::fprintf(output, "; nh top");
     for (const auto& region : regions.largestRegions) std::fprintf(output, " %.3f/%.3f/0x%lx", region.committed / mib, region.reserved / mib, region.protect);
+    std::fprintf(output, "; heapwalk %s", HostMemoryLedgerNoHeapWalk() ? "off" : "on");
+    ReportVulkanMemory_nid_no_patch(output);
     std::fprintf(output, "\n");
 }
 

@@ -20,6 +20,12 @@
 #include <mutex>
 #include <string>
 
+namespace AgcDriver {
+struct VulkanDeviceTestAccess {
+    static Graphics::Context Context(const VulkanDevice& device) { return device.graphicsContext(); }
+};
+}
+
 namespace {
 
 namespace Graphics = AgcDriver::Graphics;
@@ -88,10 +94,53 @@ bool Fill(AgcDriver::VulkanDevice& device, std::uint64_t address) {
     return filled;
 }
 
+double MappedMiB() {
+    const auto close = [](std::FILE* file) { std::fclose(file); };
+    std::unique_ptr<std::FILE, decltype(close)> output(std::tmpfile(), close);
+    Require(output != nullptr, "mapped ledger: tmpfile failed");
+    AgcDriver::ReportVulkanMemory_nid_no_patch(output.get());
+    std::rewind(output.get());
+    char line[8192]{};
+    Require(std::fgets(line, sizeof(line), output.get()) != nullptr, "mapped ledger: report missing");
+    const auto* field = std::strstr(line, "; mapped dl ");
+    std::array<double, 5> bytes{};
+    Require(field != nullptr && std::sscanf(field, "; mapped dl %lf (%*u) dlhv %lf (%*u) hv %lf (%*u) none %lf (%*u) import %lf", &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4]) == 5, "mapped ledger: report malformed");
+    double total = 0;
+    for (const auto value : bytes) total += value;
+    return total;
+}
+
+void CheckMappedLedger(const AgcDriver::VulkanDevice& device) {
+    if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return;
+    const auto context = AgcDriver::VulkanDeviceTestAccess::Context(device);
+    std::uint32_t type = 0;
+    while (type < context.memory.memoryTypeCount && !(context.memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) ++type;
+    Require(type < context.memory.memoryTypeCount, "mapped ledger: no host-visible memory type");
+    VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    info.allocationSize = MiB;
+    info.memoryTypeIndex = type;
+    struct Memory {
+        Graphics::Context context;
+        VkDeviceMemory handle = VK_NULL_HANDLE;
+        ~Memory() { if (handle != VK_NULL_HANDLE) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, handle, nullptr); }
+    } memory{context};
+    Graphics::Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &info, nullptr, &memory.handle), "mapped ledger allocation");
+    const auto before = MappedMiB();
+    void* data = nullptr;
+    Graphics::Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory.handle, 4096, VK_WHOLE_SIZE, 0, &data), "mapped ledger map");
+    const auto during = MappedMiB();
+    const double expected = (info.allocationSize - 4096) / static_cast<double>(MiB);
+    Require(during - before > expected - 0.0011 && during - before < expected + 0.0011, "mapped ledger: whole size minus offset not recorded");
+    context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")(context.device, memory.handle);
+    const auto after = MappedMiB();
+    Require(after == before, "mapped ledger: bytes remained after unmap");
+}
+
 Outcome ClearingDropsImports() {
     GuestBlock guest(BlockBytes);
     auto device = OpenVulkanTestDevice();
     if (!device) return Outcome::NoDevice;
+    CheckMappedLedger(*device);
     if (!Fill(*device, guest.Address() + WindowBytes)) return Outcome::NoImport;
     const auto probe = Probe(*device);
     Require(Graphics::HostImportCovers(probe, guest.Address() + WindowBytes, ProbeBytes), "host import windows: the second window of " + Hex(guest.Address()) + " is not imported");

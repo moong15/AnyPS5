@@ -84,10 +84,15 @@ struct LedgerDevice {
     PFN_vkCreateComputePipelines compute;
     PFN_vkDestroyPipeline destroyPipeline;
     PFN_vkDestroyDevice destroyDevice;
+    std::function<std::optional<VkPhysicalDeviceMemoryBudgetPropertiesEXT>()> budget;
     std::mutex mutex;
     struct Allocation {
         VkDeviceSize bytes;
         unsigned heap;
+        std::uint32_t type;
+        unsigned kind;
+        bool mapped = false;
+        VkDeviceSize mappedBytes = 0;
         bool imported;
         std::optional<std::pair<std::uintptr_t, std::uintptr_t>> hostRange;
     };
@@ -117,7 +122,11 @@ VKAPI_ATTR VkResult VKAPI_CALL LedgerAllocateMemory(VkDevice device, const VkMem
     if (result == VK_SUCCESS) {
         const auto index = state->properties.memoryTypes[info->memoryTypeIndex].heapIndex;
         const unsigned heap = (state->properties.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 ? 0 : 1;
-        LedgerDevice::Allocation allocation{info->allocationSize, heap, false, std::nullopt};
+        LedgerDevice::Allocation allocation{info->allocationSize, heap, info->memoryTypeIndex, 0, false, 0, false, std::nullopt};
+        const auto flags = state->properties.memoryTypes[info->memoryTypeIndex].propertyFlags;
+        const bool dl = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        const bool hv = (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+        allocation.kind = dl ? (hv ? 1 : 0) : (hv ? 2 : 3);
         for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
 #ifdef VK_EXT_external_memory_host
             if (next->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) {
@@ -166,6 +175,44 @@ VKAPI_ATTR void VKAPI_CALL LedgerFreeMemory(VkDevice device, VkDeviceMemory memo
         Graphics::vulkanHeapBytes[allocation->heap].fetch_sub(allocation->bytes, std::memory_order_relaxed);
         Graphics::vulkanHeapAllocations[allocation->heap].fetch_sub(1, std::memory_order_relaxed);
     }
+}
+
+void LedgerMapping(const std::shared_ptr<LedgerDevice>& state, VkDeviceMemory memory, bool mapped, VkDeviceSize offset = 0, VkDeviceSize size = 0) {
+    std::lock_guard lock(state->mutex);
+    const auto found = state->allocations.find(memory);
+    if (found == state->allocations.end()) return;
+    auto& allocation = found->second;
+    allocation.mapped = mapped;
+    allocation.mappedBytes = mapped ? (size == VK_WHOLE_SIZE ? allocation.bytes - offset : size) : 0;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL LedgerMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** data) {
+    const auto state = MemoryLedgerDevice(device);
+    const auto result = reinterpret_cast<PFN_vkMapMemory>(state->resolve(device, "vkMapMemory"))(device, memory, offset, size, flags, data);
+    if (result == VK_SUCCESS) LedgerMapping(state, memory, true, offset, size);
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL LedgerUnmapMemory(VkDevice device, VkDeviceMemory memory) {
+    const auto state = MemoryLedgerDevice(device);
+    reinterpret_cast<PFN_vkUnmapMemory>(state->resolve(device, "vkUnmapMemory"))(device, memory);
+    LedgerMapping(state, memory, false);
+}
+
+template<bool TKhr>
+VKAPI_ATTR VkResult VKAPI_CALL LedgerMapMemory2(VkDevice device, const VkMemoryMapInfo* info, void** data) {
+    const auto state = MemoryLedgerDevice(device);
+    const auto result = reinterpret_cast<PFN_vkMapMemory2>(state->resolve(device, TKhr ? "vkMapMemory2KHR" : "vkMapMemory2"))(device, info, data);
+    if (result == VK_SUCCESS) LedgerMapping(state, info->memory, true, info->offset, info->size);
+    return result;
+}
+
+template<bool TKhr>
+VKAPI_ATTR VkResult VKAPI_CALL LedgerUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo* info) {
+    const auto state = MemoryLedgerDevice(device);
+    const auto result = reinterpret_cast<PFN_vkUnmapMemory2>(state->resolve(device, TKhr ? "vkUnmapMemory2KHR" : "vkUnmapMemory2"))(device, info);
+    if (result == VK_SUCCESS) LedgerMapping(state, info->memory, false);
+    return result;
 }
 
 void LedgerCreatedPipelines(const std::shared_ptr<LedgerDevice>& state, std::uint32_t count, const VkPipeline* pipelines) {
@@ -227,6 +274,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL LedgerDeviceProc(VkDevice device, const
     const auto state = MemoryLedgerDevice(device);
     const auto original = state->resolve(device, name);
     if (original == nullptr) return nullptr;
+    if (std::strcmp(name, "vkMapMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerMapMemory);
+    if (std::strcmp(name, "vkUnmapMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerUnmapMemory);
+    if (std::strcmp(name, "vkMapMemory2KHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerMapMemory2<true>);
+    if (std::strcmp(name, "vkUnmapMemory2KHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerUnmapMemory2<true>);
+    if (std::strcmp(name, "vkMapMemory2") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerMapMemory2<false>);
+    if (std::strcmp(name, "vkUnmapMemory2") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerUnmapMemory2<false>);
     if (std::strcmp(name, "vkAllocateMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerAllocateMemory);
     if (std::strcmp(name, "vkFreeMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerFreeMemory);
     if (std::strcmp(name, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(LedgerGraphicsPipelines);
@@ -236,11 +289,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL LedgerDeviceProc(VkDevice device, const
     return original;
 }
 
-PFN_vkGetDeviceProcAddr TrackLedgerDevice(VkDevice device, PFN_vkGetDeviceProcAddr resolve, const VkPhysicalDeviceMemoryProperties& properties) {
+PFN_vkGetDeviceProcAddr TrackLedgerDevice(VkDevice device, PFN_vkGetDeviceProcAddr resolve, const VkPhysicalDeviceMemoryProperties& properties, std::function<std::optional<VkPhysicalDeviceMemoryBudgetPropertiesEXT>()> budget) {
     if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return resolve;
     auto state = std::make_shared<LedgerDevice>();
     state->resolve = resolve;
     state->properties = properties;
+    state->budget = std::move(budget);
     state->allocate = reinterpret_cast<PFN_vkAllocateMemory>(resolve(device, "vkAllocateMemory"));
     state->free = reinterpret_cast<PFN_vkFreeMemory>(resolve(device, "vkFreeMemory"));
     state->graphics = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(resolve(device, "vkCreateGraphicsPipelines"));
@@ -253,6 +307,73 @@ PFN_vkGetDeviceProcAddr TrackLedgerDevice(VkDevice device, PFN_vkGetDeviceProcAd
     return LedgerDeviceProc;
 }
 
+}
+
+void ReportVulkanMemory_nid_no_patch(std::FILE* output) {
+    if (!ShaderRecompiler::HostMemoryLedgerEnabled()) return;
+    struct Total {
+        std::uint64_t bytes = 0;
+        std::size_t count = 0;
+    };
+    struct Snapshot {
+        std::shared_ptr<LedgerDevice> state;
+        std::array<Total, VK_MAX_MEMORY_TYPES> types{};
+    };
+    std::array<Total, 4> classes{};
+    std::array<Total, 5> mapped{};
+    std::vector<Snapshot> snapshot;
+    {
+        auto& devices = MemoryLedgerDevices();
+        std::lock_guard lock(devices.mutex);
+        for (const auto& [device, state] : devices.devices) snapshot.push_back({state});
+    }
+    for (auto& device : snapshot) {
+        std::lock_guard lock(device.state->mutex);
+        for (const auto& [memory, allocation] : device.state->allocations) {
+            const auto kind = allocation.kind;
+            if (!allocation.imported) {
+                classes[kind].bytes += allocation.bytes;
+                ++classes[kind].count;
+                device.types[allocation.type].bytes += allocation.bytes;
+                ++device.types[allocation.type].count;
+            }
+            if (allocation.mapped) {
+                auto& total = mapped[allocation.imported ? 4 : kind];
+                total.bytes += allocation.mappedBytes;
+                ++total.count;
+            }
+        }
+    }
+    constexpr double mib = 1048576.0;
+    constexpr std::array<const char*, 5> labels{"dl", "dlhv", "hv", "none", "import"};
+    std::fprintf(output, "; vk class");
+    for (std::size_t i = 0; i < classes.size(); ++i) std::fprintf(output, " %s %.3f (%zu)", labels[i], classes[i].bytes / mib, classes[i].count);
+    std::fprintf(output, "; mapped");
+    for (std::size_t i = 0; i < mapped.size(); ++i) std::fprintf(output, " %s %.3f (%zu)", labels[i], mapped[i].bytes / mib, mapped[i].count);
+    std::fprintf(output, "; types [");
+    for (std::size_t d = 0; d < snapshot.size(); ++d) {
+        const auto& device = snapshot[d];
+        for (std::uint32_t i = 0; i < device.state->properties.memoryTypeCount; ++i) {
+            const auto& total = device.types[i];
+            if (total.bytes == 0) continue;
+            const auto& type = device.state->properties.memoryTypes[i];
+            std::fprintf(output, " %zu/%u:0x%x h%u %.3f %zu", d, i, type.propertyFlags, type.heapIndex, total.bytes / mib, total.count);
+        }
+    }
+    std::fprintf(output, " ]; budget [");
+    for (std::size_t d = 0; d < snapshot.size(); ++d) {
+        const auto& device = snapshot[d];
+        const auto budget = device.state->budget();
+        if (!budget) {
+            std::fprintf(output, " %zu:unavailable(extension off or device retiring)", d);
+            continue;
+        }
+        for (std::uint32_t h = 0; h < device.state->properties.memoryHeapCount; ++h) {
+            std::fprintf(output, " %zu/%u:%.3f/%.3f dl%u", d, h, budget->heapUsage[h] / mib, budget->heapBudget[h] / mib,
+                (device.state->properties.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 ? 1u : 0u);
+        }
+    }
+    std::fprintf(output, " ]");
 }
 
 std::vector<std::pair<std::uintptr_t, std::uintptr_t>> HostMemoryImportRanges_nid_no_patch() {
@@ -1182,7 +1303,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : VulkanDevice(wind
 
 VulkanDevice::VulkanDevice(CompileOnly) : VulkanDevice(nullptr, true) {}
 
-VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) : state(std::make_unique<State>()), serial([] { static std::atomic<std::uint64_t> serials{0}; return serials.fetch_add(1, std::memory_order_relaxed) + 1; }()) {
+VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) : state(std::make_shared<State>()), serial([] { static std::atomic<std::uint64_t> serials{0}; return serials.fetch_add(1, std::memory_order_relaxed) + 1; }()) {
     state->compileOnly = compileOnly;
     APS5_LOG_OUT("VulkanDevice constructor window=%p", static_cast<const void*>(window));
 #ifdef _WIN32
@@ -2078,7 +2199,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     deviceInfo.pNext = &bdaFeatures;
     auto shaderProfile = std::make_unique<const ShaderDeviceProfile>(buildTarget(), deviceInfo, state->properties.limits);
     check(state->InstanceFunction<PFN_vkCreateDevice>("vkCreateDevice")(selected, &deviceInfo, nullptr, &state->device), "vkCreateDevice");
-    state->deviceProc = TrackLedgerDevice(state->device, state->deviceProc, state->memoryProperties);
+    state->deviceProc = TrackLedgerDevice(state->device, state->deviceProc, state->memoryProperties, [weak = std::weak_ptr<State>(state)]() -> std::optional<VkPhysicalDeviceMemoryBudgetPropertiesEXT> {
+        const auto current = weak.lock();
+        if (!current || !current->memoryBudget) return std::nullopt;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &budget};
+        current->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2")(current->physical, &properties);
+        return budget;
+    });
     state->shaderProfile = std::move(shaderProfile);
     if (compileOnly) return;
     if (calibratedTimestamps != nullptr) {

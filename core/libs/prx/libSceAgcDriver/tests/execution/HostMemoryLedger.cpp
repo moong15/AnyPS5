@@ -1,12 +1,17 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <memory>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
 int main() {
+    static const bool noHeapWalk = [] {
+        const auto* value = std::getenv("APS5_HOST_MEMORY_LEDGER_NO_HEAPWALK");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
 #ifdef _WIN32
     const auto destroyHeap = [](void* heap) { HeapDestroy(heap); };
     std::unique_ptr<void, decltype(destroyHeap)> heap(HeapCreate(0, 0, 0), destroyHeap);
@@ -33,8 +38,9 @@ int main() {
     if (std::strchr(line, '\n') == nullptr || std::fgetc(output.get()) != EOF) return 6;
     const char* fields[]{"; vq private ", " (guest ", ", host ", ") mapped ", " image ", "; vk dev ", "; pipelines ", " cache ", "; spirv ", "; heap ", " mapped ", ") vectors ", "; cache loaded ", " saved ", "; vk import host ", " dev ", " unique ", " guest ", "; vk alloc host "};
     for (const auto* field : fields) if (std::strstr(line, field) == nullptr) return 7;
-    const char* newFields[]{"; heaps ", " process ", " crt ", " other-heaps ", " largest ", "; heapwalk ", "; heap host ", " heap-other ", " nonheap host ", "; nonheap groups ", "; nh <64K ", "; nh 64K-1M ", "; nh 1-16M ", "; nh 16-64M ", "; nh 64-256M ", "; nh >=256M ", "; nh top "};
+    const char* newFields[]{"; heaps ", " process ", " crt ", " other-heaps ", " largest ", "; heapwalk ", "; heap host ", " heap-other ", " nonheap host ", "; nonheap groups ", "; nh <64K ", "; nh 64K-1M ", "; nh 1-16M ", "; nh 16-64M ", "; nh 64-256M ", "; nh >=256M ", "; nh top ", "; vk class dl ", " dlhv ", " hv ", " none ", "; mapped dl ", " import ", "; types [", "; budget ["};
     for (const auto* field : newFields) if (std::strstr(line, field) == nullptr) return 12;
+    if (std::strstr(line, noHeapWalk ? "; heapwalk off" : "; heapwalk on") == nullptr) return 23;
     double walkMiB = 0;
     if (std::sscanf(std::strstr(line, "; vq private "), "; vq private %lf", &walkMiB) != 1) return 8;
 #ifdef _WIN32
@@ -45,6 +51,8 @@ int main() {
     std::size_t bucketBefore = 0;
     double bytesBefore = 0;
     if (std::sscanf(std::strstr(line, "; nh 64-256M "), "; nh 64-256M %zu %lf", &bucketBefore, &bytesBefore) != 2) return 14;
+    double nonheapBefore = 0;
+    if (std::sscanf(std::strstr(line, " nonheap host "), " nonheap host %lf", &nonheapBefore) != 1) return 24;
     const auto freeAllocation = [&](void* allocation) { HeapFree(heap.get(), 0, allocation); };
     std::unique_ptr<void, decltype(freeAllocation)> allocation(HeapAlloc(heap.get(), 0, heapBytes), freeAllocation);
     if (!allocation) return 15;
@@ -63,6 +71,10 @@ int main() {
     double bytesAfter = 0;
     if (!heaps || std::sscanf(heaps, " other-heaps %zu %lf", &heapCount, &heapAfter) != 2) return 19;
     if (!bucket || std::sscanf(bucket, "; nh 64-256M %zu %lf", &bucketAfter, &bytesAfter) != 2) return 20;
+    double nonheapAfter = 0;
+    const auto* nonheap = std::strstr(line, " nonheap host ");
+    if (!nonheap || std::sscanf(nonheap, " nonheap host %lf", &nonheapAfter) != 1) return 25;
+    if (noHeapWalk && (std::strstr(line, "; heapwalk off") == nullptr || nonheapAfter - nonheapBefore < regionBytes / 1048576.0 - 1)) return 26;
     if (heapAfter - heapBefore < heapBytes / 1048576.0) return 21;
     if (bucketAfter <= bucketBefore || bytesAfter - bytesBefore < regionBytes / 1048576.0) return 22;
 #endif

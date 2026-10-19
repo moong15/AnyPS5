@@ -12,6 +12,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -23,6 +24,7 @@
 namespace AgcDriver {
 
 std::vector<std::pair<std::uintptr_t, std::uintptr_t>> HostMemoryImportRanges_nid_no_patch();
+void ReportVulkanMemory_nid_no_patch(std::FILE* output);
 
 namespace Graphics {
 class StorageTexture;
@@ -371,7 +373,7 @@ private:
     void ensureHdrScaler(VkFormat source);
     void useSurfaceFormat(VkSurfaceFormatKHR format);
     struct State;
-    std::unique_ptr<State> state;
+    std::shared_ptr<State> state;
     std::uint64_t serial;
 };
 
