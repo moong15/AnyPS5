@@ -34,6 +34,10 @@ namespace {
 
 std::uint64_t depthWrites = 0;
 
+std::pair<std::uint32_t, std::uint32_t> DepthBlockExtent(std::uint32_t bytesPerTexel) {
+    return {bytesPerTexel == 4 ? 128u : 256u, bytesPerTexel == 1 ? 256u : 128u};
+}
+
 Recorder* RecorderFor(const Context& context) {
     auto* recorder = Recorder::Active();
     return recorder != nullptr && recorder->Device() == context.device ? recorder : nullptr;
@@ -487,6 +491,29 @@ public:
         const auto end = address + bytes;
         if (address < target.address + depthBytes() && target.address < end) return true;
         return target.stencilAddress != 0 && address < target.stencilAddress + stencilBytes() && target.stencilAddress < end;
+    }
+
+    bool CoveredBy(std::span<const std::pair<std::uint64_t, std::uint64_t>> written, std::span<const WrittenStorageExtent> extents) const {
+        const auto reaches = [&](std::uint64_t address, std::uint32_t bytesPerTexel) {
+            const auto [blockWidth, blockHeight] = DepthBlockExtent(bytesPerTexel);
+            const std::array<std::uint32_t, 3> block{65536u, blockWidth, blockHeight};
+            const auto blocksPerRow = (target.extent.width + blockWidth - 1u) / blockWidth;
+            return std::any_of(extents.begin(), extents.end(), [&](const auto& extent) {
+                return extent.address == address && extent.bytesPerElement == bytesPerTexel && extent.block == block && extent.blocksPerRow == blocksPerRow && extent.width >= target.extent.width && extent.height >= target.extent.height;
+            });
+        };
+        const auto covers = [&](std::uint64_t begin, std::uint64_t end) {
+            for (const auto& [writtenBegin, writtenEnd] : written) {
+                if (writtenEnd <= begin) continue;
+                if (writtenBegin > begin) return false;
+                begin = writtenEnd;
+                if (begin >= end) return true;
+            }
+            return false;
+        };
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        if (target.samples == 1u && (reaches(target.address, d16 ? 2u : 4u) || (target.stencilAddress != 0 && reaches(target.stencilAddress, 1u)))) return true;
+        return covers(target.address, target.address + depthBytes()) || (target.stencilAddress != 0 && covers(target.stencilAddress, target.stencilAddress + stencilBytes()));
     }
 
     void NoteMemory() {
@@ -1366,8 +1393,7 @@ std::uint64_t DepthSurfacesReleased() {
 }
 
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel) {
-    const std::uint32_t blockWidth = bytesPerTexel == 4 ? 128u : 256u;
-    const std::uint32_t blockHeight = bytesPerTexel == 1 ? 256u : 128u;
+    const auto [blockWidth, blockHeight] = DepthBlockExtent(bytesPerTexel);
     const auto width = static_cast<std::uint64_t>((extent.width + blockWidth - 1) / blockWidth * blockWidth);
     const auto height = static_cast<std::uint64_t>((extent.height + blockHeight - 1) / blockHeight * blockHeight);
     return width * height * bytesPerTexel;
@@ -1909,6 +1935,13 @@ void RetireDepthSurfaces(VkDevice device, std::uint64_t address, std::uint64_t b
     std::lock_guard lock(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->context.device == device && !surface->retired && surface->Overlaps(address, bytes)) retire(*surface);
+    }
+}
+
+void RetireCoveredDepthSurfaces(VkDevice device, std::span<const std::pair<std::uint64_t, std::uint64_t>> written, std::span<const WrittenStorageExtent> extents) {
+    std::lock_guard lock(surfacesMutex());
+    for (const auto& surface : surfaces()) {
+        if (surface->context.device == device && !surface->retired && surface->CoveredBy(written, extents)) retire(*surface);
     }
 }
 

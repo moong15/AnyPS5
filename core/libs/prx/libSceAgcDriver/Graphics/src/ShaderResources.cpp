@@ -1000,12 +1000,41 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
     return surface;
 }
 
+struct WrittenStorage {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> bytes;
+    std::vector<WrittenStorageExtent> extents;
+};
+
+static WrittenStorage WrittenStorageBytes(const GuestTextureResource& viewed, std::uint32_t mip) {
+    WrittenStorage written;
+    const auto geometry = DescribeSurface(viewed);
+    if (geometry.thick || mip >= geometry.mips.size()) return written;
+    const auto& level = geometry.mips[mip];
+    const auto bytesPerElement = BytesPerElement(viewed.format);
+    const auto covered = CoveredMipBytes(viewed.tileMode, bytesPerElement, level);
+    const bool blocks = viewed.tileMode != TextureTileMode::kLinear && !level.tail;
+    const auto first = geometry.layers > 1u && geometry.imageDepth <= 1u ? std::min(viewed.baseArray, geometry.layers) : 0u;
+    for (auto layer = first; layer < geometry.layers; ++layer) {
+        if (!geometry.HasLayer(mip, layer)) continue;
+        const auto begin = viewed.baseAddress + geometry.GuestLayerOffset(layer) + level.tiledOffset;
+        for (const auto& [rangeBegin, rangeEnd] : covered) {
+            if (!written.bytes.empty() && written.bytes.back().second == begin + rangeBegin) written.bytes.back().second = begin + rangeEnd;
+            else written.bytes.emplace_back(begin + rangeBegin, begin + rangeEnd);
+        }
+        if (blocks) written.extents.push_back({begin, level.width, level.height, bytesPerElement, ThinBlockLayout(viewed.tileMode, bytesPerElement), level.blocksPerRow});
+    }
+    return written;
+}
+
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes, bool written) {
     Require(viewed.dimension != TextureDimension::k2DMsaa, "storage image access to a multisampled texture is not implemented");
     RequireNoMultisampleTarget(viewed.baseAddress, guestBytes != 0 ? static_cast<std::size_t>(guestBytes) : 1u, "a storage image access");
     if (auto depth = DepthSurfaceStorage(context, words, viewed, mip)) return depth;
-    if (written) RetireDepthSurfaces(context.device, viewed.baseAddress, guestBytes != 0 ? guestBytes : DescribeSurface(viewed).guestBytes);
+    if (written && DepthSurfaceOverlaps(context.device, viewed.baseAddress, guestBytes != 0 ? guestBytes : DescribeSurface(viewed).guestBytes)) {
+        const auto storage = WrittenStorageBytes(viewed, mip);
+        RetireCoveredDepthSurfaces(context.device, storage.bytes, storage.extents);
+    }
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     if (disabled) return StorageTexture::Create(context, *context.detiler, viewed, mip);
     static_cast<void>(words);
