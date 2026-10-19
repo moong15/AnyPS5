@@ -95,7 +95,7 @@ void removeCacheDirectory(const std::filesystem::path& directory) {
 }
 
 bool sameBinding(const DescriptorBinding& left, const DescriptorBinding& right) {
-    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.imageShapes == right.imageShapes && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.samplerCoordinatesIgnored == right.samplerCoordinatesIgnored && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers;
+    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.imageShapes == right.imageShapes && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.bufferExtent == right.bufferExtent && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.samplerCoordinatesIgnored == right.samplerCoordinatesIgnored && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers;
 }
 
 bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<DescriptorBinding>& right) {
@@ -194,6 +194,7 @@ DescriptorBinding sampleBinding(std::uint32_t seed) {
     binding.imageUnnormalizedBaseLevel = {false, true, seed % 3 == 0};
     binding.imageSamplers = {0x5u, 0u, 0x80000000u};
     binding.bufferRead = {true, false, false, true, true, false};
+    binding.bufferExtent = {32, 0, 16, 4096, 8, 0};
     return binding;
 }
 
@@ -2230,6 +2231,7 @@ std::filesystem::path planEntryPath(PlanFixture& fixture) {
 int runPlanLoadingProcess(std::string_view mode) {
     if (mode == "--load-plan-switch") setEnvironment("APS5_TRACE_IMAGE_TABLE", "1");
     if (mode == "--load-plan-off") setEnvironment("APS5_NO_PERF_DISK_PLANS", "1");
+    if (mode == "--load-plan-ledger") setEnvironment("APS5_HOST_MEMORY_LEDGER", "1");
     if (mode == "--load-plan-release-off") setEnvironment("APS5_NO_RELEASE_UNDRAWN_PLANS", "1");
     if (mode == "--load-plan-reuse-off") {
         setEnvironment("APS5_NO_TABLE_SNAPSHOT_REUSE", "1");
@@ -2248,7 +2250,7 @@ int runPlanLoadingProcess(std::string_view mode) {
         std::cout << "a process with another switch value rebuilt all " << count << " plans\n";
         return 0;
     }
-    if (mode == "--load-plan" || mode == "--load-plan-release-off") {
+    if (mode == "--load-plan" || mode == "--load-plan-release-off" || mode == "--load-plan-ledger") {
         require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "the second process ran the front end" + counts);
     } else if (mode == "--load-plan-reuse-off") {
         require(builds == 0u && totals.planHits == count && totals.planMisses == 0u && totals.planLoadFailures == 0u && totals.hits == count && totals.misses == 0u, "turning the image table reuse off changed the stored plan or variant keys" + counts);
@@ -2271,6 +2273,8 @@ int runPlanLoadingProcess(std::string_view mode) {
         const auto after = ShaderDiskCache::Totals();
         require(FrontEndBuilds() == 1u && after.planHits == count && after.planMisses == 1u, "a changed code word reused a stored plan");
         std::cout << "second process prepared " << count << " shaders from stored plans without running the front end\n";
+    } else if (mode == "--load-plan-ledger") {
+        std::cout << "host memory ledger reused stored plans and variants\n";
     } else if (mode == "--load-plan-release-off") {
         std::cout << "APS5_NO_RELEASE_UNDRAWN_PLANS=1 loaded all " << count << " stored plans and variants\n";
     } else if (mode == "--load-plan-reuse-off") {
@@ -2318,6 +2322,7 @@ void verifyPlanAcrossProcesses(const char* self) {
     };
     run("--load-plan");
     run("--load-plan-release-off");
+    run("--load-plan-ledger");
     run("--load-plan-off");
     run("--load-plan-reuse-off");
     std::vector<std::byte> entry;

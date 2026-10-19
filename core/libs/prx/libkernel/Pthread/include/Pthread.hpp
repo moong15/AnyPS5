@@ -144,6 +144,7 @@ struct PthreadPrivate {
     bool _adopted;
     Pthread* _handleStorage;
     std::atomic<bool> _joined;
+        bool _joining = false;
     std::mutex _join_mtx;
     TimedWait::Condition _join_cv;
     std::atomic<bool> cancelPending{false};

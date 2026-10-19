@@ -122,7 +122,7 @@ void DrawPipeline::rethrowFailure() {
     std::rethrow_exception(error);
 }
 
-void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool bounded, bool orderedReads) {
+void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress, std::vector<std::byte> labelBytes, std::vector<Range> reads, bool bounded, bool orderedReads, bool writesComplete) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     std::unique_lock lock(mutex);
     rethrowFailure();
@@ -142,8 +142,9 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     }
     depthSum += items.size();
     ++enqueued;
+    writesComplete &= std::all_of(writes.begin(), writes.end(), [](const Range& range) { return range.first < range.second; });
     heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
-    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads});
+    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads, writesComplete});
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) {
         thread = std::thread([this] { run(); });
@@ -412,7 +413,13 @@ std::optional<std::uint64_t> DrawPipeline::PendingLabel(std::uint64_t address, s
     return std::nullopt;
 }
 
+bool DrawPipeline::HasIncompleteWrites() {
+    std::lock_guard lock(mutex);
+    return std::any_of(items.begin(), items.end(), [](const Item& item) { return !item.writesComplete; });
+}
+
 bool DrawPipeline::Overlaps(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0) return false;
     const auto end = address + bytes;
     std::lock_guard lock(mutex);
     for (const auto& item : items) {

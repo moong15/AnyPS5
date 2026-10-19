@@ -410,8 +410,10 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     timing.Mark("materialize");
     const auto walked = capture->userDataUse.asValue | capture->userDataUse.asBase;
     auto mask = walked == 0 ? ~std::uint64_t{0} : walked | stageCapture.compiled->userDataRegisterReads;
+    if (program.tailContinuation != nullptr) mask = ~std::uint64_t{0};
     if (vertexInfos[i]) {
-        for (const auto reg : {static_cast<std::uint32_t>(vertexInfos[i]->fetchAttribReg), static_cast<std::uint32_t>(vertexInfos[i]->fetchBufferReg)}) {
+        for (const auto rawReg : {static_cast<std::uint32_t>(vertexInfos[i]->fetchAttribReg), static_cast<std::uint32_t>(vertexInfos[i]->fetchBufferReg)}) {
+            const auto reg = rawReg + program.hiddenUserWords;
             mask |= reg + 1u < 64u ? std::uint64_t{3} << reg : ~std::uint64_t{0};
         }
     }

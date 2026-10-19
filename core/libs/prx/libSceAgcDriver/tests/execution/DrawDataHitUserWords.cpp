@@ -27,7 +27,7 @@ namespace {
 
 using AgcDriver::Graphics::Require;
 
-alignas(256) constexpr std::array<std::uint32_t, 8> VertexCode{0x7e000208u, 0x7e020280u, 0x7e040280u, 0x7e0602f2u, 0xf80008cfu, 0x03020100u, 0xbf810000u, 0xbf810000u};
+alignas(256) constexpr std::array<std::uint32_t, 14> VertexCode{0xf4080104u, 0xfa000000u, 0xbf8cc07fu, 0xe0300000u, 0x80010000u, 0xbf8c3f70u, 0x7e020280u, 0x7e040280u, 0x7e0602f2u, 0xf80008cfu, 0x03020100u, 0xbf810000u, 0xbf810000u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 11> PixelCode{0xf4080100u, 0xfa000000u, 0xbf8cc07fu, 0xe0300000u, 0x80010000u, 0xbf8c3f70u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 16> TriangleVertexCode{
     0x7e000d05u, 0x080200f4u, 0x10020300u, 0x100202f4u, 0x060202f3u, 0x060400f3u, 0x10040500u, 0x060404f3u,
@@ -132,6 +132,8 @@ std::string Counts(const AgcDriver::DriverDetail::DrawEntryCounters& counters) {
 }
 
 void UnreadUserWordsKeepTheStage(bool verify) {
+    const char* maskSwitch = std::getenv("APS5_NO_USER_WORD_MASK");
+    const bool off = maskSwitch != nullptr && std::strcmp(maskSwitch, "1") == 0;
     Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
     Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
     auto* first = GuestBlock();
@@ -148,6 +150,9 @@ void UnreadUserWordsKeepTheStage(bool verify) {
     describe(second, second + 1024, 0.5f);
 
     auto commands = Setup();
+    Append(commands, 0x76, {0x8b, 3u << 1u});
+    const auto vertexTable = reinterpret_cast<std::uintptr_t>(first);
+    Append(commands, 0x76, {0x8c, static_cast<std::uint32_t>(vertexTable), static_cast<std::uint32_t>(vertexTable >> 32u), 0x11});
     PixelUserData(commands, first, 0x11);
     Append(commands, 0x2d, {3, 2});
     auto counters = Submit(std::move(commands));
@@ -159,6 +164,7 @@ void UnreadUserWordsKeepTheStage(bool verify) {
     Require(counters.inserts != 0, "the repeated register key was not admitted: " + Counts(counters));
 
     commands.clear();
+    Append(commands, 0x76, {0x8e, 0x22});
     PixelUserData(commands, first, 0x22);
     Append(commands, 0x2d, {3, 2});
     const auto before = counters;
@@ -166,7 +172,8 @@ void UnreadUserWordsKeepTheStage(bool verify) {
     const auto reused = counters.dataStagesReused - before.dataStagesReused;
     const auto compiled = counters.dataStagesCompiled - before.dataStagesCompiled;
     Require(counters.dataHits == before.dataHits + 1, "a draw that changed only a user word no stage reads was not a data-only hit: " + Counts(counters));
-    if (verify) Require(compiled == 2 && counters.dataVerified - before.dataVerified == 2, "verify mode: a draw that changed only an unread user word did not build and compare both stages: " + Counts(counters));
+    if (off) Require(reused == 0 && compiled == 2, "mask disabled: stages were reused: " + Counts(counters));
+    else if (verify) Require(compiled == 2 && counters.dataVerified - before.dataVerified == 2, "verify mode: a draw that changed only an unread user word did not build and compare both stages: " + Counts(counters));
     else Require(reused == 2 && compiled == 0, "a draw that changed only a user word no stage reads did not reuse both stages: " + Counts(counters));
 
     commands.clear();
@@ -176,7 +183,44 @@ void UnreadUserWordsKeepTheStage(bool verify) {
     counters = Submit(std::move(commands));
     Require(counters.dataHits == moved.dataHits + 1, "a draw that pointed the pixel stage at another buffer descriptor was not a data-only hit: " + Counts(counters));
     Require(counters.dataStagesCompiled - moved.dataStagesCompiled >= 1, "a draw that pointed the pixel stage at another buffer descriptor reused the pixel stage: " + Counts(counters));
-    if (!verify) Require(counters.dataStagesReused - moved.dataStagesReused == 1, "a draw that changed only the pixel stage's descriptor pointer did not reuse the vertex stage: " + Counts(counters));
+    if (!verify) Require(counters.dataStagesReused - moved.dataStagesReused == (off ? 0u : 1u), "a draw that changed only the pixel stage's descriptor pointer did not reuse the vertex stage: " + Counts(counters));
+}
+
+void TailAddressChangeCompilesTheStage() {
+    const auto padded = [](std::initializer_list<std::uint32_t> words) {
+        std::array<std::uint32_t, 64> result;
+        result.fill(0xbf9f0000u);
+        std::copy(words.begin(), words.end(), result.begin());
+        return result;
+    };
+    alignas(256) static const auto body = padded({0xf4080100u, 0xfa000000u, 0xbf8cc07fu, 0xe0300000u, 0x80010000u, 0xbf8c3f70u, 0xbe802008u});
+    alignas(256) static const auto firstTail = padded({0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u});
+    alignas(256) static const auto secondTail = padded({0x7e000280u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u});
+    auto* table = GuestBlock();
+    const auto data = reinterpret_cast<std::uintptr_t>(table + 1024);
+    table[0] = static_cast<std::uint32_t>(data);
+    table[1] = static_cast<std::uint32_t>(data >> 32u) & 0xffffu;
+    table[2] = 16;
+    table[3] = 0x4bfacu;
+    table[1024] = std::bit_cast<std::uint32_t>(1.0f);
+    auto commands = Setup(true);
+    const auto address = reinterpret_cast<std::uintptr_t>(body.data());
+    Append(commands, 0x76, {0x008, static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>(address >> 40u)});
+    Append(commands, 0x76, {0x00b, 10u << 1u});
+    PixelUserData(commands, table, 0);
+    const auto draw = [&](const auto& tail) {
+        const auto next = reinterpret_cast<std::uintptr_t>(tail.data());
+        Append(commands, 0x76, {0x014, static_cast<std::uint32_t>(next), static_cast<std::uint32_t>(next >> 32u)});
+        Append(commands, 0x2d, {3, 2});
+        const auto result = Submit(std::move(commands));
+        commands.clear();
+        return result;
+    };
+    draw(firstTail);
+    const auto before = draw(firstTail);
+    const auto after = draw(secondTail);
+    Require(after.dataHits == before.dataHits + 1, "a tail-address change was not a data-only hit: " + Counts(after));
+    Require(after.dataStagesCompiled > before.dataStagesCompiled, "a changed tail address reused the old pixel stage: " + Counts(after));
 }
 
 unsigned BrightestColorByte() {
@@ -222,6 +266,7 @@ int main() {
         const bool verify = std::getenv("APS5_VERIFY_DRAW_DATA_HITS") != nullptr;
         UnreadUserWordsKeepTheStage(verify);
         ReadUserWordsChangeTheOutput();
+        TailAddressChangeCompilesTheStage();
         AgcDriverShutdown_nid_postfix();
         std::cout << "Data-only hits " << (verify ? "verified" : "reused") << " the stages whose read user words did not change\n";
         return 0;

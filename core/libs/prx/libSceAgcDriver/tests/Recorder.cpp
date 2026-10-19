@@ -2594,11 +2594,11 @@ void resourceReadTests(const Device& device, Recorder& recorder) {
     HostImportFor(context, address, bytes);
 }
 
-void readWrittenStagingTests(const Device& device, Recorder& recorder) {
+bool readWrittenStagingTests(const Device& device, Recorder& recorder) {
     const auto& context = device.GetContext();
     if (context.hostImportAlignment == 0) {
         std::cout << "host imports unavailable: read and written staging not tested\n";
-        return;
+        return false;
     }
     constexpr std::size_t bytes = 8u << 20u;
 #ifdef _WIN32
@@ -2615,7 +2615,7 @@ void readWrittenStagingTests(const Device& device, Recorder& recorder) {
     }
     if (HostImportFor(context, address, bytes) == nullptr) {
         std::cout << "host import of the test block refused: read and written staging not tested\n";
-        return;
+        return false;
     }
     const auto boundInPlace = [&](std::uint64_t element, std::size_t elementBytes, bool read) {
         GuestBufferMemory memory(context);
@@ -2632,10 +2632,10 @@ void readWrittenStagingTests(const Device& device, Recorder& recorder) {
     Require(!boundInPlace(address + 4096, 1u << 20u, false), "a written 1 MiB element was not staged");
     Require(boundInPlace(address + 4096, 4u << 20u, false), "a written-only 4 MiB element was staged past the written window");
     Require(!boundInPlace(address + 4096, 4u << 20u, true), "a read and written 4 MiB element was bound in place");
-    const auto buildInPlace = [&](std::uint64_t dispatchThreads, bool read) {
+    const auto buildInPlace = [&](std::uint64_t dispatchThreads, bool read, std::uint32_t stride, std::uint32_t extent) {
         const auto element = address + 4096;
-        constexpr std::uint32_t stride = 16;
-        constexpr std::uint32_t records = (4u << 20u) / stride;
+        constexpr std::uint32_t elementBytes = 4u << 20u;
+        const std::uint32_t records = stride != 0 ? elementBytes / stride : elementBytes;
         ShaderRecompiler::RecompileResult program;
         ShaderRecompiler::DescriptorBinding binding;
         binding.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
@@ -2646,25 +2646,30 @@ void readWrittenStagingTests(const Device& device, Recorder& recorder) {
         binding.guestDescriptor = {static_cast<std::uint32_t>(element), (static_cast<std::uint32_t>(element >> 32u) & 0xffffu) | (stride << 16u), records, 0x31000000u};
         binding.bufferWritten = {true};
         binding.bufferRead = {read};
+        binding.bufferExtent = {extent};
         program.bindings.push_back(binding);
         const CompiledShader compute{ShaderRecompiler::ShaderStage::Compute, &program, 0};
         ShaderResources resources(context, compute, {}, false, dispatchThreads);
         const auto reads = resources.InPlaceReads();
-        const bool direct = std::any_of(reads.begin(), reads.end(), [&](const auto& range) { return range.first <= element && range.second >= element + records * stride; });
+        const bool direct = std::any_of(reads.begin(), reads.end(), [&](const auto& range) { return range.first <= element && range.second >= element + elementBytes; });
         resources.MarkGpuWrites(recorder);
         recorder.Sync();
         return direct;
     };
-    Require(!buildInPlace((4u << 20u) / 16u, true), "a dispatch sweeping a read and written 4 MiB element bound it in place");
-    Require(buildInPlace(1024, true), "a dispatch touching 16 KiB of a read and written 4 MiB element staged all of it");
-    Require(buildInPlace(0, true), "a dispatch of unknown size staged a read and written 4 MiB element");
-    Require(buildInPlace((4u << 20u) / 16u, false), "a dispatch sweeping a written-only 4 MiB element staged it");
+    Require(!buildInPlace((4u << 20u) / 16u, true, 16, 0), "a dispatch sweeping a read and written 4 MiB element bound it in place");
+    Require(buildInPlace(1024, true, 16, 0), "a dispatch touching 16 KiB of a read and written 4 MiB element staged all of it");
+    Require(buildInPlace(0, true, 16, 0), "a dispatch of unknown size staged a read and written 4 MiB element");
+    Require(buildInPlace((4u << 20u) / 16u, false, 16, 0), "a dispatch sweeping a written-only 4 MiB element staged it");
+    Require(!buildInPlace((4u << 20u) / 32u, true, 0, 32), "a dispatch sweeping a read and written 4 MiB raw element bound it in place");
+    Require(buildInPlace(1024, true, 0, 32), "a dispatch touching 32 KiB of a read and written 4 MiB raw element staged all of it");
+    Require(buildInPlace((4u << 20u) / 32u, true, 0, 0), "a raw element without an access extent was staged");
     Require(std::all_of(static_cast<const std::byte*>(block), static_cast<const std::byte*>(block) + bytes, [](std::byte value) { return value == std::byte{0x11}; }), "a staged copy-back changed the guest bytes");
     {
         GuestAllocations::Mutation mutation;
         mutation.Remove(block);
     }
     HostImportFor(context, address, bytes);
+    return true;
 }
 
 bool sparseRunImportTests(const Device& device, bool copied) {
@@ -5254,17 +5259,21 @@ void writeBackPaddingTests(const Device& device, Recorder& recorder, bool watche
         std::uint32_t height;
         std::uint32_t mipCount;
         std::uint64_t offset;
+        bool direct = false;
     };
     constexpr Case cases[] = {
         {"64 KiB R_X 200x150", TextureTileMode::kR64KBX, 200, 150, 1, 0},
         {"64 KiB R_X 200x150, 3 mips", TextureTileMode::kR64KBX, 200, 150, 3, 0},
-        {"64 KiB R_X 520x260, 6 mips", TextureTileMode::kR64KBX, 520, 260, 6, 0},
+        {"64 KiB R_X 520x260, 6 mips", TextureTileMode::kR64KBX, 520, 260, 6, 0, true},
         {"64 KiB R_X 200x150 off a 64 KiB boundary, 3 mips", TextureTileMode::kR64KBX, 200, 150, 3, 4096},
         {"4 KiB S 100x70, 2 mips", TextureTileMode::kStandard4KB, 100, 70, 2, 0},
         {"linear 200x150", TextureTileMode::kLinear, 200, 150, 1, 0},
+        {"64 KiB R_X 512x512, 3 mips, no padding below the tail", TextureTileMode::kR64KBX, 512, 512, 3, 0, true},
+        {"64 KiB R_X 1000x700", TextureTileMode::kR64KBX, 1000, 700, 1, 0, true},
+        {"64 KiB R_X 1900x1100, across two 8 MiB slabs", TextureTileMode::kR64KBX, 1900, 1100, 1, 0, true},
     };
     const auto pattern = [](std::size_t i) { return static_cast<std::uint8_t>(i * 131u + 7u); };
-    constexpr std::array<std::uint8_t, 4> red{255, 0, 0, 255};
+    constexpr std::array<std::array<std::uint8_t, 4>, 2> colours{{{255, 0, 0, 255}, {0, 255, 0, 255}}};
     std::string failures;
     for (const auto& test : cases) {
         const std::string what = std::string(watched ? "(watched) " : "") + test.name;
@@ -5334,34 +5343,40 @@ void writeBackPaddingTests(const Device& device, Recorder& recorder, bool watche
         {
             auto image = StorageTexture::Create(context, detiler, resource, 0);
             const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, test.mipCount, 0, 1};
-            const auto commands = recorder.Commands();
-            recorder.Keep(image);
-            const VkClearColorValue value{{1.0f, 0.0f, 0.0f, 1.0f}};
-            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
-            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-            image->MarkDirty();
-            image->WriteBack();
-            recorder.Submit();
-            device.WaitQueue();
-            recorder.Sync();
-            std::vector<std::byte> read(bytes);
-            if (watched) AgcDriver::GuestMemory::Read(blockAddress, read);
-            else std::memcpy(read.data(), memory, bytes);
-            std::size_t texels = 0, garbage = 0, outside = 0;
-            for (std::size_t i = 0; i < bytes; i += 4) {
-                const bool inside = i >= test.offset && i < test.offset + surfaceBytes;
-                bool isTexel = inside, isPattern = true;
-                for (std::size_t c = 0; c < 4; ++c) {
-                    const auto byte = std::to_integer<std::uint8_t>(read[i + c]);
-                    isTexel = isTexel && byte == red[c];
-                    isPattern = isPattern && byte == pattern(i + c);
+            for (std::size_t pass = 0; pass < (test.direct ? colours.size() : 1u); ++pass) {
+                const auto& colour = colours[pass];
+                const auto commands = recorder.Commands();
+                recorder.Keep(image);
+                const VkClearColorValue value{{colour[0] / 255.0f, colour[1] / 255.0f, colour[2] / 255.0f, colour[3] / 255.0f}};
+                RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+                RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+                image->MarkDirty();
+                const auto slabRetilesBefore = StorageTexture::SlabRetiles();
+                image->WriteBack();
+                recorder.Submit();
+                device.WaitQueue();
+                recorder.Sync();
+                const auto slabRetiled = StorageTexture::SlabRetiles() - slabRetilesBefore;
+                if (test.direct && watched && UnitShadowEnabled() && AgcDriver::GuestMemory::Watched(address, surfaceBytes) && slabRetiled == 0) failures += what + ": no window was retiled straight into its unit-shadow slab\n";
+                std::vector<std::byte> read(bytes);
+                if (watched) AgcDriver::GuestMemory::Read(blockAddress, read);
+                else std::memcpy(read.data(), memory, bytes);
+                std::size_t texels = 0, garbage = 0, outside = 0;
+                for (std::size_t i = 0; i < bytes; i += 4) {
+                    const bool inside = i >= test.offset && i < test.offset + surfaceBytes;
+                    bool isTexel = inside, isPattern = true;
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        const auto byte = std::to_integer<std::uint8_t>(read[i + c]);
+                        isTexel = isTexel && byte == colour[c];
+                        isPattern = isPattern && byte == pattern(i + c);
+                    }
+                    if (isTexel) ++texels;
+                    else if (!isPattern) ++(inside ? garbage : outside);
                 }
-                if (isTexel) ++texels;
-                else if (!isPattern) ++(inside ? garbage : outside);
-            }
-            if (garbage != 0 || outside != 0 || texels != texelCount) {
-                failures += what + ": the write-back stored " + std::to_string(texels) + " texels of " + std::to_string(texelCount) + " and changed " + std::to_string(garbage) + " words no texel holds (" + std::to_string(outside) + " past the surface)\n";
+                if (garbage != 0 || outside != 0 || texels != texelCount) {
+                    failures += what + ", write-back " + std::to_string(pass + 1) + ": stored " + std::to_string(texels) + " texels of " + std::to_string(texelCount) + " and changed " + std::to_string(garbage) + " words no texel holds (" + std::to_string(outside) + " past the surface)\n";
+                }
             }
         }
         recorder.Sync();
@@ -9668,6 +9683,11 @@ int main(int argc, char** argv) {
             std::cout << "Completion label storage and ordering tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--read-written-staging-only") {
+            if (!readWrittenStagingTests(device, recorder)) return 77;
+            std::cout << "read and written staging tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--written-buffer-order-only") {
             if (!writtenBufferOrderTests(device, recorder)) return 77;
             std::cout << "written buffer order tests passed\n";
@@ -9713,6 +9733,19 @@ int main(int argc, char** argv) {
                 return 77;
             }
             splitWriteBackTests(device, recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--storage-write-back-only") {
+            if (device.GetContext().hostImportAlignment == 0) {
+                std::cout << "skipped, host imports are unavailable\n";
+                return 77;
+            }
+            storageRefreshTests(device, recorder, false);
+            storageRefreshTests(device, recorder, true);
+            writeBackPaddingTests(device, recorder, false);
+            writeBackPaddingTests(device, recorder, true);
+            singlePassTests(device, recorder, false);
+            singlePassTests(device, recorder, true);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cmask-only") {

@@ -57,8 +57,12 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     if (pipelined && drawParameters.indirect) {
         const auto& indirect = *drawParameters.indirect;
         auto& pipeline = DrawPipeline::Queue0();
-        const bool overlaps = pipeline.Busy() && (pipeline.Overlaps(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && pipeline.Overlaps(indirect.countAddress, 4)));
-        if (!pipelinedIndirect || overlaps) pipeline.Drain(DrawPipeline::DrainReason::Indirect);
+        const auto needsDrain = [&](std::uint64_t address, std::size_t bytes) {
+            if (pipeline.HasIncompleteWrites() || pipeline.Overlaps(address, bytes)) return true;
+            const std::array<DrawPipeline::Range, 1> ranges{{{address, address + bytes}}};
+            return Graphics::StorageTexture::AnyPendingOverlaps(ranges) && DrawPipeline::HeldReads(address, bytes);
+        };
+        if (!pipelinedIndirect || (pipeline.Busy() && (needsDrain(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && needsDrain(indirect.countAddress, 4))))) pipeline.Drain(DrawPipeline::DrainReason::Indirect);
     }
     bool drainedForInline = false;
     const auto drainBeforeInline = [&] {
@@ -665,6 +669,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             if (pipelined && pipelinedIndirect && record == lastDrawable && !gpuLock.owns_lock() && deferredLabels().labels.empty()) {
                 phaseTiming.Phase(DrawRowVectors);
                 auto writes = drawWriteRanges(graphics, stages);
+                const bool writesComplete = DrawWritesComplete(graphics, stages);
                 bool bounded = false;
                 std::vector<DrawPipeline::Range> reads;
                 if (DrawPipeline::PreciseDrains()) reads = DrawReadRanges(graphics, stages, bounded);
@@ -674,13 +679,13 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
                 for (const auto& range : QueuedDrawReadRanges(direct, stages)) reads.push_back(range);
                 if (direct.indexed && direct.indexSize != 0 && direct.indexCount != 0 && (direct.indexAddress == 0 || static_cast<std::uint64_t>(direct.indexCount) * direct.indexSize > std::numeric_limits<std::uint64_t>::max() - direct.indexAddress)) bounded = false;
                 const auto queueEpoch = DrawPipeline::QueueEpochToken(commitQueue).load(std::memory_order_relaxed);
-                auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), direct, stages = std::move(stages), snapshots = std::move(snapshots), commitQueue, commitPacket, epoch, queueEpoch, programs = std::move(programs), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
+                auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), direct, stages = std::move(stages), snapshots = std::move(snapshots), commitQueue, commitPacket, epoch, queueEpoch, writablePrograms = std::move(writablePrograms), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
                     DrawPipeline::FollowEpoch(commitQueue, epoch, queueEpoch);
                     GuestMemory::SetCurrentPacket(commitPacket, commitQueue);
                     commitDraw(localDevice, commitQueue, decode->state, direct, stages, snapshots, nullptr, {}, 0);
                 };
                 auto held = std::make_shared<decltype(commit)>(std::move(commit));
-                DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded);
+                DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded, false, writesComplete);
                 phaseTiming.Phase(DrawRowLockWait);
                 timing.Mark("draw_enqueued");
                 return drawn();
@@ -717,6 +722,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     if (pipelined && !drawParameters.indirect && deferredLabels().labels.empty()) {
         phaseTiming.Phase(DrawRowVectors);
         auto writes = drawWriteRanges(graphics, stages);
+        const bool writesComplete = DrawWritesComplete(graphics, stages);
         bool bounded = false;
         std::vector<DrawPipeline::Range> reads;
         if (DrawPipeline::PreciseDrains()) reads = DrawReadRanges(graphics, stages, bounded);
@@ -728,7 +734,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         for (const auto& range : QueuedDrawReadRanges(drawParameters, stages)) reads.push_back(range);
         if (drawParameters.indexed && drawParameters.indexSize != 0 && drawParameters.indexCount != 0 && (drawParameters.indexAddress == 0 || static_cast<std::uint64_t>(drawParameters.indexCount) * drawParameters.indexSize > std::numeric_limits<std::uint64_t>::max() - drawParameters.indexAddress)) bounded = false;
         const auto queueEpoch = DrawPipeline::QueueEpochToken(commitQueue).load(std::memory_order_relaxed);
-        auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, commitQueue, commitSerial, commitCursor, commitPacket, epoch, queueEpoch, programs = std::move(programs), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
+        auto commit = [this, localDevice = std::move(localDevice), decode = std::move(decode), drawParameters, stages = std::move(stages), snapshots = std::move(snapshots), recipe = std::move(recipe), recipeStages = std::move(recipeStages), drawKey, commitQueue, commitSerial, commitCursor, commitPacket, epoch, queueEpoch, writablePrograms = std::move(writablePrograms), results = std::move(results), memory = std::move(memory), linked = std::move(linked), stageCaptures = std::move(stageCaptures), matched = std::move(matched), matchedRegions = std::move(matchedRegions), fresh = std::move(fresh), decodeReads = std::move(decodeReads), shaderMemory = std::move(shaderMemory), entry = std::move(entry), dataEntry = std::move(dataEntry), compiledStages = std::move(compiledStages), stageData = std::move(stageData)] {
             DrawPipeline::FollowEpoch(commitQueue, epoch, queueEpoch);
             GuestMemory::SetCurrentPacket(commitPacket, commitQueue);
             try {
@@ -739,7 +745,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             }
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
-        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded);
+        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded, false, writesComplete);
         phaseTiming.Phase(DrawRowLockWait);
         timing.Mark("draw_enqueued");
         return drawn();

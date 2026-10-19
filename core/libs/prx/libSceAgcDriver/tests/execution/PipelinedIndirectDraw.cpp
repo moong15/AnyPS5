@@ -2,8 +2,13 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DrawWriteRanges.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "VulkanTestDevice.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
+#include <cstring>
+#include <limits>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -39,6 +44,11 @@ alignas(256) constexpr std::array<std::uint32_t, 20> VertexCode{
     0x7e060208u, 0x7e0802f2u, 0x7e0a02ffu, 0x44800000u, 0xf80000d1u, 0x00000005u, 0xf80008cfu, 0x04030201u, 0xbf810000u, 0xbf810000u, 0xbf810000u, 0xbf810000u,
 };
 alignas(256) constexpr std::array<std::uint32_t, 8> PixelCode{0x7e000200u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u, 0xbf810000u, 0xbf810000u, 0xbf810000u};
+alignas(4096) std::array<std::byte, 131072> ImageArgumentMemory{};
+alignas(256) constexpr std::array<std::uint32_t, 11> ImageWriteCode{
+    0xd7460004u, 0x0401060eu, 0xd7460005u, 0x0405060fu, 0x7e100d04u, 0x7e120d05u,
+    0x7e140c0du, 0x7e1602f2u, 0xf0200f08u, 0x00000804u, 0xbf810000u,
+};
 alignas(256) std::array<std::byte, 1024> DirectMemory{};
 alignas(256) std::array<std::byte, 1024> FirstMemory{};
 alignas(256) std::array<std::byte, 1024> SecondMemory{};
@@ -170,7 +180,7 @@ struct Blocker {
         DrawPipeline::Queue0().Enqueue([this] {
             while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
             std::lock_guard gpuLock(AgcDriver::GuestMemory::GpuMutex());
-        }, {});
+        }, {}, 0, {}, {}, true);
     }
 };
 
@@ -248,7 +258,15 @@ void IndirectDrawsQueueBehindTheCommitter() {
     AppendIndirect(commands);
     Blocker blocker;
     SubmitBehind(blocker, commands);
-    WaitForItems(3, blocker, "the indirect draws drained the pipeline instead of queuing behind it");
+    if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto outstanding = DrawPipeline::Queue0().Outstanding();
+        blocker.release = true;
+        Finish();
+        Require(outstanding == 1, "disabled pipelined indirect draws did not drain before reading records");
+    } else {
+        WaitForItems(3, blocker, "the indirect draws drained the pipeline instead of queuing behind it");
+    }
     Flush(FirstMemory);
     Flush(SecondMemory);
     SameAsDirect(FirstMemory, DirectMemory, "the first queued indirect draw");
@@ -276,6 +294,116 @@ void IndirectDrawWaitsForItsQueuedRecordWrite() {
     SameAsDirect(WrittenMemory, DirectMemory, "the indirect draw whose record a queued label wrote");
 }
 
+void IndirectDrawWaitsForQueuedDma() {
+    WrittenMemory.fill(Kept);
+    LateRecords = {0, 1, 0, 0};
+    GuestAllocations::Mutation().Add(LateRecords.data(), sizeof(LateRecords), true, true, true);
+    GuestAllocations::Mutation().Add(Records.data(), sizeof(Records), true, true, true);
+    const auto source = reinterpret_cast<std::uintptr_t>(Records.data());
+    const auto destination = reinterpret_cast<std::uintptr_t>(LateRecords.data());
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    Append(commands, 0x50, {0, static_cast<std::uint32_t>(source), static_cast<std::uint32_t>(source >> 32u), static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>(destination >> 32u), sizeof(Records)});
+    AppendRecords(commands, LateRecords.data());
+    AppendTarget(commands, WrittenMemory, Clipped);
+    AppendIndirect(commands);
+    Blocker blocker;
+    SubmitBehind(blocker, commands);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    blocker.release = true;
+    Finish();
+    Flush(WrittenMemory);
+    Require(LateRecords == Records, "queued DMA did not publish indirect records");
+    SameAsDirect(WrittenMemory, DirectMemory, "indirect records written by queued DMA");
+}
+
+void HeldImageArgumentsDrainBeforeRead() {
+    ImageArgumentMemory.fill(std::byte{0});
+    std::memcpy(ImageArgumentMemory.data(), Records.data(), sizeof(Records));
+    GuestAllocations::Mutation().Add(ImageArgumentMemory.data(), ImageArgumentMemory.size(), true, true, true);
+    const auto address = reinterpret_cast<std::uintptr_t>(ImageArgumentMemory.data());
+    const auto code = reinterpret_cast<std::uintptr_t>(ImageWriteCode.data());
+    std::vector<std::uint32_t> prepare;
+    Append(prepare, 0x76, {0x207, 8, 8, 1});
+    Append(prepare, 0x76, {0x20c, static_cast<std::uint32_t>(code >> 8u), static_cast<std::uint32_t>(code >> 40u)});
+    Append(prepare, 0x76, {0x213, (14u << 1u) | (7u << 7u) | (1u << 11u)});
+    Append(prepare, 0x76, {0x240, static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>(address >> 40u) | (71u << 20u) | (3u << 30u), 31u | (119u << 14u), 0xfacu | (9u << 20u) | (9u << 28u), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    Append(prepare, 0x15, {8, 8, 1, 0x41});
+    Packet packet{prepare.data(), static_cast<std::uint32_t>(prepare.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "pending argument image dispatch failed");
+    AgcDriverWaitIdle_nid_postfix();
+    const std::array<DrawPipeline::Range, 1> range{{{address, address + sizeof(Records)}}};
+    Require(AgcDriver::Graphics::StorageTexture::AnyPendingOverlaps(range), "argument fixture has no pending image");
+    WrittenMemory.fill(Kept);
+    Blocker blocker;
+    DrawPipeline::Queue0().Enqueue([&] {
+        while (!blocker.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }, {}, 0, {}, {{0, std::numeric_limits<std::uint64_t>::max()}}, true);
+    Require(DrawPipeline::HeldReads(address, sizeof(Records)), "dispatch-miss read hold was not registered");
+    Require(!AgcDriver::Graphics::StorageTexture::FlushPending(address, sizeof(Records)), "pending image flush ignored held reads");
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendRecords(commands, ImageArgumentMemory.data());
+    AppendTarget(commands, WrittenMemory, Clipped);
+    AppendIndirect(commands);
+    Packet indirect{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&indirect) == 0, "pending argument indirect submission failed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto outstanding = DrawPipeline::Queue0().Outstanding();
+    blocker.release = true;
+    Finish();
+    Flush(WrittenMemory);
+    Require(outstanding == 1, "pending image argument read did not drain its read hold");
+    AgcDriver::GuestMemory::FlushGpuWrites(address, sizeof(Records));
+    std::array<std::uint32_t, 4> actual{};
+    std::memcpy(actual.data(), ImageArgumentMemory.data(), sizeof(actual));
+    Require(actual[0] == 0, "pending argument image did not publish its zero vertex count");
+    Require(Covered(WrittenMemory) == 0, "indirect draw consumed stale arguments instead of the pending image's zero count");
+}
+
+void WriteCompletenessControlsIndirectDrain(bool gds) {
+    using namespace AgcDriver::DriverDetail;
+    ShaderRecompiler::RecompileResult program{};
+    ShaderRecompiler::DescriptorBinding binding{};
+    binding.role = gds ? ShaderRecompiler::DescriptorRole::Gds : ShaderRecompiler::DescriptorRole::ShaderData;
+    program.bindings.push_back(binding);
+    const std::array<AgcDriver::Graphics::CompiledShader, 1> stages{{{ShaderRecompiler::ShaderStage::Vertex, &program, 0}}};
+    const AgcDriver::Graphics::State graphics{};
+    bool bounded = true;
+    auto reads = DrawReadRanges(graphics, stages, bounded);
+    auto writes = DrawWriteRanges(graphics, stages, ExactDrawWrites());
+    const bool complete = DrawWritesComplete(graphics, stages);
+    Require(!bounded, "synthetic queued draw must be unbounded by reads");
+    Require(complete == !gds, "write completeness confused shader data reads with GDS writes");
+    WrittenMemory.fill(Kept);
+    LateRecords = gds ? std::array<std::uint32_t, 4>{0, 1, 0, 0} : Records;
+    Blocker blocker;
+    DrawPipeline::Queue0().Enqueue([&] {
+        while (!blocker.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (gds) LateRecords = Records;
+    }, std::move(writes), 0, {}, std::move(reads), bounded, false, complete);
+    Require(!DrawPipeline::Queue0().Overlaps(reinterpret_cast<std::uintptr_t>(LateRecords.data()), sizeof(LateRecords)), "ordinary overlap query changed for unbounded reads or incomplete writes");
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendRecords(commands, LateRecords.data());
+    AppendTarget(commands, WrittenMemory, Clipped);
+    AppendIndirect(commands);
+    const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "write completeness indirect submission failed");
+    const bool mustDrain = gds || std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    while ((mustDrain ? DrawPipeline::DrainRequestsByOpcode(0x100) == drains : DrawPipeline::Queue0().Outstanding() < 2) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
+    const auto outstanding = DrawPipeline::Queue0().Outstanding();
+    blocker.release = true;
+    Finish();
+    Require(drained == mustDrain, "indirect drain did not depend only on write completeness");
+    Require(mustDrain || outstanding >= 2, "complete writes with unbounded reads prevented indirect queuing");
+    Flush(WrittenMemory);
+    SameAsDirect(WrittenMemory, DirectMemory, "indirect draw behind a synthetic write-completeness item");
+}
+
 void TrailingZeroCountRecordIsNotQueued() {
     InlineMemory.fill(Kept);
     std::vector<std::uint32_t> commands;
@@ -284,8 +412,17 @@ void TrailingZeroCountRecordIsNotQueued() {
     AppendTarget(commands, InlineMemory, Clipped);
     AppendIndirectMulti(commands, 2);
     Blocker blocker;
+    const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
     SubmitBehind(blocker, commands);
-    WaitForItems(2, blocker, "a draw whose last record has no vertices queued nothing");
+    if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
+        blocker.release = true;
+        Finish();
+        Require(drained, "disabled multi-record indirect draw did not request a drain");
+    } else {
+        WaitForItems(2, blocker, "a draw whose last record has no vertices queued nothing");
+    }
     Flush(InlineMemory);
     SameAsDirect(InlineMemory, DirectMemory, "the draw whose trailing record has a zero count");
 }
@@ -299,8 +436,17 @@ void OutOfRangeIndexedRecordIsNotQueued() {
     AppendTarget(commands, IndexedMemory, Clipped);
     AppendIndexedIndirectMulti(commands, 2);
     Blocker blocker;
+    const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
     SubmitBehind(blocker, commands);
-    WaitForItems(2, blocker, "an indexed draw whose second record is out of range queued nothing");
+    if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
+        blocker.release = true;
+        Finish();
+        Require(drained, "disabled indexed indirect draw did not request a drain");
+    } else {
+        WaitForItems(2, blocker, "an indexed draw whose second record is out of range queued nothing");
+    }
     Flush(IndexedMemory);
     SameAsDirect(IndexedMemory, IndexedDirectMemory, "the indexed draw whose second record is out of range");
 }
@@ -310,8 +456,10 @@ void OutOfRangeIndexedRecordIsNotQueued() {
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
+    _putenv_s("APS5_PIPELINE_DMA", "1");
 #else
     setenv("APS5_PIPELINED_DRAWS", "1", 1);
+    setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
         {
@@ -324,6 +472,10 @@ int main() {
         DrawIndexedDirectReference();
         IndirectDrawsQueueBehindTheCommitter();
         IndirectDrawWaitsForItsQueuedRecordWrite();
+        IndirectDrawWaitsForQueuedDma();
+        HeldImageArgumentsDrainBeforeRead();
+        WriteCompletenessControlsIndirectDrain(true);
+        WriteCompletenessControlsIndirectDrain(false);
         TrailingZeroCountRecordIsNotQueued();
         OutOfRangeIndexedRecordIsNotQueued();
         AgcDriverShutdown_nid_postfix();

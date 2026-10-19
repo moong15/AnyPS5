@@ -486,6 +486,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
 
     if (pipelined) {
         const auto recipe = keepVariant != nullptr ? keepVariant->recipe.load(std::memory_order_acquire) : nullptr;
+        const std::array<Graphics::CompiledShader, 1> writeStages{{{ShaderRecompiler::ShaderStage::Compute, &compiled, 0}}};
+        const bool writesComplete = DrawWritesComplete({}, writeStages);
         auto itemReads = DispatchReadRanges(compiled);
         for (const auto& region : captured) {
             if (!region.bytes.empty()) itemReads.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
@@ -554,7 +556,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
                 std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
                 throw std::runtime_error(where + std::string(error.what()));
             }
-        }, std::move(itemWrites), 0, {}, std::move(itemReads), true, true);
+        }, std::move(itemWrites), 0, {}, std::move(itemReads), true, true, writesComplete);
         ReportDispatchItems(profile);
         return;
     }

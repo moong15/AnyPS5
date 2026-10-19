@@ -45,6 +45,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatBuiltins.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HostEntropy.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/DinkumwareAtomics.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Time.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/AtomicBuiltins.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FileAndHeap.cpp
@@ -400,6 +401,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_environment COMMAND guest_environment_tests)
     if(WIN32)
         set_tests_properties(guest_environment PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_dinkumware_atomics_tests ${LIBS_INCLUDE_DIR}/tests/GuestDinkumwareAtomics.cpp)
+    target_include_directories(guest_dinkumware_atomics_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_dinkumware_atomics_tests PRIVATE libc)
+    configure_windows_unwind(guest_dinkumware_atomics_tests)
+    add_test(NAME guest_dinkumware_atomics COMMAND guest_dinkumware_atomics_tests)
+    if(WIN32)
+        set_tests_properties(guest_dinkumware_atomics PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_hostname_tests ${LIBS_INCLUDE_DIR}/tests/GuestHostname.cpp)

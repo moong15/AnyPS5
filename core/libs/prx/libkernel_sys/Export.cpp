@@ -388,9 +388,16 @@ int APS5_VABI chroot_nid_postfix(const char* path) {
 int APS5_VABI symlink_nid_postfix(const char* target, const char* created) {
     if (target == nullptr || created == nullptr) return static_cast<int>(Fail(GuestEfault));
     if (*target == '\0' || *created == '\0') return static_cast<int>(Fail(GuestEnoent));
-    if (*target == '/') {
+    const std::filesystem::path contents(target);
+    if (contents.has_root_name() || contents.has_root_directory()) {
         NotImplemented_nid_no_patch("symlink: absolute targets");
         return -1;
+    }
+    for (const auto& part : contents) {
+        if (part == "..") {
+            NotImplemented_nid_no_patch("symlink: parent-directory targets");
+            return -1;
+        }
     }
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(created, native)) return static_cast<int>(Fail(error));
@@ -401,7 +408,6 @@ int APS5_VABI symlink_nid_postfix(const char* target, const char* created) {
     if (std::filesystem::exists(std::filesystem::symlink_status(native, error))) return static_cast<int>(Fail(GuestEexist));
 #endif
     if (!std::filesystem::is_directory(native.parent_path(), error)) return static_cast<int>(Fail(GuestEnoent));
-    const std::filesystem::path contents(target);
     const bool directory = std::filesystem::is_directory(native.parent_path() / contents, error);
 #ifdef _WIN32
     DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;

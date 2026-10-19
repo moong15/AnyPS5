@@ -237,6 +237,45 @@ std::shared_ptr<ShaderResources> ImageResources(const Context& context, const Bl
     return std::make_shared<ShaderResources>(context, shader);
 }
 
+void resourceKeyTests(Context context) {
+    PlaceholderImages placeholders(context);
+    context.placeholderImages = &placeholders;
+    TextureCache textures(context);
+    context.textureCache = &textures;
+    Block block(context);
+    auto first = ImageResources(context, block, 0, 1, false);
+    auto second = ImageResources(context, block, 0, 1, false);
+    ResourceCache cache;
+    cache.SetBase(2, 8);
+    for (const auto words : {std::pair{1u, 9u}, std::pair{3u, 59u}}) {
+        ResourceCache::Key a(100, 0);
+        for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<std::uint32_t>(i * 1234567u);
+        auto b = a;
+        b[words.first] ^= 0x80000000u;
+        b[words.second] ^= 0x80000000u;
+        cache.Insert(a, first);
+        cache.Insert(b, second);
+        Require(cache.Size() == 2 && cache.Find(a) == first && cache.Find(b) == second, "old lane collision lost a resource cache entry");
+        Require(cache.Touch(a), "touch missed a retained collision key");
+        cache.Insert({42}, second);
+        Require(cache.Find(b) == nullptr && cache.Find(a) == first, "touch did not protect the key from eviction");
+        cache.Remove(a, second.get());
+        Require(cache.Find(a) == first, "remove ignored the object guard");
+        cache.Remove(a, first.get());
+        Require(!cache.Touch(a) && cache.Find(a) == nullptr, "removed key remained reachable");
+        cache.Insert(b, second);
+        Require(cache.Find(b) == second, "reinsertion after eviction failed");
+        const auto image = StorageTexture::FindLive(block.Surface(0), SurfaceBytes);
+        Require(image != nullptr, "resource keys have no storage image");
+        cache.RemoveImage(image.get());
+        Require(cache.Size() == 0, "image removal retained resource keys");
+        cache.Insert(a, first);
+        Require(cache.Find(a) == first, "reinsertion after image removal failed");
+        cache.Clear();
+        Require(cache.Size() == 0, "clear retained resource keys");
+    }
+}
+
 void recorderEvictionTests(const Context& context, const Block& block) {
     auto& cache = SharedResourceCache();
     cache.Clear();
@@ -751,6 +790,12 @@ int main(int argc, char** argv) {
         }
         TextureDetiler detiler(context);
         context.detiler = &detiler;
+        if (mode == "resource-key") {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            resourceKeyTests(context);
+            ClearCachedTextures(context.device);
+            return 0;
+        }
         if (resources) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             if (!resourceCacheTests(context, mode)) return VulkanTestSkipped;

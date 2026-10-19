@@ -345,7 +345,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_UNREGISTERED_DROP` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Texture.cpp` |  | stores a storage image's pending results even when its memory is no longer registered, instead of dropping them |
 | `APS5_NO_UNTRACKED_KEY_PROOFS` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/DccMetadata.cpp` |  | disables carrying DCC key proofs over untracked memory |
 | `APS5_NO_UNTRACKED_REVALIDATE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | disables stamp proofs for revalidating untracked surfaces |
-| `APS5_NO_USER_WORD_MASK` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp` |  | disables masking user words in draw decode keys |
+| `APS5_NO_USER_WORD_MASK` | exact `1` | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Draw/DrawLookup.cpp` |  | requires all user words unchanged for stage reuse on data-only draw hits |
 | `APS5_NO_VALIDATE_CACHE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Draw.cpp` |  | validates every draw instead of serving the validation memo |
 | `APS5_NO_VALIDATE_SKIP` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/WriteEvidence.cpp` |  | syncs every pending write instead of skipping validation on written-element evidence |
 | `APS5_NO_VOUCHED_VALIDATION` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Dispatch/VariantValidation.cpp` |  | validates a cached draw or dispatch through its per-run checks instead of its table block's vouch |

@@ -46,7 +46,7 @@ public:
     // `reads` are guest ranges the commit reads at its own place in the command stream (the draw's
     // index range, known from the packets): a write the guest ordered after the item must not be
     // recorded into them before the item runs, or the commit reads what came later. See HeldReads.
-    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false);
+    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
     static bool PreciseDrains();
     bool DrainPacket(std::span<const std::uint32_t> packet);
@@ -55,6 +55,7 @@ public:
     static std::uint64_t DrainRequestsByOpcode(std::uint32_t opcode);
     bool Busy() const { return outstanding.load(std::memory_order_acquire) != 0; }
     std::size_t Outstanding() const { return outstanding.load(std::memory_order_acquire); }
+    bool HasIncompleteWrites();
     bool Overlaps(std::uint64_t address, std::size_t bytes);
     std::optional<std::uint64_t> PendingLabel(std::uint64_t address, std::size_t bytes);
     // Whether a queued commit, itself included, still has to read the range from guest memory. The
@@ -72,6 +73,7 @@ private:
         std::vector<Range> reads;
         bool bounded = false;
         bool orderedReads = false;
+        bool writesComplete = true;
     };
     DrawPipeline() = default;
     void drain(DrainReason reason, std::uint32_t opcode);

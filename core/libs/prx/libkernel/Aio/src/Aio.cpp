@@ -134,9 +134,9 @@ int SubmitCommands(KernelAioRwRequest* req, std::int32_t size, bool write, std::
 }
 
 int SubmitCommandsMultiple(KernelAioRwRequest* req, std::int32_t size, bool write, std::int32_t* id, const char* name) {
+    if (req != nullptr && id != nullptr && size > AioRequestNumMax) throw std::runtime_error(std::string(name) + ": more than 128 requests per batch is not modelled");
     const int error = ValidateRequests(req, size, id);
     if (error != 0) return error;
-    if (size > AioRequestNumMax) throw std::runtime_error(std::string(name) + ": more than 128 requests per batch is not modelled");
     for (std::int32_t i = 0; i < size; ++i) {
         const std::int32_t queue = AllocateId();
         SetState(queue, RunRequest(req[i], write) ? AioCompleted : AioAborted);

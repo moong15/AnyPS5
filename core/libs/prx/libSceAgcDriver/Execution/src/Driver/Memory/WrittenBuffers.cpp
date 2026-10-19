@@ -168,6 +168,39 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawReadRanges(const Graphi
     return ranges;
 }
 
+bool DrawWritesComplete(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> stages) {
+    for (const auto& stage : stages) {
+        if (stage.program == nullptr || stage.program->bdaAbiVersion != 0) return false;
+        for (const auto& binding : stage.program->bindings) {
+            using Role = ShaderRecompiler::DescriptorRole;
+            if (binding.role == Role::Gds || binding.role == Role::BdaPagetable || binding.role == Role::FaultBuffer || binding.role == Role::ImageTable) return false;
+            const bool buffer = binding.role == Role::GuestBuffers;
+            const bool image = binding.role == Role::GuestImages && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
+            if (!buffer && !image) continue;
+            for (std::uint32_t element = 0; element < binding.count; ++element) {
+                const auto& written = buffer ? binding.bufferWritten : binding.imageWritten;
+                if (element < written.size() && !written[element]) continue;
+                const std::size_t words = buffer ? 4 : 8;
+                if (binding.guestDescriptor.size() < (static_cast<std::size_t>(element) + 1) * words) return false;
+                if (image) {
+                    const auto resource = Graphics::DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * words, words));
+                    if (resource.baseAddress != 0 && Graphics::DescribeSurface(resource).guestBytes == 0) return false;
+                }
+            }
+        }
+    }
+    const auto colorComplete = [](const Graphics::ColorTarget& color) {
+        if (color.cmaskAddress != 0 && color.cmaskBytes == 0) return false;
+        if (color.address == 0) return true;
+        if (color.bytes == 0) return false;
+        return ExactDrawWrites() || static_cast<std::uint64_t>(color.bytes) * std::max<std::uint32_t>(color.depth, 1) <= 2ull * color.bytes + 64 * 1024;
+    };
+    if (graphics.hasColorTarget && !colorComplete(graphics.color)) return false;
+    if (!std::all_of(graphics.colors.begin(), graphics.colors.end(), colorComplete)) return false;
+    if (graphics.depth && (graphics.depth->address != 0 || graphics.depth->stencilAddress != 0) && (graphics.depth->extent.width == 0 || graphics.depth->extent.height == 0)) return false;
+    return true;
+}
+
 bool ExactDrawWrites() {
     static const bool exact = [] { const char* text = std::getenv("APS5_EXACT_DRAW_WRITES"); return text == nullptr || std::strcmp(text, "0") != 0; }();
     return exact;

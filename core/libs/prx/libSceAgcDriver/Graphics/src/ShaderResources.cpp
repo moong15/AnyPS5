@@ -12,6 +12,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -1885,6 +1886,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                         const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                         const bool atomic = element < binding.bufferAtomic.size() && binding.bufferAtomic[element];
                         const bool read = element < binding.bufferRead.size() && binding.bufferRead[element];
+                        const std::uint32_t extent = element < binding.bufferExtent.size() ? binding.bufferExtent[element] : 0u;
                         const auto descriptorSpan = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4);
                         // Diagnostic aid: name where the descriptor was read from. addGuestBuffer
                         // reports the four DWORDs it rejected, which on their own do not say whether
@@ -1900,7 +1902,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                         // question here is the layout arithmetic, not the shader.
                         std::size_t index = 0;
                         try {
-                            index = addGuestBuffer(descriptorSpan, target, indexAddress, indexBytes, written, atomic, read);
+                            index = addGuestBuffer(descriptorSpan, target, indexAddress, indexBytes, written, atomic, read, extent);
                         } catch (const std::runtime_error& error) {
                             char where[320];
                             std::snprintf(where, sizeof(where),
@@ -3639,18 +3641,17 @@ bool ResourceCache::FastKeyHash() {
 }
 
 std::uint64_t ResourceCache::hashKey(const Key& key) {
-    if (!FastKeyHash()) return static_cast<std::uint64_t>(KeyHash{}(key));
     constexpr std::uint64_t prime = 1099511628211ull;
     std::uint64_t lanes[4] = {14695981039346656037ull, 0x9e3779b97f4a7c15ull, 0xc2b2ae3d27d4eb4full, 0x165667b19e3779f9ull};
     const auto pair = [&](std::size_t at) { return key[at] | static_cast<std::uint64_t>(key[at + 1]) << 32u; };
     std::size_t at = 0;
     for (; at + 8 <= key.size(); at += 8) {
-        lanes[0] = (lanes[0] ^ pair(at)) * prime;
-        lanes[1] = (lanes[1] ^ pair(at + 2)) * prime;
-        lanes[2] = (lanes[2] ^ pair(at + 4)) * prime;
-        lanes[3] = (lanes[3] ^ pair(at + 6)) * prime;
+        lanes[0] = (std::rotl(lanes[0], 29) ^ pair(at)) * prime;
+        lanes[1] = (std::rotl(lanes[1], 29) ^ pair(at + 2)) * prime;
+        lanes[2] = (std::rotl(lanes[2], 29) ^ pair(at + 4)) * prime;
+        lanes[3] = (std::rotl(lanes[3], 29) ^ pair(at + 6)) * prime;
     }
-    for (; at < key.size(); ++at) lanes[at & 3u] = (lanes[at & 3u] ^ key[at]) * prime;
+    for (; at < key.size(); ++at) lanes[at & 3u] = (std::rotl(lanes[at & 3u], 29) ^ key[at]) * prime;
     std::uint64_t hash = key.size();
     for (const auto lane : lanes) hash = (hash ^ lane ^ (lane >> 29u)) * 0x9e3779b97f4a7c15ull;
     return hash ^ (hash >> 32u);
@@ -3658,16 +3659,16 @@ std::uint64_t ResourceCache::hashKey(const Key& key) {
 
 std::shared_ptr<ShaderResources> ResourceCache::Find(const Key& key) {
     resourceCacheFinds.fetch_add(1, std::memory_order_relaxed);
-    const auto hash = hashKey(key);
+    const auto hash = FastKeyHash() ? hashKey(key) : 0;
     std::lock_guard lock(mutex);
     const auto found = index.find(hash, key);
     if (found == nullptr) {
-        noteReturn(hash);
+        if (!fixedCapacity) noteReturn(FastKeyHash() ? hash : KeyHash{}(key));
         noteMiss(key);
         return nullptr;
     }
     entries.splice(entries.begin(), entries, *found);
-    noteUse(hash);
+    if (!fixedCapacity && capacity > baseEntries) noteUse(FastKeyHash() ? hash : KeyHash{}(key));
     return (*found)->resources;
 }
 
@@ -3838,7 +3839,7 @@ void ResourceCache::noteMiss(const Key& key) {
 }
 
 void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> resources, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
-    const auto hash = hashKey(key);
+    const auto hash = FastKeyHash() ? hashKey(key) : KeyHash{}(key);
     std::lock_guard lock(mutex);
     dropReleasedTextures(evicted);
     if (!resources->HasCachedStorageImages() || resources->HoldsReleasedTexture()) return;
@@ -3879,12 +3880,13 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
 }
 
 void ResourceCache::Remove(const Key& key, const ShaderResources* object) {
-    const auto hash = hashKey(key);
+    const auto hash = FastKeyHash() ? hashKey(key) : 0;
     std::lock_guard lock(mutex);
     const auto found = index.find(hash, key);
     if (found == nullptr || (object != nullptr && (*found)->resources.get() != object)) return;
-    entries.erase(*found);
+    const auto entry = *found;
     index.erase(hash, key);
+    entries.erase(entry);
 }
 
 void ResourceCache::RemoveImage(const StorageTexture* image, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
@@ -3915,12 +3917,12 @@ void ResourceCache::dropReleasedTextures(std::vector<std::shared_ptr<ShaderResou
 
 bool ResourceCache::Touch(const Key& key) {
     resourceCacheTouches.fetch_add(1, std::memory_order_relaxed);
-    const auto hash = hashKey(key);
+    const auto hash = FastKeyHash() ? hashKey(key) : 0;
     std::lock_guard lock(mutex);
     const auto found = index.find(hash, key);
     if (found == nullptr) return false;
     entries.splice(entries.begin(), entries, *found);
-    noteUse(hash);
+    if (!fixedCapacity && capacity > baseEntries) noteUse(FastKeyHash() ? hash : KeyHash{}(key));
     return true;
 }
 
@@ -4223,7 +4225,7 @@ std::uint64_t ShaderResources::guestBufferBytes(std::span<const std::uint32_t> w
     return byteSize;
 }
 
-std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, bool written, bool atomic, bool read) {
+std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, bool written, bool atomic, bool read, std::uint32_t extent) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1] & ~0x40000000u, words[2], words[3]}};
     Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
@@ -4266,7 +4268,8 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     static const bool allWritten = std::getenv("APS5_ALL_BUFFERS_WRITTEN") != nullptr;
     Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
     written = written || allWritten;
-    const bool swept = read && dispatchThreads != 0 && descriptor.Stride() != 0 && dispatchThreads * descriptor.Stride() * 2u >= byteSize;
+    const std::uint64_t recordBytes = descriptor.Stride() != 0 ? descriptor.Stride() : extent;
+    const bool swept = read && dispatchThreads != 0 && recordBytes != 0 && dispatchThreads * recordBytes * 2u >= byteSize;
     if (written) guestMemory.AddWritable(address, size, atomic, swept);
     else {
         guestMemory.AddReadable(address, size);
