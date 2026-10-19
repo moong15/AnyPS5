@@ -114,6 +114,8 @@ public:
     }
     bool Recording() const { return open != nullptr; }
     bool Idle() const { return open == nullptr && inFlight.empty(); }
+    static std::uint64_t BlockingWaits();
+    const Context& DeviceContext() const { return context; }
     std::uint64_t OpenSerial() const { return submissions + 1; }
     std::uint64_t CompletedThrough() const { return inFlight.empty() ? submissions : inFlight.front()->serial - 1; }
     // Whether recorded work still has completion actions (write-backs the CPU must see) to run.
@@ -659,6 +661,9 @@ public:
     void NoteSmallDmaDestination(std::uint64_t address, std::size_t bytes);
 
 private:
+    void serviceSmallStoreActions();
+    bool servicingSmallStoreActions = false;
+    std::vector<std::function<void()>> smallStoreActions;
     struct Batch {
         VkCommandBuffer commands = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;

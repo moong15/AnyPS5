@@ -114,6 +114,19 @@ std::atomic<std::uint64_t> depthCopyTextures{0}, depthCopyRefreshes{0};
 std::atomic<std::uint64_t> refreshesProved{0};
 std::atomic<std::uint64_t> untrackedCompares{0};
 
+struct SmallStoreCounts {
+    std::uint64_t now = 0, deferred = 0, retried = 0, later = 0, waits = 0, fences = 0;
+};
+
+std::atomic<bool> smallStoresDeferred{false};
+struct SmallStoreRunningTag;
+using SmallStoreRunning = HostThreadSlot<bool, SmallStoreRunningTag>;
+
+struct SmallStoreScope {
+    SmallStoreScope() { SmallStoreRunning::Set(true); }
+    ~SmallStoreScope() { SmallStoreRunning::Set(false); }
+};
+
 struct StorageTraffic {
     AgcDriver::Mutex mutex;
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> writeBacks;
@@ -123,6 +136,7 @@ struct StorageTraffic {
     std::array<std::uint64_t, 5> clearSizes{};
     std::uint64_t clearUnchanged = 0, clearUntracked = 0, clearFirst = 0, clearSkipped = 0, clearSkippedBytes = 0, clearOverflow = 0;
     std::uint64_t directWriteBacks = 0;
+    std::map<std::string, SmallStoreCounts> smallStores;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
 
@@ -173,9 +187,21 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
     AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu, evicted stale %llu\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(staleEvicted));
+    for (const auto& [site, counts] : traffic.smallStores) {
+        AgcDriver::ProfilePrint_nid_no_patch("[storage] small stores %s (10 s): now %llu deferred %llu retried %llu later %llu blocking attempts %llu blocking fences %llu\n", site.c_str(), static_cast<unsigned long long>(counts.now), static_cast<unsigned long long>(counts.deferred), static_cast<unsigned long long>(counts.retried), static_cast<unsigned long long>(counts.later), static_cast<unsigned long long>(counts.waits), static_cast<unsigned long long>(counts.fences));
+    }
+    traffic.smallStores.clear();
     traffic.writeBacks.clear();
     traffic.uploadReasons.clear();
     traffic.directWriteBacks = 0;
+}
+
+void CountSmallStore(const char* site, std::uint64_t SmallStoreCounts::*counter, std::uint64_t count = 1) {
+    if (!LookupOutcomes::Profiled()) return;
+    auto& traffic = Traffic();
+    std::lock_guard lock(traffic.mutex);
+    traffic.smallStores[site].*counter += count;
+    reportStorageTraffic(traffic);
 }
 
 void countStorageUpload(std::size_t path, std::uint64_t bytes) {
@@ -3861,8 +3887,10 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
             recorder->Reap();
             if (const auto writer = recorder->PendingWriterSerial(address, bytes); writer == recorder->OpenSerial()) {
                 Recorder::CountSync(recorder->OpenWriteOverlaps(address, bytes) ? 1 : 3);
+                CountSmallStore(reason, &SmallStoreCounts::waits);
                 recorder->Sync();
             } else if (writer != 0) {
+                CountSmallStore(reason, &SmallStoreCounts::waits);
                 recorder->FinishUpTo(writer);
             }
         } catch (...) {
@@ -3877,6 +3905,10 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
             // Only the pending layers the access overlaps are stored; the others stay pending (the
             // store re-registers the image for them).
             texture->writeBack(address, bytes);
+            if (texture->smallStoreDeferred) {
+                texture->smallStoreDeferred = texture->Dirty();
+                CountSmallStore(reason, &SmallStoreCounts::later);
+            }
         } catch (...) {
             if (!failure) failure = std::current_exception();
         }
@@ -4075,6 +4107,7 @@ void StorageTexture::awaitStoredSave(const std::vector<bool>* layers) {
     if (last <= first) return;
     auto* recorder = Recorder::Active();
     Require(recorder != nullptr, "a write-back's saved guest bytes are pending without a recorder");
+    CountSmallStore(flushReason != nullptr ? flushReason : "saved bytes", &SmallStoreCounts::waits);
     recorder->SyncThrough(first, static_cast<std::size_t>(last - first));
     const auto outstanding = [&] {
         for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) {
@@ -4141,7 +4174,69 @@ void StorageTexture::FlushAllPending(const char* reason) {
     static_cast<void>(FlushPending(0, std::numeric_limits<std::size_t>::max(), nullptr, reason));
 }
 
+bool StorageTexture::DeferSmallStores() {
+    static const bool enabled = std::getenv("APS5_DEFER_SMALL_STORES") != nullptr;
+    return enabled;
+}
+
+void StorageTexture::FlushDeferredSmallStores(const char* reason) {
+    if (!SmallStoresDeferred() || SmallStoreRunning::Get()) return;
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    const SmallStoreScope runningScope;
+    struct Waits {
+        const char* site;
+        std::uint64_t before = Recorder::BlockingWaits();
+        ~Waits() {
+            const auto waits = Recorder::BlockingWaits() - before;
+            if (waits != 0) CountSmallStore(site, &SmallStoreCounts::fences, waits);
+        }
+    } waits{reason};
+    std::vector<std::shared_ptr<StorageTexture>> deferred;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        for (auto* texture : pending.textures) {
+            if (!texture->smallStoreDeferred) continue;
+            if (auto alive = texture->weak_from_this().lock()) deferred.push_back(std::move(alive));
+        }
+    }
+    for (const auto& texture : deferred) {
+        const auto address = texture->descriptor.baseAddress;
+        const auto bytes = static_cast<std::size_t>(texture->guestBytes);
+        CountSmallStore(reason, &SmallStoreCounts::retried);
+        if (FlushPending(address, bytes, nullptr, reason)) {
+            texture->smallStoreDeferred = false;
+        }
+    }
+    auto& pending = Pending();
+    std::lock_guard lock(pending.mutex);
+    const auto marked = [](const auto* texture) { return texture->smallStoreDeferred; };
+    smallStoresDeferred.store(std::any_of(pending.textures.begin(), pending.textures.end(), marked) || std::any_of(pending.flushing.begin(), pending.flushing.end(), marked), std::memory_order_relaxed);
+}
+
+bool StorageTexture::SmallStoresDeferred() {
+    return DeferSmallStores() && smallStoresDeferred.load(std::memory_order_relaxed);
+}
+
 std::size_t StorageTexture::StoreSmallPending(const char* reason) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    const bool defer = DeferSmallStores();
+    struct Waits {
+        const char* site;
+        std::uint64_t before = Recorder::BlockingWaits();
+        ~Waits() {
+            const auto waits = Recorder::BlockingWaits() - before;
+            if (waits != 0) CountSmallStore(site, &SmallStoreCounts::fences, waits);
+        }
+    } waits{reason};
+    if (SmallStoreRunning::Get()) return 0;
+    const SmallStoreScope runningScope;
+    auto* recorder = Recorder::Active();
+    if (defer && (recorder == nullptr || Recorder::InCompletion())) return 0;
+    if (defer) {
+        Require(std::getenv("APS5_COMPLETION_STORE_SYNC") == nullptr, "nonblocking small stores with completion-store syncs are not implemented");
+        recorder->Reap();
+    }
     std::vector<std::shared_ptr<StorageTexture>> small;
     {
         auto& pending = Pending();
@@ -4152,11 +4247,61 @@ std::size_t StorageTexture::StoreSmallPending(const char* reason) {
         }
     }
     std::size_t stored = 0;
+    bool deferred = false, submit = false;
     for (const auto& texture : small) {
         const auto address = texture->descriptor.baseAddress;
         const auto bytes = static_cast<std::size_t>(texture->guestBytes);
         if (!HostImportCovers(texture->context, address, bytes)) continue;
-        if (FlushPending(address, bytes, nullptr, reason)) ++stored;
+        const bool retry = texture->smallStoreDeferred;
+        if (retry) CountSmallStore(reason, &SmallStoreCounts::retried);
+        bool ready = true;
+        if (defer) {
+            auto& pending = Pending();
+            std::lock_guard lock(pending.mutex);
+            for (const auto* other : pending.textures) {
+                if (!other->overlaps(address, bytes) || !other->pendingUnitInside(address, bytes)) continue;
+                const auto base = other->descriptor.baseAddress;
+                const auto size = static_cast<std::size_t>(other->guestBytes);
+                Require(HostImportCovers(other->context, base, size), "nonblocking small stores overlapping an image without a complete host import are not implemented");
+                ready = ready && !AgcDriver::DriverDetail::DrawPipeline::HeldReads(base, size);
+                ready = ready && std::none_of(other->savedTicket.begin(), other->savedTicket.end(), [](auto ticket) { return ticket != 0; });
+                const auto writer = recorder->PendingWriterSerial(base, size);
+                if (writer != 0) ready = false;
+                submit = submit || writer == recorder->OpenSerial();
+                if (other->descriptor.dccAddress != 0) {
+                    const auto keys = other->descriptor.dccAddress;
+                    const auto keyBytes = DccKeyCount(other->descriptor, other->guestBytes);
+                    Require(std::getenv("APS5_CPU_DCC_KEYS") == nullptr && HostImportCovers(other->context, keys, keyBytes), "nonblocking small stores with CPU DCC key stores are not implemented");
+                    const auto keyWriter = recorder->PendingWriterSerial(keys, keyBytes);
+                    if (keyWriter != 0) ready = false;
+                    submit = submit || keyWriter == recorder->OpenSerial();
+                }
+            }
+        }
+        if (!ready) {
+            texture->smallStoreDeferred = true;
+            deferred = true;
+            submit = true;
+            CountSmallStore(reason, &SmallStoreCounts::deferred);
+            continue;
+        }
+        if (FlushPending(address, bytes, nullptr, reason)) {
+            ++stored;
+            texture->smallStoreDeferred = false;
+            if (!retry) CountSmallStore(reason, &SmallStoreCounts::now);
+        } else if (defer && texture->Dirty()) {
+            texture->smallStoreDeferred = true;
+            deferred = true;
+        }
+    }
+    if (defer) {
+        {
+            auto& pending = Pending();
+            std::lock_guard lock(pending.mutex);
+            deferred = deferred || std::any_of(pending.flushing.begin(), pending.flushing.end(), [](const auto* texture) { return texture->smallStoreDeferred; });
+        }
+        smallStoresDeferred.store(deferred, std::memory_order_relaxed);
+        if (submit || stored != 0) recorder->Submit();
     }
     return stored;
 }

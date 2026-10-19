@@ -40,7 +40,7 @@ std::array<std::uint32_t, 7> Fill(std::size_t word) {
     return {0xc0055000u, 2u << 29u, 99u, 0u, static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>(destination >> 32u), 4u};
 }
 
-void Exercise(std::vector<std::uint32_t> packet, bool hazard, bool bounded, bool execute = true) {
+void Exercise(std::vector<std::uint32_t> packet, bool hazard, bool bounded, bool execute = true, bool writesComplete = true) {
     auto& pipeline = DrawPipeline::Queue0();
     Memory.fill(7u);
     std::atomic<bool> release{false}, entered{false}, finished{false};
@@ -58,11 +58,13 @@ void Exercise(std::vector<std::uint32_t> packet, bool hazard, bool bounded, bool
         while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
         observed = Memory[0];
         Memory[1] = 42u;
-    }, {{Address(1), Address(2)}}, 0, {}, {{Address(0), Address(1)}}, bounded);
+    }, {{Address(1), Address(2)}}, 0, {}, {{Address(0), Address(1)}}, bounded, false, writesComplete);
     WaitUntil([&] { return entered.load(std::memory_order_acquire); });
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     const auto before = DrawPipeline::DrainRequestsByOpcode(opcode);
-    const bool expectedDrain = hazard || !bounded || !DrawPipeline::PreciseDrains();
+    const bool readOnly = opcode == 0x3c || opcode == 0x93;
+    const bool complete = readOnly && DrawPipeline::PreciseReadDrains() ? writesComplete : bounded;
+    const bool expectedDrain = hazard || !complete || !DrawPipeline::PreciseDrains();
     work = std::async(std::launch::async, [&] {
         const bool drained = pipeline.DrainPacket(packet);
         if (execute) {
@@ -109,6 +111,13 @@ int main() {
         for (const auto word : {1u, 2u}) {
             const auto address = Address(word);
             Exercise({0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 42u, 0xffffffffu, 4u}, word == 1, true, false);
+        }
+        for (const auto word : {0u, 1u, 2u}) {
+            const auto address = Address(word);
+            const std::vector<std::uint32_t> wait{0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 42u, 0xffffffffu, 4u};
+            Exercise(wait, word == 1, false, false);
+            Exercise(wait, word == 1, false, false, false);
+            Exercise(wait, word == 1, true, false, false);
         }
         Exercise({0xc0022000u, 0u, 0u, 0u}, false, true);
         std::puts("precise draw drain tests passed");

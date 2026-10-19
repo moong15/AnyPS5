@@ -18,7 +18,7 @@ namespace AgcDriver::DriverDetail {
 
 namespace {
 
-constexpr std::array<const char*, static_cast<std::size_t>(DrawPipeline::DrainReason::Count)> DrainNames{"packet", "flush", "labels", "capture", "indirect", "submission"};
+constexpr std::array<const char*, static_cast<std::size_t>(DrawPipeline::DrainReason::Count)> DrainNames{"packet", "flush", "labels", "capture", "indirect", "submission", "gate"};
 
 std::atomic<unsigned> runningCommitters{0};
 
@@ -180,6 +180,7 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
         drainText += item;
     }
     drainText += "; packet drains by opcode:";
+    const auto opcodeDrains = drainOpcodes;
     for (int shown = 0; shown < 5; ++shown) {
         const auto top = std::max_element(drainOpcodes.begin(), drainOpcodes.begin() + 0x100);
         if (*top == 0) break;
@@ -189,6 +190,18 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
         *top = 0;
     }
     drainOpcodes = {};
+    drainText += "; drain wait by opcode:";
+    for (int shown = 0; shown < 6; ++shown) {
+        const auto top = std::max_element(drainOpcodeWaitNs.begin(), drainOpcodeWaitNs.end());
+        if (*top == 0) break;
+        const auto opcode = static_cast<std::size_t>(top - drainOpcodeWaitNs.begin());
+        char item[64];
+        if (opcode == 0x100) std::snprintf(item, sizeof(item), " none x%llu (%.1f ms)", static_cast<unsigned long long>(opcodeDrains[opcode]), static_cast<double>(*top) / 1e6);
+        else std::snprintf(item, sizeof(item), " 0x%02x x%llu (%.1f ms)", static_cast<unsigned>(opcode), static_cast<unsigned long long>(opcodeDrains[opcode]), static_cast<double>(*top) / 1e6);
+        drainText += item;
+        *top = 0;
+    }
+    drainOpcodeWaitNs = {};
     drainText += "; packet hazards (overlap/disjoint/unknown):";
     for (std::size_t opcode = 0; opcode < packetHazards.size(); ++opcode) {
         const auto& counts = packetHazards[opcode];
@@ -324,11 +337,17 @@ bool DrawPipeline::PreciseDrains() {
     return enabled;
 }
 
+bool DrawPipeline::PreciseReadDrains() {
+    static const bool enabled = PreciseDrains() && std::getenv("APS5_PRECISE_READ_DRAINS") != nullptr;
+    return enabled;
+}
+
 bool DrawPipeline::DrainPacket(std::uint32_t opcode, std::span<const Range> reads, std::span<const Range> writes, bool bounded) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!Busy()) return false;
     bool overlap = false;
     bool complete = bounded;
+    const bool readOnly = writes.empty() && PreciseReadDrains();
     {
         std::lock_guard lock(mutex);
         const auto intersects = [](const Range& a, const Range& b) { return a.first < b.second && b.first < a.second; };
@@ -336,8 +355,8 @@ bool DrawPipeline::DrainPacket(std::uint32_t opcode, std::span<const Range> read
         complete &= std::all_of(reads.begin(), reads.end(), valid) && std::all_of(writes.begin(), writes.end(), valid);
         for (const auto& item : items) {
             if (!reads.empty() || !writes.empty()) {
-                complete &= item.bounded;
-                complete &= std::all_of(item.reads.begin(), item.reads.end(), valid) && std::all_of(item.writes.begin(), item.writes.end(), valid);
+                complete &= readOnly ? item.writesComplete : item.bounded;
+                complete &= (readOnly || std::all_of(item.reads.begin(), item.reads.end(), valid)) && std::all_of(item.writes.begin(), item.writes.end(), valid);
             }
             for (const auto& range : reads) {
                 for (const auto& pending : item.writes) overlap |= intersects(range, pending);
@@ -375,7 +394,9 @@ void DrawPipeline::drain(DrainReason reason, std::uint32_t opcode) {
     const auto index = static_cast<std::size_t>(reason);
     ++drains[index];
     ++drainOpcodes[std::min<std::uint32_t>(opcode, 0x100)];
-    drainWaitNs[index] += elapsedNs(start);
+    const auto waited = elapsedNs(start);
+    drainWaitNs[index] += waited;
+    drainOpcodeWaitNs[std::min<std::uint32_t>(opcode, 0x100)] += waited;
     rethrowFailure();
 }
 

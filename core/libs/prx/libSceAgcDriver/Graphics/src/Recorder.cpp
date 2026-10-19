@@ -3710,6 +3710,10 @@ void Recorder::AfterCompletions(std::uint64_t address, std::span<const std::byte
 }
 
 bool Recorder::AfterRecordedWork(std::function<void()> action) {
+    if (activeRecorder == this && (StorageTexture::SmallStoresDeferred() || !smallStoreActions.empty())) {
+        smallStoreActions.push_back(std::move(action));
+        return true;
+    }
     if (Idle()) return false;
     Batch& batch = open != nullptr ? *open : *inFlight.back();
     batch.completions.push_back(std::move(action));
@@ -3719,6 +3723,21 @@ bool Recorder::AfterRecordedWork(std::function<void()> action) {
         pendingLabelSince.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
     }
     return true;
+}
+
+void Recorder::serviceSmallStoreActions() {
+    if (activeRecorder != this || servicingSmallStoreActions || InCompletion()) return;
+    struct Servicing {
+        bool& flag;
+        explicit Servicing(bool& flag) : flag(flag) { flag = true; }
+        ~Servicing() { flag = false; }
+    } servicing(servicingSmallStoreActions);
+    if (StorageTexture::SmallStoresDeferred()) static_cast<void>(StorageTexture::StoreSmallPending("reap"));
+    if (StorageTexture::SmallStoresDeferred() || smallStoreActions.empty()) return;
+    auto actions = std::exchange(smallStoreActions, {});
+    for (auto& action : actions) {
+        if (!AfterRecordedWork(action)) action();
+    }
 }
 
 void Recorder::NoteWrittenBack(std::uint64_t address, std::size_t bytes) {
@@ -3926,6 +3945,7 @@ void Recorder::FinishUpTo(std::uint64_t serial) {
         inFlight.pop_front();
         finish(std::move(batch), true, 0);
     }
+    serviceSmallStoreActions();
 }
 
 void Recorder::Sync(bool waitUnlocked) {
@@ -3936,7 +3956,8 @@ void Recorder::Sync(bool waitUnlocked) {
     const void* caller = site != nullptr ? site : __builtin_return_address(0);
     // A commit's own sync waits for the whole recorded backlog, so the unbounded range names the same
     // target the loop below would finish: the open batch (submitted here) or the newest in flight.
-    if (waitUnlocked && syncThroughUnlocked(0, ~std::uint64_t{0}, source, caller, true)) return;
+    const bool deferredStores = activeRecorder == this && (StorageTexture::SmallStoresDeferred() || !smallStoreActions.empty());
+    if (waitUnlocked && !deferredStores && syncThroughUnlocked(0, ~std::uint64_t{0}, source, caller, true)) return;
     Submit();
     // Counted only when something is waited for: an idle recorder's Sync is free and would only
     // swamp the site table with the callers that check nothing first.
@@ -3945,6 +3966,16 @@ void Recorder::Sync(bool waitUnlocked) {
         auto batch = std::move(inFlight.front());
         inFlight.pop_front();
         finish(std::move(batch), true, source);
+    }
+    if (activeRecorder == this && StorageTexture::DeferSmallStores()) {
+        StorageTexture::FlushDeferredSmallStores("sync");
+        serviceSmallStoreActions();
+        Submit();
+        while (!inFlight.empty()) {
+            auto batch = std::move(inFlight.front());
+            inFlight.pop_front();
+            finish(std::move(batch), true, source);
+        }
     }
 }
 
@@ -4248,6 +4279,17 @@ bool Recorder::syncThroughUnlocked(std::uint64_t address, std::uint64_t end, int
     return true;
 }
 
+namespace {
+std::uint64_t& blockingStorageWaits() {
+    struct Value { std::uint64_t value = 0; };
+    return ThreadScratch<Value, Value>().value;
+}
+}
+
+std::uint64_t Recorder::BlockingWaits() {
+    return blockingStorageWaits();
+}
+
 bool Recorder::Reap() {
     PerformanceTimer frameTiming("Recorder.Reap");
     dropStaleHoldKept();
@@ -4267,6 +4309,7 @@ bool Recorder::Reap() {
         holdCounters.reapBatches += retired;
         holdCounters.reapMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
+    serviceSmallStoreActions();
     return inFlight.empty();
 }
 
@@ -4277,6 +4320,7 @@ void Recorder::waitFence(Batch& batch, int source) {
     static auto lastReport = std::chrono::steady_clock::now();
     const auto waitStart = std::chrono::steady_clock::now();
     const bool signaledAtStart = !profile || context.Function<PFN_vkGetFenceStatus>("vkGetFenceStatus")(context.device, batch.fence) == VK_SUCCESS;
+    if (!signaledAtStart) ++blockingStorageWaits();
     struct Report {
         bool enabled;
         int source;

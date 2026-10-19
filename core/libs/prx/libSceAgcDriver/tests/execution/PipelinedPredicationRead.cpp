@@ -41,7 +41,7 @@ void WritePredicate(std::vector<std::uint32_t>& words, std::uint32_t value) {
     words.insert(words.end(), {0xc0033700u, 0x00100200u, static_cast<std::uint32_t>(pointer), static_cast<std::uint32_t>(pointer >> 32u), value});
 }
 
-void PredicatedFill(std::vector<std::uint32_t>& words) {
+void Fill(std::vector<std::uint32_t>& words, bool predicated) {
     const std::array<std::uint32_t, 3> shape{64, 1, 1};
     Registers(words, 0x207, shape);
     const auto address = reinterpret_cast<std::uintptr_t>(Code.data());
@@ -52,7 +52,12 @@ void PredicatedFill(std::vector<std::uint32_t>& words) {
     const auto output = reinterpret_cast<std::uintptr_t>(Output.data());
     const std::array<std::uint32_t, 4> descriptor{static_cast<std::uint32_t>(output), static_cast<std::uint32_t>((output >> 32u) & 0xffffu) | (4u << 16u), static_cast<std::uint32_t>(Output.size()), 0x00014204u};
     Registers(words, 0x240, descriptor);
-    words.insert(words.end(), {0xc0031501u, 1, 1, 1, 0x41u});
+    words.insert(words.end(), {predicated ? 0xc0031501u : 0xc0031500u, 1, 1, 1, 0x41u});
+}
+
+void PredicatedIndirectBuffer(std::vector<std::uint32_t>& words, const std::vector<std::uint32_t>& target) {
+    const auto pointer = reinterpret_cast<std::uintptr_t>(target.data());
+    words.insert(words.end(), {0xc0023f01u, static_cast<std::uint32_t>(pointer), static_cast<std::uint32_t>(pointer >> 32u), static_cast<std::uint32_t>(target.size())});
 }
 
 void SubmitBehindCommits(std::vector<std::uint32_t>& words) {
@@ -62,13 +67,19 @@ void SubmitBehindCommits(std::vector<std::uint32_t>& words) {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
 
-void Run(std::uint32_t before, std::uint32_t written, bool expectFill) {
+void Run(std::uint32_t before, std::uint32_t written, bool expectFill, bool indirect) {
     Output.fill(Untouched);
     Predicate = {before, 0, 0, 0};
     std::vector<std::uint32_t> words;
+    std::vector<std::uint32_t> target;
     SetPredication(words, Predicate.data(), true);
     WritePredicate(words, written);
-    PredicatedFill(words);
+    if (indirect) {
+        Fill(target, false);
+        PredicatedIndirectBuffer(words, target);
+    } else {
+        Fill(words, true);
+    }
     ClearPredication(words);
     SubmitBehindCommits(words);
     AgcDriverWaitIdle_nid_postfix();
@@ -76,7 +87,7 @@ void Run(std::uint32_t before, std::uint32_t written, bool expectFill) {
     Require(Predicate[0] == written, "the WRITE_DATA to the predicate did not land");
     for (std::size_t i = 0; i < Output.size(); ++i) {
         const auto expected = expectFill ? 0u : Untouched;
-        Require(Output[i] == expected, std::string("a predicated dispatch read a predicate that a queued WRITE_DATA had not yet stored (predicate ") + std::to_string(before) + " -> " + std::to_string(written) + ", word " + std::to_string(i) + ")");
+        Require(Output[i] == expected, std::string(indirect ? "a predicated indirect buffer" : "a predicated dispatch") + " read a predicate that a queued WRITE_DATA had not yet stored (predicate " + std::to_string(before) + " -> " + std::to_string(written) + ", word " + std::to_string(i) + ")");
     }
 }
 
@@ -93,8 +104,10 @@ int main() {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
         }
-        Run(0, 1, true);
-        Run(1, 0, false);
+        for (const bool indirect : {false, true}) {
+            Run(0, 1, true, indirect);
+            Run(1, 0, false, indirect);
+        }
         AgcDriverShutdown_nid_postfix();
         std::puts("pipelined predication read tests passed");
         return 0;

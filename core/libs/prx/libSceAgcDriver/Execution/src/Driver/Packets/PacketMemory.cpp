@@ -76,6 +76,7 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
         if (const auto label = Pm4::DecodeLabelWrite(packet)) {
             const auto bytes = label->Bytes();
             if (DeferLabels() && bytes.size() <= DeferredLabel::Capacity && bytes.size() % 4 == 0 && label->address % 4 == 0) {
+                Graphics::StorageTexture::FlushDeferredSmallStores("queued label");
 
                 auto& deferred = deferredLabels();
                 if (deferred.labels.empty()) deferred.since = std::chrono::steady_clock::now();
@@ -202,6 +203,10 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
     if (header == FlipPacketHeader) {
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
         std::lock_guard gpuLock(GuestMemory::GpuMutex());
+        if (Graphics::StorageTexture::DeferSmallStores()) {
+            const auto localDevice = device.Load();
+            recordDeferredLabels(localDevice.get(), submission.queue);
+        }
         static_cast<void>(Graphics::StorageTexture::StoreSmallPending("flip"));
     }
 

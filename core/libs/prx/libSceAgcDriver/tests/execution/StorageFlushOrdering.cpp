@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
@@ -18,8 +19,12 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
+#include <cstring>
+#include <thread>
 #include <cstdio>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -152,12 +157,110 @@ void Run(AgcDriver::VulkanDevice& device, const GuestBlock& guest, std::size_t o
     Require(words[OverwrittenDword] == Overwritten, what + "the pending image's store put its older texels over a newer address-based store");
 }
 
+class WriterGate {
+public:
+    explicit WriterGate(AgcDriver::Graphics::Recorder& recorder) : context(recorder.DeviceContext()), recorder(recorder) {
+        const VkEventCreateInfo info{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+        AgcDriver::Graphics::Check(context.Function<PFN_vkCreateEvent>("vkCreateEvent")(context.device, &info, nullptr, &event), "create writer gate");
+    }
+    ~WriterGate() {
+        Release();
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        recorder.Sync();
+        context.Function<PFN_vkDestroyEvent>("vkDestroyEvent")(context.device, event, nullptr);
+    }
+    void Record(AgcDriver::Graphics::Recorder& recorder) {
+        context.Function<PFN_vkCmdWaitEvents>("vkCmdWaitEvents")(recorder.Commands(), 1, &event, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr, 0, nullptr, 0, nullptr);
+    }
+    void Release() {
+        AgcDriver::Graphics::Check(context.Function<PFN_vkSetEvent>("vkSetEvent")(context.device, event), "release writer gate");
+    }
+private:
+    AgcDriver::Graphics::Context context;
+    AgcDriver::Graphics::Recorder& recorder;
+    VkEvent event = VK_NULL_HANDLE;
+};
+
+int RunSmallStoreRetry(AgcDriver::VulkanDevice& device, bool submitted) {
+    using namespace AgcDriver::Graphics;
+    if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
+    GuestBlock guest(true);
+    constexpr std::size_t offset = 4096;
+    constexpr std::uint32_t height = 64;
+    constexpr std::size_t bytes = Width * height * 4u;
+    constexpr std::size_t farWord = (height - 1u) * Width;
+    const auto image = guest.Address() + offset;
+    alignas(256) auto code = StoreImageCode;
+    code[7] = height - 1u;
+    auto userData = ImageUserData(image);
+    userData[6] = ((Width - 1u) >> 2u) | ((height - 1u) << 14u);
+    const auto shader = Compile(code, userData, device.Target());
+    device.Dispatch(shader, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    std::unique_lock gpu(AgcDriver::GuestMemory::GpuMutex());
+    auto* recorder = Recorder::Active();
+    Require(recorder != nullptr, "small store retry: no recorder");
+    const auto context = recorder->DeviceContext();
+    if (!HostImportCovers(context, image, bytes)) return VulkanTestSkipped;
+    const auto texture = StorageTexture::FindPending(image, bytes);
+    Require(texture != nullptr && texture->GuestBytes() <= StorageTexture::SmallStoreBytes, "small store retry: no small pending image");
+    WriterGate gate(*recorder);
+    gate.Record(*recorder);
+    const auto address = image + OverwrittenDword * 4u;
+    const auto* import = HostImportFor(context, address, 4u);
+    Require(import != nullptr, "small store retry: no writer import");
+    const std::array<std::uint32_t, 1> value{Overwritten};
+    recorder->RecordStore(import->buffer, HostImportOffset(*import, address), std::as_bytes(std::span(value)), address);
+    recorder->NotePendingWrite(address, 4u);
+    recorder->OnComplete([address] { AgcDriver::GuestMemory::MarkWritten(address, 4u); });
+    const auto writer = recorder->OpenSerial();
+    if (submitted) recorder->Submit();
+    const bool defer = StorageTexture::DeferSmallStores();
+    if (!defer) gate.Release();
+    const auto stored = StorageTexture::StoreSmallPending("flip");
+    auto eop = std::make_shared<std::array<bool, 2>>();
+    Require(recorder->AfterRecordedWork([eop, image] {
+        (*eop)[0] = true;
+        (*eop)[1] = reinterpret_cast<const volatile std::uint32_t*>(image)[farWord] == Stored;
+    }), "small store retry: EOP was not deferred");
+    if (defer) {
+        Require(!(*eop)[0], "small store retry: EOP overtook the deferred store");
+        Require(stored == 0, "small store retry: flip stored an unfinished writer");
+        Require(StorageTexture::FindPending(image, bytes) == texture, "small store retry: deferral lost the image");
+        Require(recorder->PendingWriterSerial(image, bytes) == writer, "small store retry: open writer was not submitted or pending writer was lost");
+        Require(recorder->OpenSerial() > writer, "small store retry: flip did not submit the open writer");
+        Require(StorageTexture::SmallStoresDeferred(), "small store retry: retry was not requested");
+        gate.Release();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (StorageTexture::FindPending(image, bytes) != nullptr && std::chrono::steady_clock::now() < deadline) {
+            static_cast<void>(StorageTexture::StoreSmallPending("memory wait"));
+            gpu.unlock();
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            gpu.lock();
+        }
+        Require(StorageTexture::FindPending(image, bytes) == nullptr, "small store retry: retry did not store the image");
+    } else {
+        Require(stored != 0, "small store retry: legacy flip did not store the image");
+    }
+    gpu.unlock();
+    const volatile std::uint32_t* words = guest.Words() + offset / 4u;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (words[farWord] != Stored && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::microseconds(200));
+    const bool seen = words[farWord] == Stored;
+    device.WaitIdle();
+    Require(seen || !defer, "small store retry: retry batch was not submitted for plain CPU loads");
+    Require((*eop)[0] && (*eop)[1], "small store retry: EOP did not observe the published small result");
+    Require(words[farWord] == Stored, "small store retry: later image texel was not stored");
+    Require(words[OverwrittenDword] == Overwritten, "small store retry: older image overwrote a newer dword");
+    return 0;
 }
 
-int main() {
+}
+
+int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 3 && std::strcmp(argv[1], "--small-store-retry") == 0) return RunSmallStoreRetry(*device, std::strcmp(argv[2], "submitted") == 0);
         const bool watched = AgcDriver::GuestMemory::WriteWatched();
         GuestBlock guest(watched);
         if (!watched) std::puts("guest memory has no write watch: the writer-in-flight case is skipped");

@@ -23,7 +23,7 @@ class DrawPipeline {
 public:
     using Commit = std::function<void()>;
     using Range = std::pair<std::uint64_t, std::uint64_t>;
-    enum class DrainReason : std::uint8_t { Packet, Flush, Labels, Capture, Indirect, Submission, Count };
+    enum class DrainReason : std::uint8_t { Packet, Flush, Labels, Capture, Indirect, Submission, Gate, Count };
     // One token per queue a worker can own: advanced by that queue's own ordering points, and by
     // every queue's when a bump is made off a queue worker (nothing then orders one queue's CPU
     // writes without another's). EpochToken is the device-wide token, advanced by every bump.
@@ -49,6 +49,7 @@ public:
     void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
     static bool PreciseDrains();
+    static bool PreciseReadDrains();
     bool DrainPacket(std::span<const std::uint32_t> packet);
     bool DrainPacket(std::uint32_t opcode, std::span<const Range> reads, std::span<const Range> writes, bool bounded);
     void Stop();
@@ -102,6 +103,7 @@ private:
     std::array<std::uint64_t, static_cast<std::size_t>(DrainReason::Count)> drains{};
     std::array<std::uint64_t, static_cast<std::size_t>(DrainReason::Count)> drainWaitNs{};
     std::array<std::uint64_t, 257> drainOpcodes{};
+    std::array<std::uint64_t, 257> drainOpcodeWaitNs{};
     std::array<std::atomic<std::uint64_t>, 257> drainRequests{};
     std::array<std::array<std::uint64_t, 3>, 257> packetHazards{};
     std::uint64_t depthSum = 0;

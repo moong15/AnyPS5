@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/SynchronizationStatistics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 #include <charconv>
@@ -455,7 +456,8 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
         const bool changed = generation != seenGeneration || recheck || crossQueueRetry;
         const bool labelDue = labelFlushDue();
         const bool reap = sleeping && (behindCompletion || ((reapAll || queue0Dormant.load(std::memory_order_relaxed)) && completionsPending()));
-        if (!changed && !labelDue && !reap) return false;
+        const bool smallDue = sleeping && Graphics::StorageTexture::SmallStoresDeferred();
+        if (!changed && !labelDue && !reap && !smallDue) return false;
 
         if (!changed && !pollTryEach()) {
             const auto now = std::chrono::steady_clock::now();
@@ -497,6 +499,7 @@ void Driver::waitMemoryImpl(std::span<const std::uint32_t> packet, std::uint32_t
             return false;
         }
         if constexpr (Diagnose) diagnostic->Observe(localDevice);
+        if (smallDue) static_cast<void>(Graphics::StorageTexture::StoreSmallPending("memory wait"));
         bool submitted = submitCrossQueue(localDevice);
         crossQueueRetry = false;
         if (changed) {
