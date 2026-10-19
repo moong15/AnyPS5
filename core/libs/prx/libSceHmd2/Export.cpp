@@ -1,6 +1,7 @@
 #include "Hmd2.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceHmd/Hmd.hpp"
 #include "prx/libSceUserService/UserService.hpp"
 #include "SceTypes.hpp"
 
@@ -53,11 +54,8 @@ int APS5_VABI sceHmd2ReprojectionQuerySeeThroughBufferSizeAlign() {
 }
 
 std::int32_t APS5_VABI sceHmd2Initialize(const void* param) {
-    std::lock_guard lock(stateMutex);
-    if (initialized) return Hmd2::AlreadyInitialized;
-    if (!param) return Hmd2::ParameterNull;
-    initialized = true;
-    return 0;
+    (void)param;
+    return Hmd::UnsupportedFeature;
 }
 
 std::int32_t APS5_VABI sceHmd2GetFieldOfView(std::int32_t handle, Hmd2::FieldOfView* fieldOfView) {

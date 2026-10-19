@@ -519,7 +519,7 @@ extern "C" int APS5_VABI pipe_nid_postfix(int* descriptors) {
     if (!destination.Open()) return PosixFailure(GUEST_EFAULT);
     int native[2];
 #ifdef _WIN32
-    const int result = ::_pipe(native, 4096, _O_BINARY);
+    const int result = ::_pipe(native, 65536, _O_BINARY);
 #else
     const int result = ::pipe(native);
 #endif

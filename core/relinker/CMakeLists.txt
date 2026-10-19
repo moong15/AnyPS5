@@ -57,6 +57,7 @@ add_library(relinker_core STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/CallSiteResolver.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/CodeInstructionCollector.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/SceCodeExtent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/RelativeJumpTables.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/StrictNidFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/StrictReachability.cpp
@@ -72,7 +73,10 @@ add_library(relinker_core STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/patching/GamePatch.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/pipeline/Conversion.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/pipeline/RelinkerPipeline.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/NidCompute.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/src/Sha1.cpp
 )
+target_include_directories(relinker_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs/nid/include)
 target_include_directories(relinker_core PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include
@@ -343,6 +347,26 @@ if(BUILD_TESTING)
     add_test(NAME section_header_ranges COMMAND section_header_ranges_tests)
     set_tests_properties(section_header_ranges PROPERTIES TIMEOUT 20)
 
+    add_test_executable(linux_load_pages_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/tests/LinuxLoadPageTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/linux/LinuxElfPatcher.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/SegmentFilter.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/EntryStubBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/ProgramHeaderLayoutBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/SectionHeaderTableBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/StubBodyBuilder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/src/ByteWriter.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/src/BufferUtils.cpp
+    )
+    target_include_directories(linux_load_pages_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/io/include
+    )
+    add_test(NAME linux_load_pages COMMAND linux_load_pages_tests)
+    set_tests_properties(linux_load_pages PROPERTIES TIMEOUT 20)
+
     add_test_executable(amd64_only_converter_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/tests/Amd64OnlyConverterTests.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/Amd64OnlyConverter.cpp
@@ -537,8 +561,12 @@ if(BUILD_TESTING)
         add_test(NAME macos_gs_traps COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_gs_traps.py $<TARGET_FILE:relinker>)
         set_tests_properties(macos_gs_traps PROPERTIES TIMEOUT 60)
+        add_test(NAME macos_fixed_base COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_fixed_base.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_host_libc COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_host_libc.py $<TARGET_FILE:relinker>)
+        add_test(NAME windows_named_imports COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_named_imports.py $<TARGET_FILE:relinker>)
         add_library(guest_module_args_host SHARED elfpatcher/tests/GuestModuleArgsHost.cpp)
         target_include_directories(guest_module_args_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libs)
         set_target_properties(guest_module_args_host PROPERTIES
@@ -605,6 +633,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_elf_header.py $<TARGET_FILE:relinker>)
         add_test(NAME weak_imports COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_weak_imports.py $<TARGET_FILE:relinker>)
+        add_test(NAME windows_guest_weak_imports COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_windows_guest_weak_imports.py $<TARGET_FILE:relinker>)
         add_test(NAME input_magic COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_input_magic.py $<TARGET_FILE:relinker>)
         add_test(NAME input_preservation COMMAND ${Python3_EXECUTABLE}
@@ -691,6 +721,7 @@ if(BUILD_TESTING)
 
     add_test_executable(control_flow_graph_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/ControlFlowGraphTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/RelativeJumpTables.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/ControlFlowGraph.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/StrictReachability.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/X64InstructionDecoder.cpp

@@ -19,7 +19,7 @@
 #define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
 #endif
 #endif
-#ifdef __linux__
+#ifndef _WIN32
 #include <cerrno>
 #include <unistd.h>
 #endif
@@ -97,6 +97,19 @@ bool SymlinkTargetThrows(const char* target, const std::string& created) {
     return false;
 }
 
+bool RemoveSymlink(const std::string& link) {
+#ifdef _WIN32
+    // std::filesystem::remove follows the link, reports a dangling one as
+    // missing and clears the error, so remove the reparse point itself. A
+    // directory reparse point, such as the one the "..." target creates, is
+    // refused by DeleteFileW and needs RemoveDirectoryW instead.
+    const auto wide = std::filesystem::path(link).wstring();
+    return DeleteFileW(wide.c_str()) != FALSE || RemoveDirectoryW(wide.c_str()) != FALSE;
+#else
+    return std::filesystem::remove(link);
+#endif
+}
+
 void CheckSymlinkTargetRestrictions(const std::filesystem::path& root) {
     const auto created = (root / "rejected").string();
     for (const auto& target : {std::string(".."), std::string("../x"), std::string("a/../b"), std::string("a/../../x"), std::string("/abs")})
@@ -119,7 +132,7 @@ void CheckSymlinkTargetRestrictions(const std::filesystem::path& root) {
         Require(symlink_nid_postfix("a..b", dots.c_str()) == 0 && links(dots, "a..b"));
         const auto ellipsis = (root / "accepted-ellipsis").string();
         Require(symlink_nid_postfix("...", ellipsis.c_str()) == 0 && links(ellipsis, "..."));
-        Require(std::filesystem::remove(nested) && std::filesystem::remove(dots) && std::filesystem::remove(ellipsis));
+        Require(RemoveSymlink(nested) && RemoveSymlink(dots) && RemoveSymlink(ellipsis));
     } else {
         Require(link == -1 && Error() == 1);
         std::fprintf(stderr, "symbolic links unavailable: the symlink target success cases not tested\n");
@@ -344,7 +357,7 @@ int main() {
     char directoryPath[1024];
     Require(getcwd_nid_postfix(directoryPath, sizeof(directoryPath)) == directoryPath);
     Require(std::strcmp(directoryPath, ("/" + root.filename().string()).c_str()) == 0);
-#ifdef __linux__
+#ifndef _WIN32
     Require(chdir_nid_postfix("/") == 0);
     const auto originalPermissions = std::filesystem::status(root).permissions();
     std::filesystem::permissions(root, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
@@ -645,6 +658,16 @@ int main() {
         Require(!std::filesystem::exists(std::filesystem::symlink_status(throughLink)));
     }
 #endif
+#ifdef _WIN32
+    // std::filesystem::remove_all loops forever when the tree contains a
+    // dangling symbolic link: fs::remove reports such a link as missing and
+    // clears the error, so recursive_directory_iterator::__erase keeps
+    // retrying it. The fixture always contains dangling links here, so
+    // remove it through the shell instead.
+    const auto cleanup = L"cmd /c rd /s /q \"" + root.wstring() + L"\"";
+    Require(_wsystem(cleanup.c_str()) == 0);
+#else
     std::filesystem::remove_all(root);
+#endif
     return 0;
 }

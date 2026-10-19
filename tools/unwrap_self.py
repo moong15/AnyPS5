@@ -14,8 +14,10 @@ differ inside a container:
     mapping of the PT_LOAD that contains them. Segments without a vaddr that
     follow the last recorded one in the ELF are stored right after it, back to
     back in ELF order, except a PT_NOTE, which the container leaves out and which
-    is emitted without file bytes. Other segments without a vaddr carry the shift
-    of the last placed one.
+    is emitted without file bytes. Some dumps end right after the recorded ones
+    and leave out the version segment as well, so one that would run past the
+    end of the file is emitted without file bytes too. Other segments without a
+    vaddr carry the shift of the last placed one.
   - The segments are packed without honouring p_align, while ELF requires
     p_offset % p_align == p_vaddr % p_align. Every region is copied to an offset
     that satisfies it, which the relinker enforces on guest modules.
@@ -156,6 +158,9 @@ def place_segments(data, headers, records):
                 continue
             header["source"] = cursor
             cursor += header["size"]
+            if cursor > len(data):
+                header["source"] = 0
+                header["size"] = 0
     for header in loads:
         if header["size"] == 0 or header["index"] in placed:
             continue
@@ -190,8 +195,12 @@ def place_segments(data, headers, records):
                     header["source"] = 0
                     continue
                 raise Refused("segment %d vaddr %#x is in no PT_LOAD" % (header["index"], header["vaddr"]))
+            offset = header["vaddr"] - host["vaddr"]
+            if header["size"] and (offset > host["size"] or header["size"] > host["size"] - offset):
+                raise Refused("segment %d does not fit the file-backed range of PT_LOAD %d"
+                              % (header["index"], host["index"]))
             header["host"] = host
-            header["source"] = host["source"] + (header["vaddr"] - host["vaddr"])
+            header["source"] = host["source"] + offset
             if tail is None or header["offset"] > tail[0]:
                 tail = (header["offset"], header["source"] - header["offset"])
         elif header["size"]:

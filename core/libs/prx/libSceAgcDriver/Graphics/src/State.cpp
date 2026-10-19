@@ -20,6 +20,14 @@
 #include <string_view>
 
 namespace AgcDriver::Graphics {
+
+void NormalizeUnusedViewportDepth(State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel) {
+    if (state.depth || pixel.posZ) return;
+    if (!std::isfinite(state.viewport.minDepth) || !std::isfinite(state.viewport.maxDepth)) return;
+    state.viewport.minDepth = std::clamp(state.viewport.minDepth, 0.0f, 1.0f);
+    state.viewport.maxDepth = std::clamp(state.viewport.maxDepth, 0.0f, 1.0f);
+}
+
 namespace {
 
 std::uint32_t read(const Registers& registers, std::uint32_t offset, RegisterBank bank = RegisterBank::Context) {
@@ -139,6 +147,7 @@ std::uint32_t inactiveVertexPointSize(const QueueState& queue) {
         case 7:
         case 17:
         case 21:
+        case 19:
             return 1u << 16u;
         default:
             return 0;
@@ -443,7 +452,7 @@ std::string singleSampleMsaaRejection(const QueueState& queue) {
     }
     if (const auto alphaToMask = word(cx, 0x2dc); alphaToMask && (*alphaToMask & 1u) != 0 && !(*alphaToMask == AlphaToCoverageDithered && alphaToCoverageDisabled(cx))) return zeroMessage(0x2dc, *alphaToMask, "MSAA_ENABLE on a single-sample target with alpha-to-coverage");
     if (const auto conservative = word(cx, 0x313); conservative && (*conservative & ~0x001f6000u) != 0) return zeroMessage(0x313, *conservative, "MSAA_ENABLE on a single-sample target with conservative rasterization");
-    return nonTriangleRejection(queue, "MSAA_ENABLE on a single-sample target for primitives other than triangles");
+    return nonTriangleRejection(queue, "MSAA_ENABLE on a single-sample target for primitives other than triangles and rectangles", true);
 }
 
 std::string singleSampleDepthScanRejection(const QueueState& queue) {
@@ -1129,10 +1138,15 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             result.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
             break;
         case 6: result.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
+        case 19:
+            Require(result.stages.path == ShaderPath::Vertex, "quad-list requires vertex routing");
+            result.quadList = true;
+            result.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            break;
         default: throw std::runtime_error("AGC graphics: unsupported primitive type " + std::to_string(primitive));
     }
     APS5_LOG_OUT_DEBUG("Topology=%u", static_cast<unsigned>(result.topology));
-    result.primitiveRestart = read(queue.userConfig, 0x24b, RegisterBank::UserConfig) != 0 && !result.rectList && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    result.primitiveRestart = read(queue.userConfig, 0x24b, RegisterBank::UserConfig) != 0 && !result.rectList && !result.quadList && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     zero(cx, 0x207, ~(LayerExports | ClipCullExports | inactiveVertexPointSize(queue)), "layer, viewport or auxiliary vertex exports");
     Require(std::popcount(read(cx, 0x207) & 0xffffu) <= 8, "more than eight clip and cull distances are unsupported");
     result.paClVsOutCntl = read(cx, 0x207);
@@ -1782,7 +1796,9 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
         std::snprintf(text, sizeof(text), "CB metadata pass with depth or stencil work (DB_DEPTH_CONTROL 0x%08x, DB_RENDER_CONTROL 0x%08x, DB_Z_INFO 0x%08x, DB_STENCIL_INFO 0x%08x)", value(0x200), value(0x0), value(0x010), value(0x011));
         throw std::runtime_error(text);
     }
-    const auto samples = resolve && rasterizerSamples ? decodeSamples(cx) : 1u;
+    const auto modeControl = find(cx, 0x292);
+    const bool multisampleRaster = modeControl != cx.end() && (modeControl->second & 1u) != 0;
+    const auto samples = resolve && rasterizerSamples && multisampleRaster ? decodeSamples(cx) : 1u;
     if (!resolve) zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     zero(cx, 0x80, ~0u, "window offset");
     const auto viewportControl = read(cx, 0x206);

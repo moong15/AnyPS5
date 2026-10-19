@@ -79,6 +79,7 @@ int APS5_VABI sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, std::siz
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 int APS5_VABI sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 int APS5_VABI sceKernelMunmap(void*, std::size_t);
+int APS5_VABI sceKernelMprotect(const void*, std::size_t, int);
 }
 
 using namespace AgcDriver::Graphics;
@@ -2349,6 +2350,316 @@ void secondMappingImportTests(const Device& device) {
     const auto second = HostImportSerial(context, address, bytes, true);
     Require(second != 0 && second != first, "the import of direct memory whose pages were replaced was kept");
     HostImportFor(context, address, bytes);
+}
+
+void requireImportServesGuest(const Context& context, Recorder& recorder, const HostImport& import, std::uint64_t begin, std::uint64_t end, std::uint32_t salt, const std::string& what) {
+    using namespace AgcDriver::GuestMemory;
+    constexpr std::size_t page = 4096;
+    constexpr std::size_t probe = 256;
+    const auto bytes = static_cast<std::size_t>(end - begin);
+    Require(begin >= import.base && end <= import.base + import.bytes, what + " is not inside its import");
+    const auto collected = CollectWritesUncached(begin, bytes);
+    Require(collected != 0 && Watched(begin, bytes), what + " left the write watch");
+    Require(UnchangedSinceCollected(begin, page, collected) && UnchangedSinceCollected(end - page, page, collected), what + " reports writes nobody made");
+    auto* first = reinterpret_cast<std::byte*>(begin);
+    auto* last = reinterpret_cast<std::byte*>(end - page);
+    for (std::size_t index = 0; index < probe; ++index) {
+        first[index] = static_cast<std::byte>((index * 7u + salt) & 0xffu);
+        last[index] = static_cast<std::byte>((index * 13u + salt * 5u + 1u) & 0xffu);
+    }
+    Require(!UnchangedSinceCollected(begin, page, collected) && !UnchangedSinceCollected(end - page, page, collected), "a CPU store into " + what + " was not collected");
+    Buffer readback(context, 2 * probe, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    const auto commands = recorder.Commands();
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    CopyBuffer(context, commands, import.buffer, begin - import.base, readback.Handle(), 0, probe);
+    CopyBuffer(context, commands, import.buffer, end - page - import.base, readback.Handle(), probe, probe);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    recorder.Sync();
+    readback.Invalidate();
+    const auto seen = readback.Bytes();
+    Require(std::equal(first, first + probe, seen.begin()) && std::equal(last, last + probe, seen.begin() + probe), "the GPU reads other bytes than the guest's through " + what);
+}
+
+int reimportBench(const Device& device) {
+    const auto& context = device.GetContext();
+    if (context.hostImportAlignment == 0 || context.settleQueue == VK_NULL_HANDLE || !AgcDriver::GuestMemory::WriteWatched()) {
+        std::cout << "skipped, the re-import bench requires host imports, a settle queue and write watching\n";
+        return 77;
+    }
+    constexpr std::size_t bytes = 1126ull << 20u;
+    constexpr std::size_t step = 1440ull << 10u;
+    constexpr std::size_t guard = 16ull << 10u;
+    constexpr std::size_t inside = 256ull << 20u;
+    constexpr std::size_t moves = 5;
+    constexpr std::size_t page = 4096;
+    constexpr std::size_t alignment = 2ull << 20u;
+    struct Release {
+        void* mapping = nullptr;
+        std::int64_t physical = -1;
+        ~Release() {
+            if (mapping != nullptr) sceKernelMunmap(mapping, bytes);
+            if (physical >= 0) sceKernelReleaseDirectMemory(physical, bytes);
+        }
+    };
+    enum class Cut : std::uint8_t { Head, Tail, Inside };
+    struct Pattern {
+        Cut cut;
+        const char* name;
+        const char* moving;
+    };
+    constexpr std::array<Pattern, 3> patterns{{
+        {Cut::Head, "head", "the head loses GPU access 1440 KiB at a time"},
+        {Cut::Tail, "tail", "the tail loses GPU access 1440 KiB at a time"},
+        {Cut::Inside, "inside", "a 16 KiB page inside the kept side loses all access, 256 MiB in and then 1440 KiB above the one before"},
+    }};
+    const auto milliseconds = [](std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) { return std::chrono::duration<double, std::milli>(to - from).count(); };
+    std::unique_lock gpu(GpuMutex());
+    PrepareImportWatch(context);
+    Recorder recorder(context);
+    recorder.Activate();
+    const auto cleanup = [&] {
+        if (!gpu.owns_lock()) gpu.lock();
+        recorder.Sync();
+        recorder.FlushDeferredReleases();
+        ClearHostImports(context.device);
+    };
+    std::uint32_t salt = 0;
+    const auto measure = [&](const Pattern& pattern) {
+        Release release;
+        Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, alignment, 0, &release.physical) == 0, "allocate the re-import bench backing");
+        Require(sceKernelMapDirectMemory(&release.mapping, bytes, 0x33, 0, release.physical, alignment) == 0, "map the re-import bench backing");
+        const auto address = reinterpret_cast<std::uint64_t>(release.mapping);
+        auto* memory = static_cast<std::byte*>(release.mapping);
+        for (std::size_t offset = 0; offset < bytes; offset += 4 * page) std::memset(memory + offset, 0x5a, 64);
+        std::cout << "re-import bench, " << pattern.name << " cuts: " << (bytes >> 20u) << " MiB of singly mapped direct memory at 0x" << std::hex << address << std::dec << ", watched=" << AgcDriver::GuestMemory::Watched(address, bytes) << ", 1 of 4 pages nonzero, " << pattern.moving << '\n';
+        gpu.lock();
+        auto begin = address;
+        auto end = address + bytes;
+        std::size_t again = 0;
+        double slowest = 0;
+        for (std::size_t move = 0; move <= moves; ++move) {
+            double moveMs = 0;
+            std::uint64_t smaller = 0;
+            std::uint64_t smallerEnd = 0;
+            if (move != 0) {
+                std::uint64_t from = 0;
+                std::uint64_t to = 0;
+                if (pattern.cut == Cut::Head) {
+                    from = begin;
+                    to = begin = from + step;
+                } else if (pattern.cut == Cut::Tail) {
+                    to = end;
+                    from = end = to - step;
+                } else {
+                    from = move == 1 ? address + inside : begin + step;
+                    to = from + guard;
+                    smaller = begin;
+                    smallerEnd = from;
+                    begin = to;
+                }
+                gpu.unlock();
+                const auto moving = std::chrono::steady_clock::now();
+                Require(sceKernelMprotect(reinterpret_cast<void*>(from), static_cast<std::size_t>(to - from), pattern.cut == Cut::Inside ? 0 : 0x03) == 0, "cut the re-import bench range");
+                moveMs = milliseconds(moving, std::chrono::steady_clock::now());
+                gpu.lock();
+            }
+            const auto started = std::chrono::steady_clock::now();
+            const auto* import = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
+            const auto imported = std::chrono::steady_clock::now();
+            Require(import != nullptr && import->base == begin && import->base + import->bytes == end, "the re-import bench range was not imported whole");
+            const char* kind = import->alias != nullptr ? "through a shared alias" : import->unwatched ? "compared" : "settled and watched";
+            const bool kept = import->memoryBase == address && import->pinnedBytes == bytes;
+            if (move != 0) {
+                again += kept ? 0 : 1;
+                slowest = std::max(slowest, milliseconds(started, imported));
+            }
+            double smallerMs = 0;
+            if (smallerEnd != smaller) {
+                const auto importing = std::chrono::steady_clock::now();
+                Require(HostImportFor(context, smaller, static_cast<std::size_t>(smallerEnd - smaller)) != nullptr, "the smaller side of a cut inside the re-import bench range was not imported");
+                smallerMs = milliseconds(importing, std::chrono::steady_clock::now());
+            }
+            const auto syncing = std::chrono::steady_clock::now();
+            recorder.Sync();
+            recorder.FlushDeferredReleases();
+            const auto synced = std::chrono::steady_clock::now();
+            std::printf("re-import %s %zu: %.1f MiB at +%.2f MiB, %s, %s, cut %.2f ms, import %.2f ms", pattern.name, move, static_cast<double>(end - begin) / 1048576.0, static_cast<double>(begin - address) / 1048576.0, kind, move == 0 ? "first import" : kept ? "kept" : "imported again", moveMs, milliseconds(started, imported));
+            if (smallerEnd != smaller) std::printf(", smaller side %.2f MiB imported in %.2f ms", static_cast<double>(smallerEnd - smaller) / 1048576.0, smallerMs);
+            std::printf(", recorder sync after it %.2f ms, %.1f MiB imported in all\n", milliseconds(syncing, synced), static_cast<double>(HostImportLiveBytes()) / 1048576.0);
+            std::fflush(stdout);
+        }
+        const auto* tail = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
+        Require(tail != nullptr && tail->base == begin && tail->base + tail->bytes == end, "the re-import bench lost the import of its kept side");
+        requireImportServesGuest(context, recorder, *tail, begin, end, ++salt, std::string("the kept side after the ") + pattern.name + " cuts");
+        std::printf("re-import bench, %s cuts: the kept side was imported again after %zu of %zu cuts, slowest import after a cut %.2f ms; CPU stores into it are collected and the GPU reads them through its buffer\n", pattern.name, again, moves, slowest);
+        cleanup();
+        gpu.unlock();
+        return again;
+    };
+    std::string importedAgain;
+    gpu.unlock();
+    try {
+        for (const auto& pattern : patterns) {
+            if (measure(pattern) != 0) importedAgain += std::string(importedAgain.empty() ? "" : ", ") + pattern.name;
+        }
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    gpu.lock();
+    Require(importedAgain.empty(), "the kept side was imported again instead of trimmed after the " + importedAgain + " cuts");
+    std::printf("re-import bench: every cut at the head, at the tail and inside the range kept the larger side by trimming the first import\n");
+    return 0;
+}
+
+int trimmedImportTests(const Device& device) {
+    const auto& context = device.GetContext();
+    if (context.hostImportAlignment == 0 || context.settleQueue == VK_NULL_HANDLE || !AgcDriver::GuestMemory::WriteWatched()) {
+        std::cout << "skipped, the trimmed import tests require host imports, a settle queue and write watching\n";
+        return 77;
+    }
+    constexpr std::size_t bytes = 32ull << 20u;
+    constexpr std::size_t run = 2ull << 20u;
+    constexpr std::size_t guard = 16ull << 10u;
+    constexpr std::size_t page = 4096;
+    constexpr std::size_t inside = 6ull << 20u;
+    struct Case {
+        const char* name;
+        std::size_t offset;
+        std::size_t length;
+        bool unmap;
+        std::size_t kept;
+        std::size_t keptEnd;
+        std::size_t smaller;
+        std::size_t smallerEnd;
+        bool trimmed;
+    };
+    constexpr std::array<Case, 5> cases{{
+        {"a page made inaccessible inside the import, nearer its start", inside + guard, guard, false, inside + 2 * guard, bytes, 0, inside + guard, true},
+        {"a page made inaccessible inside the import, nearer its end", bytes - inside - 2 * guard, guard, false, 0, bytes - inside - 2 * guard, bytes - inside - guard, bytes, true},
+        {"an unmap of a 2 MiB run inside the import", inside, run, true, inside + run, bytes, 0, inside, true},
+        {"an unmap of the import's first 2 MiB run", 0, run, true, run, bytes, 0, 0, true},
+        {"an unmap of 1440 KiB at the start of the import's first 2 MiB run", 0, 1440ull << 10u, true, 1440ull << 10u, bytes, 0, 0, false},
+    }};
+    struct Backing {
+        void* mapping = nullptr;
+        std::int64_t physical = -1;
+        std::size_t hole = 0;
+        std::size_t holeBytes = 0;
+        ~Backing() {
+            auto* memory = static_cast<std::byte*>(mapping);
+            if (memory != nullptr && hole != 0) sceKernelMunmap(memory, hole);
+            if (memory != nullptr && hole + holeBytes < bytes) sceKernelMunmap(memory + hole + holeBytes, bytes - hole - holeBytes);
+            if (physical >= 0) sceKernelReleaseDirectMemory(physical, bytes);
+        }
+    };
+    std::unique_lock gpu(GpuMutex());
+    PrepareImportWatch(context);
+    Recorder recorder(context);
+    recorder.Activate();
+    const auto cleanup = [&] {
+        if (!gpu.owns_lock()) gpu.lock();
+        recorder.Sync();
+        recorder.FlushDeferredReleases();
+        ClearHostImports(context.device);
+    };
+    std::uint32_t salt = 0;
+    const auto check = [&](const Case& test) {
+        const std::string name = test.name;
+        Backing backing;
+        Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, run, 0, &backing.physical) == 0, "allocate the trimmed import test backing");
+        Require(sceKernelMapDirectMemory(&backing.mapping, bytes, 0x33, 0, backing.physical, run) == 0, "map the trimmed import test backing");
+        const auto address = reinterpret_cast<std::uint64_t>(backing.mapping);
+        auto* memory = static_cast<std::byte*>(backing.mapping);
+        for (std::size_t offset = 0; offset < bytes; offset += page) std::memset(memory + offset, static_cast<int>(0x40u + (offset / page) % 64u), 64);
+        gpu.lock();
+        const auto* whole = HostImportFor(context, address, bytes);
+        Require(whole != nullptr && whole->base == address && whole->bytes == bytes && whole->alias == nullptr && !whole->unwatched, name + ": the range was not imported whole, settled and watched");
+        const auto original = whole->memory;
+        auto* cut = memory + test.offset;
+        gpu.unlock();
+        if (test.unmap) {
+            Require(sceKernelMunmap(cut, test.length) == 0, name + ": the unmap failed");
+            backing.hole = test.offset;
+            backing.holeBytes = test.length;
+        } else {
+            Require(sceKernelMprotect(cut, test.length, 0) == 0, name + ": the protection failed");
+        }
+        gpu.lock();
+        const auto begin = address + test.kept;
+        const auto end = address + test.keptEnd;
+        const auto* kept = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
+        Require(kept != nullptr && kept->base == begin && kept->base + kept->bytes == end, name + ": the larger side is not imported whole");
+        if (test.trimmed) Require(kept->memory == original, "the larger side of " + name + " was imported again instead of kept");
+        else Require(kept->memory != original, "the side of " + name + " whose 2 MiB run the unmap replaced is served from the import that pinned the run's old pages");
+        requireImportServesGuest(context, recorder, *kept, begin, end, ++salt, "the larger side of " + name);
+        if (test.smallerEnd != test.smaller) {
+            const auto* smaller = HostImportFor(context, address + test.smaller, test.smallerEnd - test.smaller);
+            Require(smaller != nullptr && smaller->base == address + test.smaller && smaller->bytes == test.smallerEnd - test.smaller && smaller->memory != original, "the smaller side of " + name + " is not imported apart from the larger one");
+            requireImportServesGuest(context, recorder, *smaller, address + test.smaller, address + test.smallerEnd, ++salt, "the smaller side of " + name);
+            Require(HostImportFor(context, begin, static_cast<std::size_t>(end - begin)) == kept && kept->memory == original, "importing the smaller side of " + name + " dropped the larger one");
+        }
+        if (test.unmap) {
+            gpu.unlock();
+            void* again = cut;
+            Require(sceKernelMapDirectMemory(&again, test.length, 0x33, 0x10, backing.physical + static_cast<std::int64_t>(test.offset), guard) == 0 && again == cut, name + ": the pages could not be mapped again");
+            backing.hole = 0;
+            backing.holeBytes = 0;
+            gpu.lock();
+            const auto from = reinterpret_cast<std::uint64_t>(cut);
+            const auto* remapped = HostImportFor(context, address, bytes);
+            Require(remapped != nullptr && remapped->base == address && remapped->bytes == bytes, name + ": the range mapped again is not imported whole");
+            Require(remapped->memory != original, "after " + name + " the pages mapped again are served from the import that pinned the old ones");
+            requireImportServesGuest(context, recorder, *remapped, from, from + test.length, ++salt, "the pages mapped again after " + name);
+            requireImportServesGuest(context, recorder, *remapped, begin, end, ++salt, "the larger side after " + name + " and a new mapping");
+        }
+        cleanup();
+        gpu.unlock();
+        std::cout << "trimmed import: " << name << ": the larger side was " << (test.trimmed ? "kept" : "imported again") << " and the GPU and the write watch see the guest's bytes" << (test.unmap ? ", also after the pages were mapped again" : "") << '\n';
+    };
+    const auto remapWhileTrimmed = [&] {
+        const std::string name = "an unmap and a new mapping of the kept side while the import waits trimmed";
+        Backing backing;
+        Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, run, 0, &backing.physical) == 0, "allocate the trimmed import test backing");
+        Require(sceKernelMapDirectMemory(&backing.mapping, bytes, 0x33, 0, backing.physical, run) == 0, "map the trimmed import test backing");
+        const auto address = reinterpret_cast<std::uint64_t>(backing.mapping);
+        auto* memory = static_cast<std::byte*>(backing.mapping);
+        for (std::size_t offset = 0; offset < bytes; offset += page) std::memset(memory + offset, static_cast<int>(0x40u + (offset / page) % 64u), 64);
+        gpu.lock();
+        const auto* whole = HostImportFor(context, address, bytes);
+        Require(whole != nullptr && whole->base == address && whole->bytes == bytes && whole->alias == nullptr && !whole->unwatched, name + ": the range was not imported whole, settled and watched");
+        const auto original = whole->memory;
+        gpu.unlock();
+        Require(sceKernelMprotect(memory, run, 0x03) == 0, name + ": the protection of the head failed");
+        Require(sceKernelMunmap(memory + run, bytes - run) == 0, name + ": the unmap of the kept side failed");
+        backing.hole = run;
+        backing.holeBytes = bytes - run;
+        void* again = memory + run;
+        Require(sceKernelMapDirectMemory(&again, bytes - run, 0x33, 0x10, backing.physical + static_cast<std::int64_t>(run), guard) == 0 && again == memory + run, name + ": the kept side could not be mapped again");
+        backing.hole = 0;
+        backing.holeBytes = 0;
+        gpu.lock();
+        const auto begin = address + run;
+        const auto end = address + bytes;
+        const auto* remapped = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
+        Require(remapped != nullptr && remapped->base == begin && remapped->base + remapped->bytes == end, name + ": the pages mapped again are not imported whole");
+        requireImportServesGuest(context, recorder, *remapped, begin, end, ++salt, "the pages mapped again after " + name);
+        Require(remapped->memory != original, "after " + name + " the pages mapped again are served from the import that pinned the old ones");
+        cleanup();
+        gpu.unlock();
+        std::cout << "trimmed import: " << name << ": the pages mapped again were imported again and the GPU and the write watch see the guest's bytes\n";
+    };
+    gpu.unlock();
+    try {
+        for (const auto& test : cases) check(test);
+        remapWhileTrimmed();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    gpu.lock();
+    std::cout << "Trimmed host import tests passed\n";
+    return 0;
 }
 #endif
 
@@ -7096,6 +7407,12 @@ bool shadowedKeyStoreTests(const Device& device, Recorder& recorder) {
     Require(keys[0] == 0x40 && keys[unit - 1] == 0x40 && keys[unit] == 0xff && !AnyShadowedOverlaps(address, unit), "the fresh unit's publish did not land");
     recorder.Sync();
     shadow(0x22);
+    MarkWritten(address, unit);
+    recorder.NotePendingFill(address + unit, unit, 0x11);
+    Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Clear0001 && !AnyShadowedOverlaps(address, unit), "the keys under a stale unit shadow were not read from guest memory");
+    Require(recorder.PendingWriteOverlaps(address + unit, unit), "a key read under a stale unit shadow waited for a write outside the keys");
+    recorder.Sync();
+    shadow(0x22);
     recorder.NotePendingFill(address, unit, 0xc0);
     MarkWritten(address, unit);
     Require(CurrentDccKeys(address, surfaceBytes) == DccKeys::Clear1111 && recorder.PendingWriteOverlaps(address, keyCount), "the keys of a pending fill over a stale unit shadow were not read as the fill's keys without a wait");
@@ -8913,10 +9230,22 @@ int pipelineCacheFileTests(const Device& device) {
         Check(context.Function<PFN_vkGetPipelineCacheData>("vkGetPipelineCacheData")(context.device, cache, &size, nullptr), "vkGetPipelineCacheData");
         return size;
     };
+    const auto footprint = [&](std::size_t index) {
+        VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        VkPipelineCache fresh = VK_NULL_HANDLE;
+        Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &fresh), "vkCreatePipelineCache");
+        const auto before = bytes(fresh);
+        build(fresh, index);
+        const auto after = bytes(fresh);
+        context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, fresh, nullptr);
+        return after > before ? after - before : 0;
+    };
+    const std::array<std::size_t, 2> footprints{footprint(0), footprint(1)};
     const auto holds = [&](VkPipelineCache cache, std::size_t index) {
         const auto before = bytes(cache);
         build(cache, index);
-        return bytes(cache) == before;
+        const auto after = bytes(cache);
+        return after < before + footprints[index] / 2;
     };
     const auto cacheFile = [&] {
         std::vector<std::filesystem::path> found;
@@ -8928,16 +9257,9 @@ int pipelineCacheFileTests(const Device& device) {
         std::ifstream stream(path, std::ios::binary);
         return std::vector<char>(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     };
-    {
-        VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-        VkPipelineCache probe = VK_NULL_HANDLE;
-        Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &probe), "vkCreatePipelineCache");
-        const bool stored = !holds(probe, 0);
-        context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, probe, nullptr);
-        if (!stored) {
-            std::cout << "skipped, the device does not keep pipelines in a pipeline cache\n";
-            return 77;
-        }
+    if (footprints[0] == 0 || footprints[1] == 0) {
+        std::cout << "skipped, the device does not keep pipelines in a pipeline cache\n";
+        return 77;
     }
     for (const bool firstSavesFirst : {true, false}) {
         std::filesystem::remove_all(directory);
@@ -9611,6 +9933,8 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--settle-earlier-import-only") return settleEarlierImportTests(device) ? 0 : 77;
         if (argc == 2 && std::string_view(argv[1]) == "--settle-retire-only") return settleRetireTests(device) ? 0 : 77;
         if (argc == 2 && std::string_view(argv[1]) == "--settle-storage-image-only") return settleStorageImageTests(device) ? 0 : 77;
+        if (argc == 2 && std::string_view(argv[1]) == "--reimport-bench") return reimportBench(device);
+        if (argc == 2 && std::string_view(argv[1]) == "--trimmed-import-only") return trimmedImportTests(device);
 #endif
         if (argc == 2 && std::string_view(argv[1]) == "--host-import-retirement-only") {
             const auto alignment = device.GetContext().hostImportAlignment;

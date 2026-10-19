@@ -1439,6 +1439,11 @@ struct NpGameIntentData {
     std::uint8_t padding[7];
 };
 
+struct NpGameIntentInitParam {
+    std::size_t size;
+    std::uint8_t reserved[32];
+};
+
 struct NpGameIntentInfo {
     std::size_t size;
     std::int32_t user_id;

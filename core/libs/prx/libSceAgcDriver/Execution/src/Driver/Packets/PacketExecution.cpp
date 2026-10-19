@@ -302,16 +302,26 @@ void Driver::execute(const Submission& submission) {
         PerformanceContext timingContext(submission.queue == 0 ? pendingFrameTiming.get() : FrameTiming::Async());
         PerformanceTimer timing("Driver.Packet");
         const bool predicated = Pm4::Predicated(header) && queue.predication.operation != 0;
-        if (pipelined && !predicated && header != FlipPacketHeader && header != RenderingWaitPacketHeader && (enqueueLabelPacket(packet, opcode, submission.queue) || enqueueDmaPacket(packet, opcode, submission.queue, queue))) {
+        if (pipelined && !predicated && header != FlipPacketHeader && header != RenderingWaitPacketHeader && !submission.flips.contains(cursor) && (enqueueLabelPacket(packet, opcode, submission.queue) || enqueueDmaPacket(packet, opcode, submission.queue, queue))) {
             traceLabel(packet, submission.queue);
             recent.Record(cursor);
             cursor = nextCursor;
             continue;
         }
         if (pipelined && !predicated && (opcode == 0x3c || opcode == 0x93) && header != RenderingWaitPacketHeader && orderedWaits && DrawPipeline::Queue0().Busy()) {
-            const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
-            if (const auto value = DrawPipeline::Queue0().PendingLabel(awaited, Pm4::WaitAwaitedBytes(packet)); value.has_value() && Pm4::WaitComparesValue(packet, *value)) {
+            const auto awaitedBytes = Pm4::WaitAwaitedBytes(packet);
+            const std::uint64_t awaited = (packet[2] & (awaitedBytes == 8 ? ~7u : ~3u)) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+            const auto value = DrawPipeline::Queue0().PendingLabel(awaited, awaitedBytes);
+            if (value.has_value() && Pm4::WaitComparesValue(packet, *value)) {
                 ++waitOutcomes().fromRecorderSameQueue;
+                gateOpened() = true;
+                recent.Record(cursor);
+                cursor = nextCursor;
+                continue;
+            }
+            if (!DrawPipeline::Queue0().Overlaps(awaited, awaitedBytes) && Pm4::WaitSatisfiedUnchecked(packet)) {
+                bumpEpoch(&EpochBumps::waits);
+                ++waitOutcomes().atEntry;
                 gateOpened() = true;
                 recent.Record(cursor);
                 cursor = nextCursor;

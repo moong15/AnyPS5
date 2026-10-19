@@ -19,6 +19,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "Recompiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/shaders/DispatchArguments_spv.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -570,6 +571,8 @@ void ReleaseDeferredKeeps() {
 // Lock-free state of the active recorder's open batch, read by the queue workers between packets
 // and inside WAIT_REG_MEM polls (see the static readers in Recorder.hpp). Written under the mutex.
 constexpr std::int64_t NoPendingLabel = std::numeric_limits<std::int64_t>::min();
+constexpr BarrierMask PassEndBarrier{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT};
+constexpr BarrierMask LabelLeadingBarrier{VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT};
 std::atomic<std::int64_t> pendingLabelSince{NoPendingLabel};
 std::atomic<std::uint64_t> writeGeneration{0};
 std::atomic<std::uint64_t> publishGeneration{0};
@@ -732,11 +735,15 @@ bool SnapshotOverlaps(std::uint64_t address, std::size_t bytes) {
 }
 
 // Whether one merged range of the snapshot contains [address, end) entirely.
-bool SnapshotCovers(std::uint64_t address, std::uint64_t end) {
-    const auto snapshot = pendingWrites.load(std::memory_order_acquire);
+bool SnapshotCovers(const WriteRanges* snapshot, std::uint64_t address, std::uint64_t end) {
     if (snapshot == nullptr || snapshot->empty()) return false;
     const auto it = std::partition_point(snapshot->begin(), snapshot->end(), [&](const auto& range) { return range.second <= address; });
     return it != snapshot->end() && it->first <= address && end <= it->second;
+}
+
+bool SnapshotCovers(std::uint64_t address, std::uint64_t end) {
+    const auto snapshot = pendingWrites.load(std::memory_order_acquire);
+    return SnapshotCovers(snapshot.get(), address, end);
 }
 
 // Attribution of the pending-write syncs the hook makes (the [hooksync] line every 10 s, under
@@ -1328,6 +1335,8 @@ Recorder::~Recorder() {
         context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, dumpLayout, nullptr);
         sampleCounter.reset();
     }
+    if (dispatchArgumentPipeline != VK_NULL_HANDLE) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, dispatchArgumentPipeline, nullptr);
+    if (dispatchArgumentLayout != VK_NULL_HANDLE) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, dispatchArgumentLayout, nullptr);
     for (auto& [commands, fence] : spare) {
         context.Function<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(context.device, context.pool, 1, &commands);
         context.Function<PFN_vkDestroyFence>("vkDestroyFence")(context.device, fence, nullptr);
@@ -1729,7 +1738,7 @@ void Recorder::endOpenRenderPass(bool barrier) {
     // The pass's attachment and shader writes are visible to everything recorded after it (the
     // host sees them at the batch's fence).
     if (barrier) {
-        recordBarrier(open->commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        recordBarrier(open->commands, PassEndBarrier.srcStage, PassEndBarrier.dstStage, PassEndBarrier.srcAccess, PassEndBarrier.dstAccess);
         CountBarriers(CommandClass::Draw);
     }
     if (pass.afterPass) pass.afterPass(open->commands);
@@ -1951,6 +1960,7 @@ bool Recorder::closeStoreRun(bool atSubmit) {
         // A label says the work before it is done: the queued key stores (results of that work)
         // land ahead of every store of the run, and the pass a draw left open ends.
         if (!open->keyStores.empty()) recordKeyStores(true);
+        const bool passEndLast = open->renderPass.open && !open->renderPass.afterPass;
         if (open->renderPass.open) endOpenRenderPass();
         const auto commands = open->commands;
         run.timing = beginTiming(ClassKey(CommandClass::LabelRun));
@@ -1961,9 +1971,15 @@ bool Recorder::closeStoreRun(bool atSubmit) {
         }
         // At Submit every result of the batch reaches the host before the stores (the title's
         // pollers read results after the label); in place, later work sees the stores as well.
-        if (atSubmit) recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT);
-        else recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         std::uint32_t barriers = 2;
+        if (atSubmit) {
+            recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT);
+        } else if (passEndLast && BarrierBatch() && Covers(PassEndBarrier, LabelLeadingBarrier)) {
+            CountMerged(CommandClass::LabelRun);
+            barriers = 1;
+        } else {
+            recordBarrier(commands, LabelLeadingBarrier.srcStage, LabelLeadingBarrier.dstStage, LabelLeadingBarrier.srcAccess, LabelLeadingBarrier.dstAccess);
+        }
         std::uint64_t storedBytes = 0;
         const auto update = function(cmdUpdateBuffer, "vkCmdUpdateBuffer");
         std::vector<QueuedWrite> writes;
@@ -2148,6 +2164,17 @@ bool Recorder::MergeBarriers() {
     return merge;
 }
 
+bool Recorder::BarrierBatch() {
+    static const bool batch = MergeBarriers() && std::getenv("APS5_NO_BARRIER_BATCH") == nullptr;
+    return batch;
+}
+
+bool Recorder::ElideCovered(CommandClass which, const BarrierMask& wanted, VkAccessFlags covered) {
+    if (!BarrierBatch() || !OrderedByTrailing(covered, wanted)) return false;
+    CountMerged(which);
+    return true;
+}
+
 void Recorder::CountMerged(CommandClass which) {
     if (ProfilingSmallDma()) ++SmallDmaStats().merged;
     if (!DrawOrGpuProfiled()) return;
@@ -2263,6 +2290,52 @@ void Recorder::EndGpuTiming(std::uint32_t index, std::uint64_t bytes) {
     if (index == NoTiming || open == nullptr || open->queries == VK_NULL_HANDLE) return;
     if (index < open->timedBytes.size()) open->timedBytes[index] += bytes;
     context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(open->commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, open->queries, index * 2 + 1);
+}
+
+bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress source, VkDeviceAddress arguments) {
+    constexpr std::uint32_t PushBytes = 32;
+    if (dispatchArgumentState == 0) {
+        dispatchArgumentState = -1;
+        VkShaderModule module = VK_NULL_HANDLE;
+        try {
+            const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, PushBytes};
+            VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            layoutInfo.pushConstantRangeCount = 1;
+            layoutInfo.pPushConstantRanges = &push;
+            Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &dispatchArgumentLayout), "vkCreatePipelineLayout dispatch arguments");
+            VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            moduleInfo.codeSize = sizeof(DISPATCH_ARGUMENTS_SPV);
+            moduleInfo.pCode = DISPATCH_ARGUMENTS_SPV;
+            Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &module), "vkCreateShaderModule dispatch arguments");
+            VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            pipelineInfo.stage.module = module;
+            pipelineInfo.stage.pName = "main";
+            pipelineInfo.layout = dispatchArgumentLayout;
+            Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &dispatchArgumentPipeline), "vkCreateComputePipelines dispatch arguments");
+            context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
+            dispatchArgumentState = 1;
+        } catch (const std::exception& error) {
+            if (module != VK_NULL_HANDLE) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
+            std::fprintf(stderr, "[gpu] indirect dispatches read their group counts unchecked: %s\n", error.what());
+        }
+    }
+    if (dispatchArgumentState < 0) return false;
+    recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    function(cmdBindPipeline, "vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, dispatchArgumentPipeline);
+    const auto* limit = context.limits.maxComputeWorkGroupCount;
+    struct {
+        VkDeviceAddress source;
+        VkDeviceAddress arguments;
+        std::array<std::uint32_t, 4> limits;
+    } parameters{source, arguments, {limit[0], limit[1], limit[2], 0u}};
+    static_assert(sizeof(parameters) == PushBytes);
+    function(cmdPushConstants, "vkCmdPushConstants")(commands, dispatchArgumentLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, PushBytes, &parameters);
+    function(cmdDispatch, "vkCmdDispatch")(commands, 1, 1, 1);
+    recordBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    CountBarriers(CommandClass::DispatchLeading, 2);
+    return true;
 }
 
 void Recorder::CountSamples() {
@@ -3051,6 +3124,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
         }
     }
     open->writeNotes.push_back(++writeNoteCount);
+    if (published != nullptr && !SnapshotCovers(published.get(), address, end)) published = nullptr;
     open->writeValues.push_back(static_cast<std::int16_t>(value));
     if (!ownLabel) TraceLoadWrite("record", this, submissions + 1, address, bytes, value);
     open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
@@ -3089,6 +3163,7 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
         }
     }
     batch.writeNotes.push_back(++writeNoteCount);
+    if (published != nullptr && !SnapshotCovers(published.get(), address, address + bytes)) published = nullptr;
     batch.writeValues.push_back(-1);
     if (!ownLabel) TraceLoadWrite("attach", this, batch.serial, address, bytes);
     batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
@@ -3188,6 +3263,7 @@ void Recorder::publishPendingWrites(std::span<const std::pair<std::uint64_t, std
     }
     publishedWriteRangesValid = std::all_of(merged->begin(), merged->end(), [](const auto& range) { return range.second > range.first; });
     publishedWriteRanges = merged;
+    published = merged;
     pendingWrites.store(std::move(merged), std::memory_order_release);
     publishGeneration.fetch_add(1, std::memory_order_release);
     ++snapshotRebuilds;
@@ -3208,6 +3284,7 @@ bool Recorder::PendingWriteOverlaps(std::uint64_t address, std::size_t bytes, bo
         pendingWriteSnapshotAnswers.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    if (useSnapshot && PendingWriteSnapshotEnabled() && published != nullptr && !SnapshotOverlaps(published.get(), address, bytes)) return false;
     const auto end = address + bytes;
     if (open != nullptr && overlaps(*open, address, end)) return true;
     for (const auto& batch : inFlight) {

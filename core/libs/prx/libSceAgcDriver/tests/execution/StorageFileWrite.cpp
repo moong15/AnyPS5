@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <string>
 #include <stdexcept>
@@ -167,10 +168,24 @@ private:
     std::string name;
 };
 
+bool Pending(GuestSurface& surface) {
+    return AgcDriver::Graphics::StorageTexture::FindPending(reinterpret_cast<std::uintptr_t>(surface.Data()), SurfaceBytes) != nullptr;
+}
+
+std::unique_lock<AgcDriver::GuestMemory::GpuMutexType> ProduceHeld(GuestSurface& surface, GuestSurface& unrelated) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (!Pending(unrelated)) Produce(unrelated.Data());
+        Produce(surface.Data());
+        std::unique_lock hold(AgcDriver::GuestMemory::GpuMutex());
+        if (Pending(surface) && Pending(unrelated)) return hold;
+    }
+    throw std::runtime_error("file write: the queue-idle store kept taking the pending images");
+}
+
 enum class Api { Write, PosixWrite, CrtWrite, Pwrite, PosixPwrite, Writev, PosixWritev, Pwritev, PosixPwritev, Aio, AioMultiple, Fwrite };
 
-bool CheckWrite(Api api, const char* name, GuestSurface& surface) {
-    Produce(surface.Data());
+bool CheckWrite(Api api, const char* name, GuestSurface& surface, GuestSurface& unrelated) {
+    const auto hold = ProduceHeld(surface, unrelated);
     OutputFile file;
     auto* source = surface.Data() + SourceOffset;
     const std::array<GuestIovec, 4> vectors{{{source, 111}, {nullptr, 0}, {source + 111, 65537}, {source + 65648, TransferBytes - 65648}}};
@@ -237,6 +252,7 @@ bool CheckWrite(Api api, const char* name, GuestSurface& surface) {
     std::size_t differences = 0;
     for (std::size_t index = 0; index < stored.size(); ++index) differences += stored[index] != expected[index];
     std::printf("%s: %zu incorrect file bytes out of %zu\n", name, differences, stored.size());
+    Require(Pending(unrelated), "file write: an unrelated pending GPU image was flushed");
     return differences == 0;
 }
 
@@ -276,8 +292,7 @@ int main() {
             {Api::Aio, "AIO"}, {Api::AioMultiple, "AIO multiple"}, {Api::Fwrite, "fwrite"},
         }};
         for (const auto& [api, name] : cases) {
-            correct = CheckWrite(api, name, surface) && correct;
-            Require(AgcDriver::Graphics::StorageTexture::FindPending(reinterpret_cast<std::uintptr_t>(unrelated.Data()), SurfaceBytes) != nullptr, "file write: an unrelated pending GPU image was flushed");
+            correct = CheckWrite(api, name, surface, unrelated) && correct;
         }
         Require(correct, "file write: pending GPU results were not stored before the host read");
         std::vector<std::byte> unused(SurfaceBytes);

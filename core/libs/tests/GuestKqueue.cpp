@@ -234,12 +234,12 @@ static void PipeRead() {
     char buffer[4]{};
     Require(read_nid_postfix(pipe[0], buffer, sizeof(buffer)) == 3);
     Require(Poll(kq, events, 4) == 0);
+    const KernelTimespec limit{5, 0};
+    const auto start = std::chrono::steady_clock::now();
     std::thread writer([&pipe] {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         Require(write_nid_postfix(pipe[1], "d", 1) == 1);
     });
-    const KernelTimespec limit{5, 0};
-    const auto start = std::chrono::steady_clock::now();
     Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &limit) == 1);
     const auto waited = std::chrono::steady_clock::now() - start;
     writer.join();

@@ -126,7 +126,7 @@ void inactiveVertexPointSizeTests() {
         queue.context[0x207] = 0x01210000;
         return queue;
     };
-    for (const auto primitive : {2u, 4u, 5u, 6u, 7u, 17u, 21u}) {
+    for (const auto primitive : {2u, 4u, 5u, 6u, 7u, 17u, 19u, 21u}) {
         auto queue = pointSizeState();
         queue.userConfig[0x242] = primitive;
         for (const auto raster : {0u, 0x240u, 0x248u}) {
@@ -908,18 +908,18 @@ void MsaaEnableSingleSampleTests() {
     queue = enabled();
     queue.context[0x313] = 0x6001;
     refused(queue, "MSAA_ENABLE on a single-sample target with conservative rasterization");
-    for (const auto primitive : {2u, 7u, 17u}) {
+    for (const auto primitive : {2u, 3u}) {
         queue = enabled();
         queue.userConfig[0x242] = primitive;
-        refused(queue, "primitives other than triangles");
+        refused(queue, "primitives other than triangles and rectangles");
     }
     queue = enabled();
     queue.userConfig[0x242] = 1;
-    Require(DrawRejection(queue, false).find("primitives other than triangles") != std::string::npos, "the precheck accepted MSAA_ENABLE on a single-sample target for points");
-    for (const auto primitive : {5u, 6u, 21u}) {
+    Require(DrawRejection(queue, false).find("primitives other than triangles and rectangles") != std::string::npos, "the precheck accepted MSAA_ENABLE on a single-sample target for points");
+    for (const auto primitive : {5u, 6u, 7u, 17u, 21u}) {
         queue = enabled();
         queue.userConfig[0x242] = primitive;
-        Require(DecodeState(queue).samples == 1 && DrawRejection(queue, false).empty(), "MSAA_ENABLE on a single-sample target was refused for a triangle fan, strip or polygon");
+        Require(DecodeState(queue).samples == 1 && DrawRejection(queue, false).empty(), "MSAA_ENABLE on a single-sample target was refused for a filled triangle or rectangle primitive");
     }
     queue = enabled();
     queue.context[0x292] = 7;
@@ -3208,9 +3208,9 @@ void multisampleTests() {
     for (std::size_t index = 0; index < expectedCheckerboard.size(); ++index) Require(checkerboard[index].x == expectedCheckerboard[index].x && checkerboard[index].y == expectedCheckerboard[index].y, "grid sample locations are not in Vulkan's (x + y * width) * samples + sample order");
     AgcDriver::Graphics::Context gridContext{};
     gridContext.sampleLocationSampleCounts = VK_SAMPLE_COUNT_2_BIT;
-    expectFailure([&] { AgcDriver::Graphics::ValidateSampleLocations(gridContext, state); }, "2x2 sample location grid");
+    Require(AgcDriver::Graphics::ValidateSampleLocations(gridContext, state), "a pattern varying between pixels was refused on a device without a 2x2 sample location grid");
     gridContext.sampleLocationGridSampleCounts = VK_SAMPLE_COUNT_4_BIT;
-    expectFailure([&] { AgcDriver::Graphics::ValidateSampleLocations(gridContext, state); }, "2x2 sample location grid");
+    Require(AgcDriver::Graphics::ValidateSampleLocations(gridContext, state), "a 2x pattern varying between pixels was refused on a device with a 2x2 grid for 4 samples only");
     gridContext.sampleLocationGridSampleCounts |= VK_SAMPLE_COUNT_2_BIT;
     Require(AgcDriver::Graphics::ValidateSampleLocations(gridContext, state), "a supported 2x2 sample location grid was refused");
     queue.context[0x31d] = 0;
@@ -3223,7 +3223,7 @@ void multisampleTests() {
     gridContext.sampleLocationGridSampleCounts = VK_SAMPLE_COUNT_2_BIT;
     expectFailure([&] { AgcDriver::Graphics::ValidateSampleLocations(gridContext, state); }, "VK_EXT_sample_locations");
     gridContext.sampleLocationSampleCounts |= VK_SAMPLE_COUNT_1_BIT;
-    expectFailure([&] { AgcDriver::Graphics::ValidateSampleLocations(gridContext, state); }, "2x2 sample location grid");
+    Require(AgcDriver::Graphics::ValidateSampleLocations(gridContext, state), "a one-sample pattern varying between pixels was refused on a device without a one-sample 2x2 grid");
     gridContext.sampleLocationGridSampleCounts |= VK_SAMPLE_COUNT_1_BIT;
     Require(AgcDriver::Graphics::ValidateSampleLocations(gridContext, state), "one-sample grid locations were refused on a device that supports them");
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0xcc44;
@@ -3492,6 +3492,9 @@ void multisampleTests() {
     queue.context[0x2f8] = 0x00200002;
     for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x622ae6aeu;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "differs from the rasterizer's");
+    queue.context[0x292] &= ~1u;
+    pass = DecodeColorMetadataPass(queue);
+    Require(pass.has_value() && pass->mode == ColorMetadataPass::Mode::Resolve && pass->source.has_value() && pass->source->samples == 2 && pass->targets.size() == 1, "a CB resolve with MSAA_ENABLE off did not take its sample count from the source target despite a stale PA_SC_AA_CONFIG");
     queue = rasterizedResolve;
     std::vector<std::byte> resolvedBlock(2u * 65536u);
     const auto resolvedAddress = (reinterpret_cast<std::uintptr_t>(resolvedBlock.data()) + 65535u) / 65536u * 65536u;
@@ -3576,13 +3579,36 @@ void multisampleTests() {
     Require(!cmask.TakeClear() && cmask.Keys() == DccKeys::Uncompressed, "a fill of another range changed the CMASK");
     cmask.CheckAddress(0x10000);
     expectFailure([&] { cmask.CheckAddress(0x20000); }, "used CMASK 0x20000");
+    for (unsigned value = 0; value < 256u; ++value) {
+        std::optional<DccKeys> expected;
+        if (value == 0u) expected = DccKeys::Clear0000;
+        else if (value == 0xccu || value == 0xddu || value == 0xeeu || value == 0xffu) expected = DccKeys::Uncompressed;
+        Require(AgcDriver::Graphics::MultisampledCmaskKeys(static_cast<std::uint8_t>(value)) == expected, "MSAA CMASK byte classification differs at " + std::to_string(value));
+    }
+    std::cout << "All 256 MSAA CMASK byte classifications passed\n";
     MultisampledCmask seeded(0x30000, 0x1000);
-    seeded.SeedKeys(DccKeys::Clear0000);
+    seeded.SeedCode(0x00u);
     Require(seeded.TakeClear(), "a fast-cleared seed did not clear its first use");
     Require(!seeded.TakeClear(), "a subsequent use applied the clear again");
     MultisampledCmask mixedSeed(0x30000, 0x1000);
-    mixedSeed.SeedKeys(DccKeys::Mixed);
-    expectFailure([&] { mixedSeed.TakeClear(); }, "not modeled");
+    mixedSeed.SeedCode(std::nullopt);
+    expectFailure([&] { mixedSeed.TakeClear(); }, "reads as mixed, which is not modeled");
+    for (const std::uint8_t expanded : {0xccu, 0xddu, 0xeeu, 0xffu}) {
+        MultisampledCmask expandedSeed(0x30000, 0x1000);
+        expandedSeed.SeedCode(expanded);
+        Require(!expandedSeed.TakeClear() && expandedSeed.Keys() == DccKeys::Uncompressed, "a color-expanded CMASK seed applied a fast clear or was refused");
+        MultisampledCmask expandedFill(0x30000, 0x1000);
+        expandedFill.NoteFill(0x30000, 0x1000, expanded * 0x01010101u);
+        Require(!expandedFill.TakeClear() && expandedFill.Keys() == DccKeys::Uncompressed, "a color-expanded CMASK fill applied a fast clear or was refused");
+    }
+    for (const std::uint8_t unmodeled : {0x11u, 0x33u, 0x44u, 0x88u, 0xcdu}) {
+        MultisampledCmask unmodeledSeed(0x30000, 0x1000);
+        unmodeledSeed.SeedCode(unmodeled);
+        expectFailure([&] { unmodeledSeed.TakeClear(); }, "reads as code 0x");
+    }
+    MultisampledCmask unevenFill(0x30000, 0x1000);
+    unevenFill.NoteFill(0x30000, 0x1000, 0xccccccdcu);
+    expectFailure([&] { unevenFill.TakeClear(); }, "leaves its tiles mixed");
     MultisampledCmask unaddressed;
     unaddressed.NoteFill(0, 0x1000, 0);
     Require(!unaddressed.TakeClear(), "a target without a CMASK cleared");
@@ -4021,6 +4047,57 @@ void DepthRemapTests() {
     floating.depthWrite = true;
     AgcDriver::Graphics::ApplyDepthRemap(remapping, floating);
     Require(floating.depthRemap.mode == 1 && floating.viewport.minDepth == 0 && floating.viewport.maxDepth == 1 && floating.depthClamp, "a written float depth target refused clipped clamp bounds");
+}
+
+void UnusedViewportDepthTests() {
+    auto queue = makeState();
+    queue.context[0x204] = 0;
+    queue.context[0x113] = std::bit_cast<std::uint32_t>(1.0f);
+    queue.context[0x114] = 0;
+    const auto decoded = AgcDriver::Graphics::DecodeState(queue);
+    Require(!decoded.depth && decoded.viewport.minDepth == -1 && decoded.viewport.maxDepth == 1, "unused depth fixture changed");
+    AgcDriver::Graphics::Context context{};
+    context.limits.maxViewportDimensions[0] = context.limits.maxViewportDimensions[1] = 16384;
+    context.limits.viewportBoundsRange[0] = -32768;
+    context.limits.viewportBoundsRange[1] = 32767;
+    ShaderRecompiler::ShaderPixelStageInfo pixel{};
+    pixel.posX = pixel.posY = pixel.posW = true;
+    auto color = decoded;
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(color, pixel);
+    AgcDriver::Graphics::ValidateViewport(context, color.viewport);
+    Require(color.viewport.minDepth == 0 && color.viewport.maxDepth == 1, "unused viewport depth is not representable");
+    AgcDriver::Graphics::Context remapping{};
+    remapping.depthClamp = true;
+    const auto normalized = color;
+    AgcDriver::Graphics::ApplyDepthRemap(remapping, color);
+    Require(color.depthRemap.mode == 0 && color.viewport.minDepth == 0 && color.viewport.maxDepth == 1 && color.negativeOneToOne == normalized.negativeOneToOne && color.depthClamp == normalized.depthClamp, "the depth remap acted on a normalized viewport");
+    Require(color.viewport.x == decoded.viewport.x && color.viewport.y == decoded.viewport.y && color.viewport.width == decoded.viewport.width && color.viewport.height == decoded.viewport.height && color.negativeOneToOne == decoded.negativeOneToOne && color.depthClamp == decoded.depthClamp, "unused depth changed coverage or clipping");
+    auto observed = decoded;
+    pixel.posZ = true;
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(observed, pixel);
+    Require(observed.viewport.minDepth == -1, "fragment position depth was changed");
+    expectFailure([&] { AgcDriver::Graphics::ValidateViewport(context, observed.viewport); }, "viewport depth outside");
+    pixel.posZ = false;
+    auto attached = decoded;
+    attached.depth.emplace();
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(attached, pixel);
+    Require(attached.viewport.minDepth == -1, "attached depth was changed");
+    expectFailure([&] { AgcDriver::Graphics::ValidateViewport(context, attached.viewport); }, "viewport depth outside");
+    auto reversed = decoded;
+    reversed.viewport.minDepth = 2;
+    reversed.viewport.maxDepth = -1;
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(reversed, pixel);
+    AgcDriver::Graphics::ValidateViewport(context, reversed.viewport);
+    Require(reversed.viewport.minDepth == 1 && reversed.viewport.maxDepth == 0, "reversed unused depth is not representable");
+    auto bounded = decoded;
+    bounded.viewport.minDepth = 0.25f;
+    bounded.viewport.maxDepth = 0.75f;
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(bounded, pixel);
+    Require(bounded.viewport.minDepth == 0.25f && bounded.viewport.maxDepth == 0.75f, "an in-range viewport changed");
+    auto invalid = decoded;
+    invalid.viewport.minDepth = std::numeric_limits<float>::infinity();
+    AgcDriver::Graphics::NormalizeUnusedViewportDepth(invalid, pixel);
+    expectFailure([&] { AgcDriver::Graphics::ValidateViewport(context, invalid.viewport); }, "non-finite viewport");
 }
 
 void DepthClipTests() {
@@ -5856,6 +5933,15 @@ void descriptorCacheTests() {
         const auto reused = cache.Allocate(fittingLayout, fitting, true, 0u);
         Require(reused.pool == chained.pool && mock.variableDescriptorCount == 0u, "reusing an update-after-bind pool lost an empty variable image table");
         cache.Free(reused);
+        const auto rewritten = cache.AllocateRewritten(fittingLayout, fitting, true, 3u);
+        cache.Recycle(fittingLayout, rewritten);
+        const std::array<VkDescriptorPoolSize, 2> grown{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 17}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 5}}};
+        const auto larger = cache.AllocateRewritten(fittingLayout, grown, true, 5u);
+        Require(larger.set != rewritten.set && mock.variableDescriptorCount == 5u, "a recycled descriptor set served a larger variable image table than it was allocated for");
+        const auto same = cache.AllocateRewritten(fittingLayout, fitting, true, 3u);
+        Require(same.set == rewritten.set, "a recycled descriptor set was not reused for a variable image table of its own size");
+        cache.Free(larger);
+        cache.Free(same);
         expectFailure([&] { cache.Allocate(fittingLayout, fitting, false, 3u); }, "descriptor set exceeds the device's per-set descriptor limit");
     }
     Require(mock.live == 0, "the combined descriptor cache leaked a pool or layout");
@@ -6117,6 +6203,134 @@ void hostImportBudgetTests() {
     Require(HostImportBudget(memory, 16 * GiB) == 4064 * MiB, "a device-local heap counted as the host heap");
     memory.memoryHeapCount = 1;
     Require(HostImportBudget(memory, 16 * GiB) == 8 * GiB, "a host heap past memoryHeapCount limits the import budget");
+}
+
+void tableUpdateAfterBindTests() {
+    namespace Abi = ShaderRecompiler::ImageTableAbi;
+    using namespace AgcDriver::Graphics;
+    auto argumentLimits = mockContext();
+    argumentLimits.runtimeDescriptorArray = true;
+    argumentLimits.partiallyBound = true;
+    argumentLimits.variableDescriptorCount = true;
+    argumentLimits.descriptorIndexing = true;
+    argumentLimits.limits.maxPerStageDescriptorSamplers = 16;
+    argumentLimits.limits.maxPerStageDescriptorSampledImages = 256;
+    argumentLimits.limits.maxPerStageResources = 287;
+    argumentLimits.limits.maxDescriptorSetSamplers = 80;
+    argumentLimits.limits.maxDescriptorSetSampledImages = 1280;
+    argumentLimits.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindSamplers = 500000;
+    argumentLimits.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindSampledImages = 1000000;
+    argumentLimits.descriptorIndexingLimits.maxPerStageUpdateAfterBindResources = 1000000;
+    argumentLimits.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindSamplers = 500000;
+    argumentLimits.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindSampledImages = 1000000;
+    Require(ImageTableCapacity(argumentLimits) == 0u && SamplerTableCapacity(argumentLimits) == 0u && !ImageTableUpdateAfterBind(argumentLimits) && !SamplerTableUpdateAfterBind(argumentLimits), "tables beyond the regular descriptor limits were enabled without update-after-bind sampled images");
+    argumentLimits.sampledImageUpdateAfterBind = true;
+    Require(ImageTableCapacity(argumentLimits) == ShaderRecompiler::RuntimeAbi::StageCount * Abi::ImageElementBudget && ImageTableUpdateAfterBind(argumentLimits), "an image table beyond the regular descriptor limits did not take the update-after-bind limits");
+    Require(SamplerTableCapacity(argumentLimits) == Abi::SamplerElementBudget && SamplerTableUpdateAfterBind(argumentLimits), "a sampler table beyond the regular descriptor limits did not take the update-after-bind limits");
+    auto regularLimits = argumentLimits;
+    regularLimits.limits.maxPerStageDescriptorSamplers = 1048576;
+    regularLimits.limits.maxPerStageDescriptorSampledImages = 1048576;
+    regularLimits.limits.maxPerStageResources = 1048576;
+    regularLimits.limits.maxDescriptorSetSamplers = 1048576;
+    regularLimits.limits.maxDescriptorSetSampledImages = 1048576;
+    Require(ImageTableCapacity(regularLimits) == ShaderRecompiler::RuntimeAbi::StageCount * Abi::ImageElementBudget && !ImageTableUpdateAfterBind(regularLimits), "an image table within the regular descriptor limits took the update-after-bind path");
+    Require(SamplerTableCapacity(regularLimits) == Abi::SamplerElementBudget && !SamplerTableUpdateAfterBind(regularLimits), "a sampler table within the regular descriptor limits took the update-after-bind path");
+
+    const auto tableContext = [] {
+        auto context = mockContext();
+        context.sampledImageUpdateAfterBind = true;
+        context.limits.maxPerStageDescriptorSampledImages = 1;
+        context.limits.maxDescriptorSetSampledImages = 1;
+        context.limits.maxPerStageDescriptorSamplers = 1;
+        context.limits.maxDescriptorSetSamplers = 1;
+        context.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindSampledImages = 2;
+        context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindSampledImages = 2;
+        context.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindSamplers = 2u * Abi::SamplerEntryElements;
+        context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindSamplers = 2u * Abi::SamplerEntryElements;
+        context.descriptorIndexingLimits.maxPerStageUpdateAfterBindResources = 128;
+        context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindStorageBuffers = 32;
+        context.descriptorIndexingLimits.maxPerStageDescriptorUpdateAfterBindStorageBuffers = 16;
+        return context;
+    };
+    const auto requireTableLayout = [](std::uint32_t tableBinding, VkDescriptorBindingFlags tableFlags, std::string_view what) {
+        Require(mock.layoutFlags == VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, std::string(what) + " did not get an update-after-bind layout");
+        Require(mock.layoutBindingFlags.size() == mock.layoutBindings.size(), std::string(what) + " lost its binding flags");
+        for (std::size_t index = 0; index < mock.layoutBindings.size(); ++index) {
+            const auto expected = mock.layoutBindings[index].binding == tableBinding ? tableFlags | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0u;
+            Require(mock.layoutBindingFlags[index] == expected, std::string(what) + " put update-after-bind on the wrong bindings");
+        }
+        Require(mock.poolFlags == VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT, std::string(what) + " did not come from an update-after-bind pool");
+    };
+    for (const bool cached : {false, true}) {
+        mock = MockVulkan{};
+        auto context = tableContext();
+        context.imageTableCapacity = 2;
+        context.imageTableUpdateAfterBind = true;
+        {
+            DescriptorCache cache(context);
+            if (cached) context.descriptorCache = &cache;
+            ShaderRecompiler::RecompileResult program;
+            auto map = makeBinding(Role::ImageTableMap, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::ImageTableMap), 1, std::vector<std::uint32_t>(Abi::HeaderWords + 2u));
+            map.guestDescriptor[Abi::HeaderVersion] = Abi::Version;
+            map.guestDescriptor[Abi::HeaderElementCount] = 2u;
+            map.guestDescriptor[Abi::HeaderElementFaults] = Abi::HeaderWords;
+            map.guestDescriptor[Abi::HeaderSamplerFaults] = Abi::HeaderWords + 2u;
+            program.bindings.push_back(map);
+            auto images = makeBinding(Role::ImageTable, ShaderRecompiler::RuntimeAbi::ImageTableBinding, 2u, std::vector<std::uint32_t>(16u));
+            images.kind = Kind::SampledImage;
+            images.imageShapes.resize(2u);
+            images.imageDepthCompare.resize(2u);
+            images.imageSamplers.resize(2u);
+            program.bindings.push_back(std::move(images));
+            const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+            {
+                ShaderResources resources(context, shader, {}, true);
+                requireTableLayout(ShaderRecompiler::RuntimeAbi::ImageTableBinding, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT, "an image table beyond the regular limits");
+                if (cached) Require(DescribeSetLayouts(context, std::span(&shader, 1)).layouts.main == resources.Layout(), "the described image table layout differs from the built one");
+            }
+        }
+        Require(mock.live == 0, "the update-after-bind image table leaked Vulkan objects");
+    }
+    for (const bool cached : {false, true}) {
+        mock = MockVulkan{};
+        auto context = tableContext();
+        constexpr auto count = 2u * Abi::SamplerEntryElements;
+        context.samplerTableCapacity = count;
+        context.samplerTableUpdateAfterBind = true;
+        context.samplerAnisotropy = true;
+        context.samplerFilterMinmax = true;
+        context.limits.maxSamplerAnisotropy = 2.0f;
+        context.limits.maxSamplerLodBias = 0.5f;
+        {
+            DescriptorCache cache(context);
+            if (cached) context.descriptorCache = &cache;
+            ShaderRecompiler::RecompileResult program;
+            auto map = makeBinding(Role::ImageTableMap, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::ImageTableMap), 1, std::vector<std::uint32_t>(Abi::HeaderWords + 2u));
+            map.guestDescriptor[Abi::HeaderVersion] = Abi::Version;
+            map.guestDescriptor[Abi::HeaderSamplerCount] = count;
+            map.guestDescriptor[Abi::HeaderElementFaults] = Abi::HeaderWords;
+            map.guestDescriptor[Abi::HeaderSamplerFaults] = Abi::HeaderWords;
+            program.bindings.push_back(map);
+            const auto samplerBinding = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::SamplerTable);
+            auto samplers = makeBinding(Role::SamplerTable, samplerBinding, count, {});
+            samplers.kind = Kind::Sampler;
+            const std::array<std::uint32_t, 4> valid{0x92u, (4u * 256u) << 12u, 0u, 0u};
+            for (std::uint32_t element = 0; element < count; ++element) {
+                samplers.guestDescriptor.insert(samplers.guestDescriptor.end(), valid.begin(), valid.end());
+                samplers.samplerDepthCompare.push_back(false);
+            }
+            program.bindings.push_back(std::move(samplers));
+            const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+            {
+                ShaderResources resources(context, shader, {}, true);
+                resources.Complete();
+                requireTableLayout(samplerBinding, VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, "a sampler table beyond the regular limits");
+                Require(findWrite(samplerBinding).count == count, "the update-after-bind sampler table did not write its samplers");
+                if (cached) Require(DescribeSetLayouts(context, std::span(&shader, 1)).layouts.main == resources.Layout(), "the described sampler table layout differs from the built one");
+            }
+        }
+        Require(mock.live == 0 && mock.samplerFlags.empty(), "the update-after-bind sampler table leaked Vulkan objects");
+    }
 }
 
 void textureCacheBudgetTests() {
@@ -6555,6 +6769,159 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     words.insert(words.end(), declarations.begin(), declarations.end());
     words.insert(words.end(), function.begin(), function.end());
     return words;
+}
+
+struct SampleLocationsUse {
+    VkExtent2D grid{};
+    std::vector<VkSampleLocationEXT> locations;
+};
+
+std::vector<SampleLocationsUse> pipelineSampleLocations;
+std::vector<SampleLocationsUse> passSampleLocations;
+
+void recordSampleLocations(std::vector<SampleLocationsUse>& uses, const VkSampleLocationsInfoEXT& info) {
+    uses.push_back({info.sampleLocationGridSize, {info.pSampleLocations, info.pSampleLocations + info.sampleLocationsCount}});
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL sampleLocationCreateGraphicsPipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks*, VkPipeline* pipelines) {
+    Require(count == 1, "the sample location mock expects one pipeline per call");
+    const auto* locations = infos[0].pMultisampleState != nullptr ? static_cast<const VkPipelineSampleLocationsStateCreateInfoEXT*>(infos[0].pMultisampleState->pNext) : nullptr;
+    if (locations != nullptr && locations->sType == VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT && locations->sampleLocationsEnable) recordSampleLocations(pipelineSampleLocations, locations->sampleLocationsInfo);
+    *pipelines = makeHandle<VkPipeline>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL sampleLocationCreateRenderPass(VkDevice, const VkRenderPassCreateInfo*, const VkAllocationCallbacks*, VkRenderPass* pass) {
+    *pass = makeHandle<VkRenderPass>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL sampleLocationCreateFramebuffer(VkDevice, const VkFramebufferCreateInfo*, const VkAllocationCallbacks*, VkFramebuffer* framebuffer) {
+    *framebuffer = makeHandle<VkFramebuffer>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL sampleLocationDestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks*) { --mock.live; }
+VKAPI_ATTR void VKAPI_CALL sampleLocationDestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks*) { --mock.live; }
+VKAPI_ATTR void VKAPI_CALL sampleLocationSetViewport(VkCommandBuffer, std::uint32_t, std::uint32_t, const VkViewport*) {}
+VKAPI_ATTR void VKAPI_CALL sampleLocationSetScissor(VkCommandBuffer, std::uint32_t, std::uint32_t, const VkRect2D*) {}
+
+VKAPI_ATTR void VKAPI_CALL sampleLocationBeginRenderPass(VkCommandBuffer, const VkRenderPassBeginInfo* begin, VkSubpassContents) {
+    const auto* locations = static_cast<const VkRenderPassSampleLocationsBeginInfoEXT*>(begin->pNext);
+    if (locations == nullptr || locations->sType != VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT) return;
+    for (std::uint32_t index = 0; index < locations->attachmentInitialSampleLocationsCount; ++index) recordSampleLocations(passSampleLocations, locations->pAttachmentInitialSampleLocations[index].sampleLocationsInfo);
+    for (std::uint32_t index = 0; index < locations->postSubpassSampleLocationsCount; ++index) recordSampleLocations(passSampleLocations, locations->pPostSubpassSampleLocations[index].sampleLocationsInfo);
+}
+
+PFN_vkVoidFunction VKAPI_CALL sampleLocationProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateGraphicsPipelines", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationCreateGraphicsPipelines)},
+        {"vkCreateRenderPass", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationCreateRenderPass)},
+        {"vkDestroyRenderPass", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationDestroyRenderPass)},
+        {"vkCreateFramebuffer", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationCreateFramebuffer)},
+        {"vkDestroyFramebuffer", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationDestroyFramebuffer)},
+        {"vkCmdBeginRenderPass", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationBeginRenderPass)},
+        {"vkCmdSetViewport", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationSetViewport)},
+        {"vkCmdSetScissor", reinterpret_cast<PFN_vkVoidFunction>(sampleLocationSetScissor)}
+    };
+    const auto it = table.find(name);
+    return it != table.end() ? it->second : mockProc(device, name);
+}
+
+void sampleLocationGridFallbackTests() {
+    using namespace AgcDriver::Graphics;
+    auto queue = makeState();
+    queue.context[0x2f8] = 0x00100001;
+    queue.context[0x292] = 3;
+    queue.context[0x3b8] = 0x0dc00000u;
+    queue.context[0x31d] = 0x9000;
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    for (const auto [pixel, word] : {std::pair{0u, 0x0c04u}, std::pair{1u, 0x0c04u}, std::pair{2u, 0x040cu}, std::pair{3u, 0x040cu}}) queue.context[0x2fe + pixel * 4u] = word;
+    const auto checkerboard = DecodeState(queue);
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x0c04u;
+    const auto uniform = DecodeState(queue);
+    Require(checkerboard.samples == 2 && checkerboard.customSampleLocations && checkerboard.sampleLocationGrid && uniform.samples == 2 && uniform.customSampleLocations && !uniform.sampleLocationGrid, "the 2x checkerboard (PPSA01556) or the uniform pattern of its pixel (0,0) did not decode");
+    auto sampleZero = checkerboard;
+    sampleZero.samples = 1;
+    sampleZero.sampleLocations = {};
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) sampleZero.sampleLocations[pixel * 8u] = checkerboard.sampleLocations[pixel * 8u];
+    const auto previousDepthSamples = depthSampleCounts;
+    depthSampleCounts = VK_SAMPLE_COUNT_2_BIT;
+    ShaderRecompiler::RecompileResult vertex, fragment;
+    vertex.spirv = makeModule({});
+    fragment.spirv = makeModule({.fragment = true});
+    vertex.variantId = 1;
+    fragment.variantId = 2;
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+    const std::array<std::uint32_t, 1> mainKey{41};
+    const auto draw = [&](const State& decoded, VkSampleCountFlags gridSamples, bool libraries, bool depth) {
+        mock = MockVulkan{};
+        pipelineSampleLocations.clear();
+        passSampleLocations.clear();
+        auto context = mockContext();
+        context.deviceProc = sampleLocationProc;
+        context.device = makeHandle<VkDevice>();
+        context.graphicsPipelineLibrary = libraries;
+        context.sampleLocationSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT;
+        context.sampleLocationGridSampleCounts = gridSamples;
+        context.imageFormatProperties = sampleLocationDepthProperties;
+        context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT;
+        context.limits.framebufferDepthSampleCounts = VK_SAMPLE_COUNT_2_BIT;
+        context.limits.maxFramebufferWidth = 64;
+        context.limits.maxFramebufferHeight = 64;
+        context.limits.maxFramebufferLayers = 1;
+        State state{};
+        state.samples = decoded.samples;
+        state.sampleLocations = decoded.sampleLocations;
+        state.customSampleLocations = decoded.customSampleLocations;
+        state.sampleLocationGrid = decoded.sampleLocationGrid;
+        if (depth) {
+            state.depth = DepthTarget{0, 0, {64, 64}, VK_FORMAT_D32_SFLOAT, 1.0f, 0};
+            state.depth->samples = state.samples;
+            state.depthTest = true;
+            state.depthCompare = VK_COMPARE_OP_LESS;
+        }
+        const PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), VK_NULL_HANDLE, false, mainKey, {}};
+        if (libraries) {
+            Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "the sample location pipeline's libraries were not prebuilt");
+        } else {
+            Pipeline pipeline(context, state, VertexInputLayout{}, resources, shaders, VK_IMAGE_LAYOUT_GENERAL);
+            const std::array<VkImageView, 1> depthView{makeHandle<VkImageView>()};
+            const auto framebuffer = pipeline.AcquireFramebuffer(std::span(depthView).first(depth ? 1u : 0u), {}, {64, 64});
+            pipeline.Begin(makeHandle<VkCommandBuffer>(), *framebuffer, {64, 64}, state);
+        }
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0, "sample location grid fallback tests leaked Vulkan objects");
+        Require(pipelineSampleLocations.size() == (libraries ? 2u : 1u) && passSampleLocations.size() == (libraries ? 0u : depth ? 2u : 1u), "the pipeline or render pass did not take its sample locations once per library or attachment");
+        auto uses = pipelineSampleLocations;
+        uses.insert(uses.end(), passSampleLocations.begin(), passSampleLocations.end());
+        return uses;
+    };
+    const auto expect = [](const std::vector<SampleLocationsUse>& uses, VkExtent2D grid, std::span<const VkSampleLocationEXT> locations, const std::string& what) {
+        for (const auto& use : uses) {
+            Require(use.grid.width == grid.width && use.grid.height == grid.height && use.locations.size() == locations.size(), what + " took the wrong sample location grid");
+            for (std::size_t index = 0; index < locations.size(); ++index) Require(use.locations[index].x == locations[index].x && use.locations[index].y == locations[index].y, what + " took the wrong sample locations");
+        }
+    };
+    const std::array<VkSampleLocationEXT, 2> pixelZero{{{0.75f, 0.5f}, {0.25f, 0.5f}}};
+    const std::array<VkSampleLocationEXT, 8> grid{{{0.75f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}, {0.75f, 0.5f}}};
+    const std::array<VkSampleLocationEXT, 1> sampleZeroPixelZero{{{0.75f, 0.5f}}};
+    const std::array<VkSampleLocationEXT, 4> sampleZeroGrid{{{0.75f, 0.5f}, {0.75f, 0.5f}, {0.25f, 0.5f}, {0.25f, 0.5f}}};
+    for (const bool libraries : {true, false}) {
+        for (const bool depth : {false, true}) {
+            for (const VkSampleCountFlags gridSamples : {VkSampleCountFlags{0}, VkSampleCountFlags{VK_SAMPLE_COUNT_4_BIT}}) expect(draw(checkerboard, gridSamples, libraries, depth), {1, 1}, pixelZero, "a 2x checkerboard on a device without a 2x2 grid for 2 samples");
+            expect(draw(checkerboard, VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT, libraries, depth), {2, 2}, grid, "a 2x checkerboard on a device with a 2x2 grid for 2 samples");
+            for (const VkSampleCountFlags gridSamples : {VkSampleCountFlags{0}, VkSampleCountFlags{VK_SAMPLE_COUNT_2_BIT}}) expect(draw(uniform, gridSamples, libraries, depth), {1, 1}, pixelZero, "a uniform 2x pattern");
+        }
+        expect(draw(sampleZero, VK_SAMPLE_COUNT_2_BIT, libraries, false), {1, 1}, sampleZeroPixelZero, "one sample at sample 0's checkerboard locations on a device without a one-sample grid");
+        expect(draw(sampleZero, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT, libraries, false), {2, 2}, sampleZeroGrid, "one sample at sample 0's checkerboard locations on a device with a one-sample grid");
+    }
+    depthSampleCounts = previousDepthSamples;
+    mock = MockVulkan{};
 }
 
 void pipelineLibrarySetTests() {
@@ -7174,6 +7541,41 @@ void prewarmPipelineTests() {
     Require(mock.pipelineCreateCount == createsBefore + 1, "PrewarmPipeline did not create a pipeline on miss");
     PrewarmPipeline(context, state, shaders);
     Require(mock.pipelineCreateCount == createsBefore + 1, "PrewarmPipeline recreated an already warmed pipeline");
+}
+
+void quadListTests() {
+    using namespace AgcDriver::Graphics;
+    auto queue = makeState();
+    queue.userConfig[0x242] = 19;
+    queue.context[0x1b3] = queue.context[0x1b4] = 2;
+    Require(DrawRejection(queue, false).empty(), "valid quad-list draw failed precheck");
+    auto state = DecodeState(queue);
+    Require(state.quadList, "quad-list state flag was not set");
+    Require(state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, "quad-list did not decode to triangle list topology");
+    Require(RasterPrimitiveOf(state) == ShaderRecompiler::RasterPrimitive::Triangle, "quad-list did not produce triangle raster primitive");
+    Require(!state.primitiveRestart, "quad-list must not have primitive restart enabled");
+    queue.userConfig[0x24b] = 1;
+    state = DecodeState(queue);
+    Require(!state.primitiveRestart, "quad-list must suppress primitive restart");
+    queue.userConfig[0x24b] = 0;
+    const Context context{};
+    std::array<std::uint16_t, 8> indices{0, 1, 2, 3, 2, 3, 4, 5};
+    const auto drawOutcome = [&](std::uint32_t count, bool indexed) {
+        const AgcDriver::Pm4::DrawParameters draw = indexed ? AgcDriver::Pm4::DrawParameters{reinterpret_cast<std::uint64_t>(indices.data()), count, 2, 1, 0, true} : AgcDriver::Pm4::DrawParameters{0, count, 0, 1, 0, false};
+        try {
+            Draw(context, state, draw, {});
+        } catch (const std::exception& error) {
+            return std::string(error.what());
+        }
+        return std::string{};
+    };
+    for (const auto indexed : {false, true}) {
+        const auto complete = drawOutcome(4, indexed);
+        for (const auto count : {5u, 6u, 7u}) Require(drawOutcome(count, indexed) == complete, "a quad-list draw with partial trailing vertices was not drawn like complete quads");
+    }
+    Require(drawOutcome(0, true).empty(), "an indexed quad-list draw without indices was not skipped");
+    const AgcDriver::Pm4::DrawParameters noInstances{reinterpret_cast<std::uint64_t>(indices.data()), 4, 2, 0, 0, true};
+    Draw(context, state, noInstances, {});
 }
 
 ShaderRecompiler::RecompileResult recompilePixel(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
@@ -9617,6 +10019,11 @@ int main(int argc, char** argv) {
             descriptorCacheTests();
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--unused-viewport-depth") {
+            UnusedViewportDepthTests();
+            DepthClipTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--unused-stencil-reference") {
             stencilReferenceUnusedTests();
             return 0;
@@ -9663,6 +10070,69 @@ int main(int argc, char** argv) {
             std::cout << "sparse buffer hole tests " << (passed ? "passed" : "failed") << '\n';
             return passed ? 0 : 1;
         }
+        if (argc == 2 && (std::string_view(argv[1]) == "--heap-mirror-unwatch" || std::string_view(argv[1]) == "--heap-mirror-unwatched-import")) {
+            {
+                mock = MockVulkan{};
+                auto context = mockContext();
+                context.bufferDeviceAddress = true;
+                context.limits.maxStorageBufferRange = 1u << 27;
+                RunHeapMirrorUnwatchTests(context, {
+                    [](VkBuffer buffer) -> std::span<std::byte> { return mockBufferMemory(buffer); },
+                    {},
+                    [](VkDeviceAddress address) {
+                        const auto offset = address - 0x100000000000ULL;
+                        const auto buffer = reinterpret_cast<VkBuffer>(offset / 0x10000);
+                        return mockBufferMemory(buffer).subspan(offset % 0x10000);
+                    },
+                    {},
+                    {}
+                }, std::string_view(argv[1]) == "--heap-mirror-unwatched-import");
+            }
+            Require(mock.live == 0, "the heap mirror unwatch test leaked Vulkan objects");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--sparse-heap-mirror-unwatch") {
+            {
+                mock = MockVulkan{};
+                auto context = mockContext();
+                context.bufferDeviceAddress = true;
+                context.limits.maxStorageBufferRange = 1u << 27;
+                RunSparseHeapMirrorUnwatchTests(context, {
+                    [](VkBuffer buffer) -> std::span<std::byte> { return mockBufferMemory(buffer); },
+                    {},
+                    [](VkDeviceAddress address) {
+                        const auto offset = address - 0x100000000000ULL;
+                        const auto buffer = reinterpret_cast<VkBuffer>(offset / 0x10000);
+                        return mockBufferMemory(buffer).subspan(offset % 0x10000);
+                    },
+                    {},
+                    {}
+                });
+            }
+            Require(mock.live == 0, "the sparse heap mirror unwatch test leaked Vulkan objects");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--heap-mirror-run-unwatch") {
+            {
+                mock = MockVulkan{};
+                auto context = mockContext();
+                context.bufferDeviceAddress = true;
+                context.limits.maxStorageBufferRange = 1u << 27;
+                RunHeapMirrorRunUnwatchTests(context, {
+                    [](VkBuffer buffer) -> std::span<std::byte> { return mockBufferMemory(buffer); },
+                    {},
+                    [](VkDeviceAddress address) {
+                        const auto offset = address - 0x100000000000ULL;
+                        const auto buffer = reinterpret_cast<VkBuffer>(offset / 0x10000);
+                        return mockBufferMemory(buffer).subspan(offset % 0x10000);
+                    },
+                    {},
+                    {}
+                });
+            }
+            Require(mock.live == 0, "the heap mirror run unwatch test leaked Vulkan objects");
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--address-space-teardown") {
             addressSpaceTeardownTests();
             std::cout << "address-space device teardown releases cached guest allocations\n";
@@ -9670,6 +10140,11 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-budget-placement") {
             bufferBudgetPlacementTests();
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--sample-location-grid-fallback") {
+            sampleLocationGridFallbackTests();
+            std::cout << "Sample location grid fallback checks passed\n";
             return 0;
         }
         {
@@ -9776,6 +10251,7 @@ int main(int argc, char** argv) {
         srgb8TargetTests();
         DepthClipTests();
         DepthRemapTests();
+        UnusedViewportDepthTests();
         DepthStencilTests();
         OneDimensionalColorTests();
         htileDepthClearTests();
@@ -9820,6 +10296,7 @@ int main(int argc, char** argv) {
         framebufferLayerTests();
         msaaEnableClearOneSampleTargetTests();
         UnwrittenSampleLocationTests();
+        sampleLocationGridFallbackTests();
         depthCopyFormatTests();
         quadPixelMaskTests();
         ShaderStageTests();
@@ -9850,6 +10327,7 @@ int main(int argc, char** argv) {
         imageTableSnapshotAllocationTests();
         samplerTableNonSeamlessCubeTests();
         samplerTableDeviceLimitTests();
+        tableUpdateAfterBindTests();
         misalignedShaderDataTests();
         debugBranchTests();
         hostImportBudgetTests();
@@ -9875,6 +10353,7 @@ int main(int argc, char** argv) {
         pixelParameterSlotTests();
         rectListTests();
         prewarmPipelineTests();
+        quadListTests();
         floatControlsModeTests();
         barycentricEmulationTests();
         copiedWriterIndirectOverlapTests();
