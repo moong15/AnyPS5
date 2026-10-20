@@ -22,7 +22,7 @@ struct DecodeRead {
     std::uint32_t size = 0;
     std::span<const std::byte> Bytes() const { return {data.data(), size}; }
 };
-ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData, std::vector<DecodeRead>* reads = nullptr, bool staticAbi = false, std::uint32_t hiddenUserWords = 0);
+ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData, std::vector<DecodeRead>* reads = nullptr, bool staticAbi = false, std::uint32_t hiddenUserWords = 0, void (*readBarrier)(std::uint64_t address, std::size_t bytes) = nullptr);
 
 }
 

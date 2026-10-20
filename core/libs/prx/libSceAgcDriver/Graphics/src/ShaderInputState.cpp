@@ -198,7 +198,7 @@ bool PixelEarlyZ(std::uint32_t shaderControl) {
     return depthBeforeShader || ((zOrder & 1u) != 0u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable && !stencilRefExportEnable);
 }
 
-ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData, std::vector<DecodeRead>* reads, bool staticAbi, std::uint32_t hiddenUserWords) {
+ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData, std::vector<DecodeRead>* reads, bool staticAbi, std::uint32_t hiddenUserWords, void (*readBarrier)(std::uint64_t address, std::size_t bytes)) {
     if (header.empty()) return {};
     if (header.size() < sizeof(Shader)) throw std::runtime_error("AGC graphics: shader header is smaller than the fixed AGC header");
     Shader shader;
@@ -256,6 +256,7 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
         }
         std::array<std::byte, 4> attribWordBytes{};
         const auto attribWordAddress = attribTableAddr + static_cast<std::uint64_t>(semantic.semantic) * 4u;
+        if (readBarrier != nullptr) readBarrier(attribWordAddress, attribWordBytes.size());
         AgcDriver::GuestMemory::Read(attribWordAddress, attribWordBytes, 4);
         record(attribWordAddress, attribWordBytes);
         std::uint32_t attribWord;
@@ -267,6 +268,7 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
         if (index >= ShaderRecompiler::ShaderVertexStageInfo::MaxResources) throw std::runtime_error("AGC graphics: vertex buffer index exceeds the supported domain");
         std::array<std::byte, 16> sharpBytes{};
         const auto sharpAddress = bufferTableAddr + static_cast<std::uint64_t>(index) * 16u;
+        if (readBarrier != nullptr) readBarrier(sharpAddress, sharpBytes.size());
         AgcDriver::GuestMemory::Read(sharpAddress, sharpBytes, 4);
         record(sharpAddress, sharpBytes);
         std::array<std::uint32_t, 4> sharp{};

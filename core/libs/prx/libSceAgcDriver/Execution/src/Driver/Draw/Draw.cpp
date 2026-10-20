@@ -21,6 +21,22 @@
 
 namespace AgcDriver::DriverDetail {
 
+namespace {
+
+bool pipelineMayWrite(DrawPipeline& pipeline, std::uint64_t address, std::size_t bytes) {
+    if (pipeline.HasIncompleteWrites() || pipeline.Overlaps(address, bytes)) return true;
+    const std::array<DrawPipeline::Range, 1> ranges{{{address, address + bytes}}};
+    return Graphics::StorageTexture::AnyPendingOverlaps(ranges) && DrawPipeline::HeldReads(address, bytes);
+}
+
+void drainBeforeVertexDecodeRead(std::uint64_t address, std::size_t bytes) {
+    if (!DrawPipeline::Active()) return;
+    auto& pipeline = DrawPipeline::Queue0();
+    if (pipeline.Busy() && pipelineMayWrite(pipeline, address, bytes)) pipeline.Drain(DrawPipeline::DrainReason::Capture);
+}
+
+}
+
 DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::string& rejected) {
     const GuestMemory::TargetRefreshDrawScope targetDrawScope;
     PerformanceTimer timing("Driver.Draw");
@@ -59,11 +75,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     if (pipelined && drawParameters.indirect) {
         const auto& indirect = *drawParameters.indirect;
         auto& pipeline = DrawPipeline::Queue0();
-        const auto needsDrain = [&](std::uint64_t address, std::size_t bytes) {
-            if (pipeline.HasIncompleteWrites() || pipeline.Overlaps(address, bytes)) return true;
-            const std::array<DrawPipeline::Range, 1> ranges{{{address, address + bytes}}};
-            return Graphics::StorageTexture::AnyPendingOverlaps(ranges) && DrawPipeline::HeldReads(address, bytes);
-        };
+        const auto needsDrain = [&](std::uint64_t address, std::size_t bytes) { return pipelineMayWrite(pipeline, address, bytes); };
         if (!pipelinedIndirect || (pipeline.Busy() && (needsDrain(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && needsDrain(indirect.countAddress, 4))))) pipeline.Drain(DrawPipeline::DrainReason::Indirect);
     }
     bool drainedForInline = false;
@@ -306,7 +318,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         const auto& program = programs[i];
         if (program.binary.stage == Stage::Fragment || roles[i] == Role::GeometryBack) return;
         decodeReads[i].clear();
-        vertexInfos[i] = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, &decodeReads[i], false, 8u - program.firstUserSgpr);
+        vertexInfos[i] = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, &decodeReads[i], false, 8u - program.firstUserSgpr, &drainBeforeVertexDecodeRead);
         if (vertexInfos[i]) vertexInfos[i]->paClVsOutCntl = PositionExportLayout(program.snapshot.get(), program.codeOffset, program.binary.code, readRegister(queue.context, 0x207), program.tailContinuation.get()) | graphics.layerExports;
         if (vertexInfos[i]) {
             vertexInfos[i]->depthRemapMode = graphics.depthRemap.mode;

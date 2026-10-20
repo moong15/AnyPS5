@@ -1474,6 +1474,16 @@ void HiddenUserWordVertexTablesTests() {
     expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, merged, nullptr, false, 0)); }, "null vertex attribute table");
     const auto plain = AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, registers, nullptr, false, 0);
     Require(plain.fetchEmbedded && plain.fetchBufferReg == 4u && plain.resourcesNum == 1 && plain.resources[0].fields[0] == 0x1000u, "a vertex program's tables moved");
+    static std::vector<std::pair<std::uint64_t, std::size_t>> barriers;
+    barriers.clear();
+    const auto land = [](std::uint64_t address, std::size_t bytes) {
+        barriers.emplace_back(address, bytes);
+        if (address == reinterpret_cast<std::uintptr_t>(bufferTable.data())) bufferTable = {0x2000u, 0x20000u, 64u, 0x3000u};
+    };
+    const auto ordered = AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, registers, nullptr, false, 0, land);
+    Require(barriers.size() == 2 && barriers[0] == std::pair<std::uint64_t, std::size_t>{reinterpret_cast<std::uintptr_t>(attribTable.data()), 4} && barriers[1] == std::pair<std::uint64_t, std::size_t>{reinterpret_cast<std::uintptr_t>(bufferTable.data()), 16}, "the vertex decode did not order its attribute word and V# reads through the read barrier");
+    Require(ordered.resourcesNum == 1 && ordered.resources[0].fields[0] == 0x2000u, "the vertex decode read a V# before the store its read barrier waited for landed");
+    bufferTable = {0x1000u, 0x20000u, 64u, 0x3000u};
 }
 
 void HeaderlessVertexStageTests() {
