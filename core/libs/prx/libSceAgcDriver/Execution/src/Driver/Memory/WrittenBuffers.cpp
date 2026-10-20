@@ -151,7 +151,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> DrawReadRanges(const Graphi
             ranges.emplace_back(begin, begin + bytes);
         }
         for (const auto& binding : stage.program->bindings) {
-            if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers && binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers) bounded = false;
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers && binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers && binding.role != ShaderRecompiler::DescriptorRole::FlattenedSrt && binding.role != ShaderRecompiler::DescriptorRole::ShaderData) bounded = false;
             if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
             for (std::uint32_t element = 0; element < binding.count; ++element) {
                 if (binding.guestDescriptor.size() < (static_cast<std::size_t>(element) + 1) * 4) {

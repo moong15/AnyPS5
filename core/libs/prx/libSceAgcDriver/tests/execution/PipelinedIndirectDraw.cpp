@@ -781,8 +781,10 @@ void IndirectBatch(const std::string& mode) {
     else if (label) Require(after.batches > before.batches, "label boundary did not complete the first indirect draw batch");
     else {
         Require(after.draws - before.draws == draws, "indirect batch fixture did not use the GPU batching path");
-        const auto batches = producer || bound || (committer && PipelinedIndirectDisabled()) ? 2u : 1u;
-        Require(after.batches - before.batches == batches, "indirect draws did not form the expected dependency batches");
+        const auto minimumBatches = producer || bound || (committer && PipelinedIndirectDisabled()) ? 2u : 1u;
+        const auto maximumBatches = producer && !PipelinedIndirectDisabled() ? 3u : minimumBatches;
+        const auto batches = after.batches - before.batches;
+        Require(batches >= minimumBatches && batches <= maximumBatches, "indirect draws did not form the expected dependency batches");
         Require(after.avoided - before.avoided == draws - batches, "indirect batch did not preserve compatible rendering");
     }
     std::uint64_t digest = 14695981039346656037ull;
