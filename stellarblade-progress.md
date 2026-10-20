@@ -937,3 +937,14 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
 - Branch perf/gpu-single-dcc-upload = b57c5be9d on origin/main 30fda0a03, pushed to fork, PR https://github.com/boykopovar/AnyPS5/pull/8484. Body in E:\AnyPS5-notes\pr-traces\pr-body.md says perf numbers follow in a comment.
 - Staged libs: E:\StellarBlade\libs-main-30fda0a03, libs-pr-b57c5be9d. Relinker identical to deployed exe (no core/relinker diff c963815e1..30fda0a03).
 - Running: series-pr.sh (BASE=APS5_PREBUILD_THREADS=16 only) run318 main warm, run319 main1, run320 pr1, run321 main2, run322 pr2. Then trace_digest + summary lines into a PR comment (name Stellar Blade there), check has_numbers.
+
+## 2026-10-20 20:40: state before compaction
+- PR #8484 (fps12 on main): DONE. Body has 3 alternating main/PR pairs (main 4.62 vs PR 6.45 fps, +40%), summary lines, digests, traces on fork release pr8484-evidence. has_numbers True, label perf only. Body file E:\AnyPS5-notes\pr-traces\pr-body-numbers.md. User said: don't mention crashes in PR text.
+- Runs STOPPED on user request: series.pause set, lock free, run326 (APS5_PIPELINED_DRAWS=32 screen on libs-merge10b-1ed7473a9 + bundle A, compare run317 8.62) never ran. Resume = delete series.pause (user OK needed? they asked to stop "once").
+- Background Claude agents (results to E:\AnyPS5-notes\agent-*-result.md; none run tests/game/push; build gate on lock + StellarBlade.exe):
+  1. write-back "imported buffer region" reduction: E:\AnyPS5-wbir, branch perf/wb-import-region -> agent-wbir-result.md
+  2. load-crash fix review items: E:\AnyPS5-wbw -> agent-wbw-fix-result.md (review: agent-wbw-review.md, no-go as is: lock-order deadlock)
+  3. pipelined GPU-side indirect draws (port of #1896 half): E:\AnyPS5-pind, branch perf/pipelined-indirect, switch APS5_NO_PIPELINED_INDIRECT -> agent-pind-result.md (analysis agent-next-bottleneck.md)
+  4. PR #7457 rebase onto origin/main 7526640c3 + adriadam10 (CHANGES_REQUESTED: ImportRequester, failedBlockImport missPolicy, overlap with state.refusals/failedBlocks) + CnRJay (reserved-heap commit stamp + test, 256-slot policy/hit rate) in E:\AnyPS5-memo -> agent-7457-rebase-result.md
+- Then for #7457: validation ctest main vs PR, 3 alternating main/PR Stellar Blade pairs (old evidence was off-switch only = doesn't count), summary lines+traces (fork release)+digest in body, draft replies to adriadam10 + CnRJay and SHOW USER before posting.
+- For each agent commit: ctest -R serially in lock with validation env, then one game run vs previous sb5 run (run317 8.62).
