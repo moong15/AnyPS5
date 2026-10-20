@@ -881,3 +881,54 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - sb5 = 0198a83f3 (fps12 GPU single-key DCC upload), pushed. Runs 8.82 and 9.61 fps (run309 8.16, run295 7.77 this morning). CPU storage uploads now 0.
 - Load-crash fix: ba0db2640 halved fps (3.86) -> parked on perf/wbwatch-slow; cheap rework 01149bc6a in E:\AnyPS5-wbw, untested.
 - Main merge 10 c963815e1 (on bb1de536f, without fps12) is building, relinking and running as run314/315; then fps12 merges onto it.
+
+## 2026-10-20 18:45: queue paused; NEXT = fps12 upstream PR (user asked: create PR + post perf numbers, strictly by the guidelines)
+Queue state at pause:
+- Stopped: the full-build / stale-test rerun job (b4z7oga5t) and the older one (burzg1pb1).
+- `E:\AnyPS5-notes\series.pause` exists. Delete it to let series-env runs start again.
+- run317 (merge10b = 1ed7473a9: main 56b299c3a + sb5 + fps12) was mid-run at the pause and finishes by itself. Read its fps: (close-start)/90 from `[trace]` present lines in E:\StellarBlade\run317-merge10b.err.log, vs 8.82/9.61. If no worse, ff sb5 perf/sb-target-scan to 1ed7473a9 (it descends from 0198a83f3), push to the fork, and ledger it. Still owed for that merge: full build + agc_commands and the 3 "Not Run" main tests on fresh binaries.
+- Sol rebase of the load-crash rework onto 1ed7473a9 is running in E:\AnyPS5-wbw (sol-wbw-rebase.md, result sol-wbw-rebase-result.md). It doesn't use the GPU. It is not tested yet; it goes after the PR work.
+- Not in the PR: the VB race fix 05e923ad3 duplicates open upstream #7691.
+
+### What the PR is
+fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the GPU from the host import". Switch APS5_NO_GPU_SINGLE_UPLOAD. Tests agc_gpu_single_upload, _off, _watched, _watched_off.
+- What it improves: StorageTexture::upload. A storage/render-target surface whose DCC keys are ClearSingle was read from guest memory twice on the CPU, expanded block by block with ExpandSingleBlocks, staged and copied. It is now expanded on the GPU from the host import (a TextureRepack.comp mode) and then detiled by the existing detiler. Mixed keys were already normalized to Uncompressed and are unchanged.
+- How much, on sb5 (NOT PR evidence; the PR needs main-vs-PR runs):
+  - Stellar Blade gameplay window, 400 s after the first present, 90 s.
+  - CPU storage uploads: 1466 per 10 s (3227 MiB per 10 s, ~147/s, ~323 MiB/s, all cause "keys") -> 0. 54,921 GPU single-key expansions in the warm run.
+  - fps: 8.16 (run309) -> 8.82 (run313a) and 9.61 (run313b), i.e. +8% / +18%.
+  - Expect a larger gain on main: main's CPU fallback still waits a separate CommandBatch (SubmitAndWait) per upload, and the sb5 fps10 that recorded it into the batch is not on main.
+- Overlap (Sol sol-prcheck-result.md):
+  - No upstream duplicate. Nearest is #6848, which clears uniform single-key blocks on a verified color and still reads on the CPU.
+  - High-conflict open PRs in StorageTexture::upload: #7085, #6820, #6718, #7427. Medium: #7048, #6280, #4448, #6108.
+  - Run `tools/pr_overlap.py --branch <branch>` before opening.
+
+### Steps (hard rule: memory feedback-pr-evidence-before-opening, all before `gh pr create`)
+1. Port. New branch from the latest origin/main, e.g. `perf/gpu-single-dcc-upload`, in a fresh worktree. Port 0198a83f3 standalone, about 250-350 lines over ~8 files:
+   - HostImportSpanning -> HostImportFor;
+   - drop the recorded-CPU-upload (039773d78) plumbing, cpuUploadsKeys/NoImport and resizeOriginal (use original.resize());
+   - keep cpuUploadsSingle/gpuSingleUploads and the GpuSingleUploads() used by the test;
+   - five conflicting files: AgcDriver CMakeLists, Texture.hpp, Texture.cpp, tests/Recorder.cpp, ENVIRONMENT.md. TextureDetiler and TextureRepack.comp apply cleanly.
+   - No code comments. ENVIRONMENT.md row for the switch. Conventional Commit subject. Trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+   - Sol ports; Claude builds, tests and commits.
+2. Build `libs` for both main (exact origin/main commit) and the PR head. Stage them as separate libs dirs (libs-main-<H>, libs-pr-<H>) and verify each deploy (cmp + stamp).
+3. Tests (AGENTS.md):
+   - The same focused tests on main and on the PR, with ANYPS5_REQUIRE_VULKAN=1 ANYPS5_NO_SHADER_CACHE=1 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation, `ctest --test-dir build -R <pattern> -V -j1`, serial inside the gpu-test.lock.
+   - Pattern: agc_gpu_single_upload|agc_storage|agc_tiled|^agc_driver_graphics$ plus the repack/format tests.
+   - Check neither log says "was not found but was requested by env var VK_INSTANCE_LAYERS", and the PR adds no new VUID-.
+4. Game runs:
+   - At least 2 main/PR pairs. Same machine, same scene, window `APS5_TRACE_SECONDS=400:90` (measured from the first present), APS5_TRACE_EVENTS high enough that trace_dropped is false in every window.
+   - No APS5_PROFILE_*. The same env on both arms, using only switches that exist on main (main lacks APS5_FLAT_3D_COLOR_TARGET, APS5_CONTINUE_AFTER_FLIP_FAILURE and APS5_PRECISE_READ_DRAINS).
+   - FIRST do a dry run to check that plain main reaches the 400 s gameplay window with main-only env. If it doesn't, stop and tell the user.
+   - The relinked StellarBlade.exe must match the relinker of the commit under test (main changed the relinker in merge 10). Relink per arm, or confirm the relinker is identical between the two commits.
+   - Keep the runs' summary jsonl lines and traces in E:\AnyPS5-notes\pr-traces.
+   - An off-switch run does not count as the base.
+5. Body:
+   - The template copied whole, every box ticked. What, Tested, Depends on: none, Unblocks, GPUs tested (RX 9070 XT, AMD 26.8.1, Windows 10.0.26300), AI-assisted: yes.
+   - The base commit and the head commit.
+   - Per run (numbered 1, 2, 3...): build commit, env, window, presents, p50/p90/p99, top phase.
+   - The raw aps5-summary.jsonl lines, each one line starting with `{`, with at least 2 different commits that pass performance_compare.validate.
+   - tools/trace_digest.py output for both; attach both traces.
+   - Name Stellar Blade in the evidence; keep the description generic.
+   - Check: `check_conventions.py --base origin/main --head HEAD --title "<t>" --body <file>`, and `pr_labels.has_numbers(body)` must print True.
+6. Show the user the final body and numbers, and get explicit approval before `gh pr create` and before any push to upstream or comment.
