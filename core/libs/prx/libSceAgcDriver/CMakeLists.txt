@@ -1513,6 +1513,13 @@ if(BUILD_TESTING)
         set_tests_properties(agc_storage_kept_unit_settle PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test(NAME agc_storage_pending_after_unwatch COMMAND agc_driver_recorder_tests --pending-after-unwatch-only)
+    add_test(NAME agc_storage_pending_import_unwatch COMMAND agc_driver_recorder_tests --pending-import-unwatch-only)
+    set_tests_properties(agc_storage_pending_after_unwatch agc_storage_pending_import_unwatch PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_storage_pending_after_unwatch agc_storage_pending_import_unwatch PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test(NAME agc_storage_baseline_settled COMMAND agc_driver_recorder_tests --settled-baseline-only)
     add_test(NAME agc_storage_clear_fast_path COMMAND agc_driver_recorder_tests --storage-clear-fast-path-only)
     add_test(NAME agc_storage_clear_fast_path_off COMMAND agc_driver_recorder_tests --storage-clear-fast-path-only)

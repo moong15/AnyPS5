@@ -1896,6 +1896,12 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     const auto first = address & ~(page - 1);
     const auto stop = (address + bytes + page - 1) & ~(page - 1);
     const bool covered = tracker.covers(first, static_cast<std::size_t>(stop - first));
+    const auto unwatchRange = [&](std::uint64_t begin, std::uint64_t end) {
+        lock.unlock();
+        beforeUnwatch(begin, static_cast<std::size_t>(end - begin));
+        lock.lock();
+        unwatchLocked(tracker, begin, static_cast<std::size_t>(end - begin));
+    };
     const auto runImport = [&] {
 #ifdef __APPLE__
         const GuestArena::HostWrite open(reinterpret_cast<void*>(first), static_cast<std::size_t>(stop - first), false);
@@ -1904,7 +1910,10 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     };
     if (!staysWatched) {
         const bool before = covered && walkWrites(tracker, first, stop, StampKind::Cpu, true);
-        if (!runImport()) return false;
+        if (!runImport()) {
+            unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
+            return false;
+        }
         if (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
         unwatchLocked(tracker, address, bytes);
         return true;
@@ -1936,15 +1945,18 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
         if (slots[index] != WindowCopy::Zero) saved.insert(saved.end(), source + index * page, source + (index + 1) * page);
     }
     std::erase_if(spans, [&](const auto& span) { return !walkWrites(tracker, span.first, span.second, StampKind::Cpu, true); });
-    if (!runImport()) return false;
+    if (!runImport()) {
+        unwatchRange(first, stop);
+        return false;
+    }
     const WindowCopy window{first, saved, slots};
     auto unwatchedFrom = first;
     for (const auto& [begin, end] : spans) {
-        if (!walkWrites(tracker, begin, end, StampKind::Cpu, true, &window)) continue;
-        if (unwatchedFrom < begin) unwatchLocked(tracker, unwatchedFrom, static_cast<std::size_t>(begin - unwatchedFrom));
+        if (unwatchedFrom < begin) unwatchRange(unwatchedFrom, begin);
+        if (!walkWrites(tracker, begin, end, StampKind::Cpu, true, &window)) unwatchRange(begin, end);
         unwatchedFrom = end;
     }
-    if (unwatchedFrom < stop) unwatchLocked(tracker, unwatchedFrom, static_cast<std::size_t>(stop - unwatchedFrom));
+    if (unwatchedFrom < stop) unwatchRange(unwatchedFrom, stop);
     return true;
 }
 
