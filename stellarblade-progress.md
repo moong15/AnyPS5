@@ -846,3 +846,13 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - 07:45 user switched the machine to perf. Rule: one main-vs-change pair per change; re-run only on a first-pair win. #7963 dropped. At-use shader preparation ruled out (all before the measured window).
 - 07:50 Sol shell broken; queue-0 dispatch-path breakdown (~92 us/dispatch) handed to a background agent.
 - 08:00 #6924 rebased onto main (FormatVersion 42), tests running, not pushed.
+
+## State at 2026-10-20 ~11:10 (pre-compaction)
+- Rules now: no baselines; one run per change on top of sb5, compare with previous sb5 run; keep what works without asking; push sb5 + notes/sb-ledger to fork after each commit.
+- sb5 = 75e23384d (merge of origin/main 329b9aa1a + all ports incl. partial join ddcf7007e), pushed to fork. Game relinked with relinker 329b9aa1a (backup StellarBlade.exe.bak-pre-329b9aa1a). Libs staged at E:\StellarBlade\libs-sb5-75e23384d. Shader cache format 46 (sb5) vs 41 (main).
+- sb5 focused tests: 63/64 pass, VUID 0; agc_driver_draw_cache_relocation fails -> verbose recheck on sb5 and main329 queued after game runs (task bc0s1plp1, logs sol/reloc-sb5.log, sol/reloc-main329.log).
+- Running: run290-sb5warm + run291-sb5 (task bj3f3g24g). run291 = reference for next change.
+- Agent fps8 (E:\AnyPS5-fps at 75e23384d, brief sol/sol-fps8.md, result sol/sol-fps8-result.md): cut per-draw stage rebuild; told to evaluate/port #5404 (bypass draw cache under 5% hit rate; keep data-only reuse) and #6188 (prepare uncached draws ahead of queue 0).
+- Bottleneck: queue worker 0 ~98% busy, GPU ~50% idle. Draw cache 0.2% hit; ~80% of stages rebuilt per draw (user words change). shader_compile_and_link ~17-20 s, Shader.DrawStage ~10-13 s per 90 s.
+- Dropped today: #7963, user-word mask (#5656; already on sb5 anyway), #6539/#5609 relocation (broken on main's SRT tape; fix saved sol/fps7-followup-full.patch, low odds).
+- Posted: Stellar Blade evidence on #5372 (issuecomment-6282235645). #6924 rebased+force-pushed. #7457 paused. #6292 is meh7an's, not ours.
