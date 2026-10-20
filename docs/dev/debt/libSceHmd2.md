@@ -12,6 +12,25 @@
 - PPSA01317 imports declared without parameters, signatures unknown: the [libSceHmd2](../../../core/libs/prx/libSceHmd2/Export.cpp) exports that throw and the remaining [libSceVrTracker2](../../../core/libs/prx/libSceVrTracker2/Export.cpp) exports. Names from the aerolib NID list
 - PPSA15878 imports declared without parameters, signatures unknown: the [libSceHmd2](../../../core/libs/prx/libSceHmd2/Export.cpp) reprojection and gaze exports, `sceVrTracker2Finalize`, `sceVrTracker2GetPlayAreaOrientedBoundingBox` and `sceVrTracker2LocateCoordinateSystem` in [libSceVrTracker2](../../../core/libs/prx/libSceVrTracker2/Export.cpp), and the `scePadVrController` trigger effect exports in [libScePad](../../../core/libs/prx/libScePad/Export.cpp). Names from the aerolib NID list
 - [libSceHmd2 gaze and reprojection exports](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - `sceHmd2GazeGetCalibrationData`, `sceHmd2GazeGetCalibrationDataMaxSize`, `sceHmd2ReprojectionClearUserEventEnd`, `sceHmd2ReprojectionClearUserEventStart`, `sceHmd2ReprojectionGetCurrentOutput`, `sceHmd2ReprojectionSetUserEventEnd`, `sceHmd2ReprojectionSetUserEventStart`, `sceHmd2GazeActivateGazeTracking`, `sceHmd2GazeGetDeviceStatus`, `sceHmd2GazeGetUserCalibrationStatus`, `sceHmd2GazeInsertRawDataWithHandle`, `sceHmd2GazeSetEnabledEye`, `sceHmd2GazeSetUserCalibrationData`, `sceHmd2GazeSetUserCalibrationPoint`, `sceHmd2GazeStartUserCalibration`, `sceHmd2GazeStopUserCalibration`, `sceHmd2ReprojectionSeeThroughDraw`, `sceHmd2ReprojectionSeeThroughIC`, `sceHmd2ReprojectionVideoOutEq`, `sceHmd2ReprojectionWaitShader`, `sceHmd2SeeThroughCallbackGetPoseDataFunc`, `sceHmd2GazeObjectSelectionGetSelectedObject`, `sceHmd2GazeObjectSelectionInitialize`, `sceHmd2GazeObjectSelectionQueryMemory`, `sceHmd2GazeObjectSelectionTerminate`, `sceHmd2ReprojectionClear`, `sceHmd2ReprojectionSet`, `sceHmd2ReprojectionSetEventGpuEnd`, `sceHmd2ReprojectionSetEventGpuStart`, `sceHmd2RpeorjectionSetParam`, `sceHmd2SetFieldOfView`, `sceHmd2SetIpdOffset` are declared without parameters from the firmware export database (aerolib.csv); their guest signatures are unverified on hardware and every call throws
+- [sceHmd2InternalSetPortStatus](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalLedDetectorStartBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalImageStartBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetPortConnection](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetCameraSeeThroughMode](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetFakeLensSeparationDistance](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalDfuSend](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalLedDetectorOpenBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalImageOpenBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalLedDetectorStopBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetDeviceConnection](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalLedDetectorCloseBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetSidetone](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalGetDeviceId](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetBrightness](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalImageStopBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalSetVibrationMode](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalGetVr2dData](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
+- [sceHmd2InternalImageCloseBySlot](../../../core/libs/prx/libSceHmd2/Export.cpp) (libSceHmd2) - unknown signature
 
 ### Functional
 

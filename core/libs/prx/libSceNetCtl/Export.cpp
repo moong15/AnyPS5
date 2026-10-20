@@ -64,6 +64,8 @@ static constexpr int NET_CTL_INFO_SECONDARY_DNS = 18;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_CONFIG = 19;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_SERVER = 20;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_PORT = 21;
+static constexpr int NET_CTL_INFO_V6_IP_ADDRESS = 1;
+static constexpr int NET_CTL_INFO_V6_SECONDARY_DNS = 5;
 static constexpr std::uint32_t NET_CTL_DEVICE_WIRED = 0;
 static constexpr std::uint32_t NET_CTL_LINK_CONNECTED = 1;
 static constexpr std::uint32_t NET_CTL_IP_DHCP = 0;
@@ -456,11 +458,6 @@ int APS5_VABI sceNetCtlGetInfo(int code, NetCtlInfo* info) {
     return 0;
 }
 
-int APS5_VABI sceNetCtlGetInfoV6() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceNetCtlGetNatInfo(NetCtlNatInfo* nat_info) {
     if (!nat_info) return SCE_NET_CTL_ERROR_INVALID_ADDR;
     return SCE_NET_CTL_ERROR_NOT_CONNECTED;
@@ -495,6 +492,13 @@ int APS5_VABI sceNetCtlRegisterCallback(NetCtlCallback func, void* arg, int* cid
 
 int APS5_VABI sceNetCtlRegisterCallbackV6(NetCtlCallback func, void* arg, int* cid) {
     return RegisterCallback(g_callbacksV6, func, arg, cid);
+}
+
+int APS5_VABI sceNetCtlGetInfoV6(int code, void* info) {
+    if (!info) return SCE_NET_CTL_ERROR_INVALID_ADDR;
+    if (code < NET_CTL_INFO_V6_IP_ADDRESS || code > NET_CTL_INFO_V6_SECONDARY_DNS) return SCE_NET_CTL_ERROR_INVALID_CODE;
+    if (!HostHasAddress(AF_INET6)) return SCE_NET_CTL_ERROR_NOT_CONNECTED;
+    throw std::runtime_error("sceNetCtlGetInfoV6: info code " + std::to_string(code) + " is not implemented");
 }
 
 void APS5_VABI sceNetCtlTerm(void) {

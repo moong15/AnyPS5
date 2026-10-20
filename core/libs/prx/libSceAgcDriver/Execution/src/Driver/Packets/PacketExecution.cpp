@@ -14,9 +14,12 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <shared_mutex>
+#include <utility>
 
 namespace AgcDriver::DriverDetail {
 
@@ -27,7 +30,7 @@ bool traceIndexBase() {
     return enabled;
 }
 
-void traceIndexPacket(const Submission& submission, std::size_t cursor, std::span<const std::uint32_t> packet, const QueueState& queue) {
+void traceIndexPacket(const Submission& submission, std::size_t cursor, std::span<const std::uint32_t> packet, const QueueState& queue, std::span<const std::uint32_t> registerPairs = {}) {
     if (!traceIndexBase()) return;
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     bool relevant = Pm4::DrawOpcode(opcode) || opcode == 0x11 || opcode == 0x13 || opcode == 0x26 || opcode == 0x2a || opcode == 0x91 || (opcode == 0x10 && ((packet[0] >> 2u) & 0x3fu) == 9);
@@ -35,7 +38,7 @@ void traceIndexPacket(const Submission& submission, std::size_t cursor, std::spa
         const auto base = packet[1] & ~0x70000000u;
         relevant = base <= 0x243 && 0x243 - base < packet.size() - 2;
     } else if (opcode == 0x64) {
-        const auto& pairs = submission.registerLists.at(cursor);
+        const auto pairs = registerPairs.empty() ? std::span<const std::uint32_t>(submission.registerLists.at(cursor)) : registerPairs;
         for (std::size_t i = 0; i < pairs.size(); i += 2) relevant |= (pairs[i] & ~0x70000000u) == 0x243;
     }
     if (!relevant) return;
@@ -111,9 +114,23 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
     }
 }
 
+bool sealsWriteOnly(std::span<const std::uint32_t> packet, std::uint32_t opcode) {
+    if (opcode == 0x58) return true;
+    if (opcode != 0x46 || packet.size() < 2) return false;
+    switch (packet[1] & 0x3fu) {
+        case 0x07: case 0x0f: case 0x10: case 0x16: case 0x2a: case 0x2c: case 0x2e: case 0x31: return true;
+        default: return false;
+    }
 }
 
-void checkDeferredShadersOnShRegWrite(std::uint32_t opcode, std::span<const std::uint32_t> packet, std::size_t cursor, const Submission& submission, const std::shared_ptr<VulkanDevice>& device, const QueueState& queue) {
+bool& drawnSinceSeal() {
+    static thread_local bool drawn = false;
+    return drawn;
+}
+
+}
+
+void checkDeferredShadersOnShRegWrite(std::uint32_t opcode, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> registerPairs, const Submission& submission, const std::shared_ptr<VulkanDevice>& device, const QueueState& queue) {
     if (submission.shaders == nullptr || device == nullptr) return;
     if (opcode == 0x76) {
         const auto regOffset = packet[1] & ~0x70000000u;
@@ -124,7 +141,7 @@ void checkDeferredShadersOnShRegWrite(std::uint32_t opcode, std::span<const std:
         if (regOffset <= 0x089u && regOffset + regCount > 0x088u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x088u, {6});
         if (regOffset <= 0x109u && regOffset + regCount > 0x108u) TriggerDeferredShaderPreparation(*submission.shaders, device, queue, 0x108u, {7});
     } else if (opcode == 0x63) {
-        const auto& pairs = submission.registerLists.at(cursor);
+        const auto pairs = registerPairs;
         bool checkCompute = false, checkFragment = false, checkVertex = false, checkMesh = false, checkTess = false;
         for (std::size_t i = 0; i < pairs.size(); i += 2) {
             const auto reg = pairs[i] & ~0x70000000u;
@@ -517,6 +534,7 @@ void Driver::execute(const Submission& submission) {
             landPendingWaits(submission.queue);
             traceIndexPacket(submission, cursor, packet, queue);
             packetCounters.CountDraw();
+            drawnSinceSeal() = true;
             bool drawn = false;
             timed(&WorkerProfile::drawMs, [&] {
                 static const bool traceDraws = std::getenv("APS5_TRACE_DRAWS") != nullptr;
@@ -561,8 +579,44 @@ void Driver::execute(const Submission& submission) {
             traceIndexPacket(submission, cursor, packet, queue);
         } else if (sampleDump && !wroteOnGpu) {
             dumpSampleCounters(Pm4::SampleDumpAddress(packet));
+        } else if (submission.queue == 0 && sealsWriteOnly(packet, opcode)) {
+            if (std::exchange(drawnSinceSeal(), false)) {
+                const auto seal = [this] {
+                    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
+                    std::lock_guard gpuLock(GuestMemory::GpuMutex());
+                    if (const auto localDevice = device.Load()) localDevice->SealPassWriteOnly();
+                };
+                if (pipelined && DrawPipeline::Queue0().Busy()) DrawPipeline::Queue0().Enqueue(seal, {});
+                else seal();
+            }
         } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
             if (!wroteOnGpu) {
+                std::vector<std::uint32_t> currentRegisters;
+                std::span<const std::uint32_t> registerPairs;
+                bool skipInvalid = false;
+                if (Pm4::IndirectRegisterOpcode(opcode)) {
+                    const auto& listed = submission.registerLists.at(cursor);
+                    registerPairs = listed;
+                    if (!Pm4::IndirectRegistersValid(listed)) {
+                        landPendingWaits(submission.queue);
+                        recordQueuedLabelsBeforeRead(submission.queue);
+                        currentRegisters = Pm4::ReadIndirectRegisters(packet);
+                        registerPairs = currentRegisters;
+                        static const bool skip = std::getenv("APS5_SKIP_INVALID_INDIRECT_REGISTERS") != nullptr;
+                        skipInvalid = skip;
+                        static std::atomic<bool> reported{false};
+                        if (!reported.exchange(true)) {
+                            std::uint32_t invalid = 0;
+                            for (std::size_t i = 0; i < listed.size(); i += 2) {
+                                if (!Pm4::IndirectRegistersValid(std::span(&listed[i], 1))) {
+                                    invalid = listed[i];
+                                    break;
+                                }
+                            }
+                            std::fprintf(stderr, "[gpu] queue 0x%x %s at DWORD %zu: register list entry with offset dword 0x%08x read again where the packet executes%s\n", submission.queue, Pm4::Name(packet[0]).c_str(), cursor, invalid, skipInvalid ? "; invalid entries are skipped (APS5_SKIP_INVALID_INDIRECT_REGISTERS)" : "");
+                        }
+                    }
+                }
                 if (traceShaderOrigins && (opcode == 0x76 || opcode == 0x63) && !Pm4::IsTagMarker(packet)) {
                     const auto remember = [&](std::uint32_t offset, std::uint32_t value, std::uint64_t source) {
                         offset &= ~0x70000000u;
@@ -574,21 +628,23 @@ void Driver::execute(const Submission& submission) {
                         for (std::size_t i = 2; i < packet.size(); ++i)
                             remember(base + static_cast<std::uint32_t>(i - 2), packet[i], 0);
                     } else {
-                        const auto& pairs = submission.registerLists.at(cursor);
+                        const auto pairs = registerPairs;
                         const auto source = packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u);
                         const bool interleaved = packet[3] == 0x80000000u;
-                        for (std::size_t i = 0; i < pairs.size(); i += 2)
+                        for (std::size_t i = 0; i < pairs.size(); i += 2) {
+                            if (skipInvalid && !Pm4::IndirectRegistersValid(pairs.subspan(i, 1))) continue;
                             remember(pairs[i], pairs[i + 1], source + (interleaved ? i + 1 : i / 2) * sizeof(std::uint32_t));
+                        }
                     }
                 }
-                if (Pm4::IndirectRegisterOpcode(opcode)) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
+                if (Pm4::IndirectRegisterOpcode(opcode)) Pm4::ExecuteIndirectRegisters(packet, registerPairs, queue, skipInvalid);
                 else Pm4::Execute(packet, queue);
-                traceIndexPacket(submission, cursor, packet, queue);
+                traceIndexPacket(submission, cursor, packet, queue, registerPairs);
                 if (opcode == 0x49 || opcode == 0x37) {
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
                 }
                 if (opcode == 0x76 || opcode == 0x63) {
-                    checkDeferredShadersOnShRegWrite(opcode, packet, cursor, submission, device.Load(), queue);
+                    checkDeferredShadersOnShRegWrite(opcode, packet, registerPairs, submission, device.Load(), queue);
                 }
             }
             if (endOfPipeInterrupt && !interruptDeferred) deliverGuestEopInterrupt(submission.queue);

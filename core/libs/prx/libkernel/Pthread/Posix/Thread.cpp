@@ -225,6 +225,16 @@ int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value) {
     return PosixThread::ToErrno(scePthreadJoin(thread, value));
 }
 
+namespace {
+struct RegisterPthreadOnLoad {
+    RegisterPthreadOnLoad() {
+        RegisterPthreadCreate_nid_no_patch(reinterpret_cast<PthreadCreateFn_nid_no_patch>(pthread_create_nid_postfix));
+        RegisterPthreadJoin_nid_no_patch(reinterpret_cast<PthreadJoinFn_nid_no_patch>(pthread_join_nid_postfix));
+    }
+};
+const RegisterPthreadOnLoad gRegisterPthread;
+}
+
 int APS5_VABI pthread_rename_np_nid_postfix(Pthread thread, const char* name) {
     if (thread && name && std::strlen(name) >= 32) return PosixThread::ToErrno(SCE_KERNEL_ERROR_ENAMETOOLONG);
     return PosixThread::ToErrno(scePthreadRename(thread, name));

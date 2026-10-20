@@ -210,6 +210,38 @@ float GuestBesselSecondKindZero() {
     return -std::numeric_limits<float>::infinity();
 }
 
+float ScaledHyperbolic(float x, float y, bool sine) {
+    const auto xBits = std::bit_cast<std::uint32_t>(x);
+    const auto xMagnitude = xBits & 0x7fffffffu;
+    const auto yMagnitude = std::bit_cast<std::uint32_t>(y) & 0x7fffffffu;
+    constexpr std::uint32_t infinity = 0x7f800000u;
+    if (xMagnitude > infinity) return x;
+    if (yMagnitude > infinity) return y;
+    if ((xMagnitude == infinity && yMagnitude == 0) || (sine && xMagnitude == 0 && yMagnitude == infinity)) {
+        errno = EDOM;
+        std::feraiseexcept(FE_INVALID);
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    if (xMagnitude == infinity) return sine ? x * y : std::copysign(std::numeric_limits<float>::infinity(), y);
+    if (xMagnitude == 0 || yMagnitude == 0 || yMagnitude == infinity) return sine ? x * y : y;
+    constexpr double limit = 2.0 * std::numeric_limits<float>::max_exponent;
+    const float magnitude = std::bit_cast<float>(xMagnitude);
+    const double argument = magnitude < limit ? static_cast<double>(magnitude) : limit;
+    const double value = static_cast<double>(y) * (sine ? std::sinh(argument) : std::cosh(argument));
+    const bool exponential = magnitude >= (sine ? 7.7f : 8.675f);
+    float result;
+    if (exponential && std::fabs(value) >= 0x1p128) {
+        result = std::copysign(std::numeric_limits<float>::infinity(), y);
+    } else {
+        result = static_cast<float>(value);
+    }
+    if (exponential && std::isinf(result)) {
+        errno = ERANGE;
+        std::feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+    }
+    return sine && (xBits & 0x80000000u) != 0 ? -result : result;
+}
+
 }
 
 extern "C" {
@@ -582,8 +614,8 @@ int APS5_VABI ilogbf_nid_postfix(float x) { return ilogb_nid_postfix(static_cast
 double APS5_VABI remainder_nid_postfix(double x, double y) { return std::remainder(x, y); }
 double APS5_VABI remquo_nid_postfix(double x, double y, int* quo) { return std::remquo(x, y, quo); }
 float APS5_VABI remquof_nid_postfix(float x, float y, int* quo) { return std::remquo(x, y, quo); }
-float APS5_VABI _FSinh_nid_postfix(float x, float y) { return y * std::sinh(x); }
-float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }
+float APS5_VABI _FSinh_nid_postfix(float x, float y) { return ScaledHyperbolic(x, y, true); }
+float APS5_VABI _FCosh_nid_postfix(float x, float y) { return ScaledHyperbolic(x, y, false); }
 
 struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
 LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};

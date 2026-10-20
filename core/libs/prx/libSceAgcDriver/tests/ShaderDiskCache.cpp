@@ -41,6 +41,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+#include "prx/libc/include/General.hpp"
 #endif
 
 namespace {
@@ -69,6 +72,40 @@ std::string hex(std::uint64_t value) {
     std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(value));
     return text;
 }
+
+#ifdef _WIN32
+void verifyHostStandardError() {
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-shader-host-stderr-" + std::to_string(std::random_device{}()));
+    setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+    setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
+    int capture[2], guest[2];
+    require(::_pipe(capture, 65536, _O_BINARY) == 0, "cannot create host capture");
+    require(::_pipe(guest, 65536, _O_BINARY) == 0, "cannot create guest capture");
+    const int original = ::_dup(2);
+    require(original >= 0 && ::_dup2(capture[1], 2) == 0, "cannot capture initial stderr");
+    const int saved = ::_dup(2);
+    require(saved >= 0 && AdoptHostStandardStream_nid_no_patch(2, saved), "cannot preserve host stderr");
+    require(::_dup2(guest[1], 2) == 0, "cannot redirect guest stderr");
+    require(ShaderDiskCache::Enabled(), "shader disk cache was disabled");
+    ShaderDiskCache::Shutdown();
+    std::fflush(stderr);
+    std::fflush(HostStandardErrorFile_nid_no_patch());
+    require(::_dup2(original, 2) == 0, "cannot restore stderr");
+    ::_close(original);
+    DWORD hostBytes = 0, guestBytes = 0;
+    require(::PeekNamedPipe(reinterpret_cast<HANDLE>(::_get_osfhandle(capture[0])), nullptr, 0, nullptr, &hostBytes, nullptr) != 0, "cannot inspect host capture");
+    require(::PeekNamedPipe(reinterpret_cast<HANDLE>(::_get_osfhandle(guest[0])), nullptr, 0, nullptr, &guestBytes, nullptr) != 0, "cannot inspect guest capture");
+    std::string host(hostBytes, '\0');
+    if (hostBytes != 0) require(::_read(capture[0], host.data(), hostBytes) == static_cast<int>(hostBytes), "cannot read host capture");
+    ::_close(capture[0]);
+    ::_close(capture[1]);
+    ::_close(guest[0]);
+    ::_close(guest[1]);
+    std::filesystem::remove_all(directory);
+    require(guestBytes == 0, "shader cache diagnostic entered the guest stderr pipe");
+    require(host.find("[shader-disk-cache]") != std::string::npos, "shader cache diagnostic did not reach host stderr");
+}
+#endif
 
 void removeCacheDirectory(const std::filesystem::path& directory) {
     std::error_code error;
@@ -808,6 +845,13 @@ int runLargeFileWrite() {
     std::error_code error;
     std::filesystem::remove_all(directory, error);
     std::filesystem::create_directories(directory, error);
+    struct Cleanup {
+        std::filesystem::path directory;
+        ~Cleanup() {
+            std::error_code error;
+            std::filesystem::remove_all(directory, error);
+        }
+    } cleanup{directory};
     const auto space = std::filesystem::space(directory, error);
     if (error || space.available < size + (std::uintmax_t{1} << 30u)) {
         std::cout << "skipping: not enough free disk space for a file of more than 2 GiB\n";
@@ -834,6 +878,8 @@ int runLargeFileWrite() {
     }).detach();
     if (result.wait_for(std::chrono::seconds(200)) != std::future_status::ready) {
         std::cerr << "WriteFileAtomically did not return within 200 s for a file of more than 2 GiB\n";
+        std::filesystem::remove_all(directory, error);
+        if (error) std::cerr << "cannot remove the large file test directory: " << error.message() << '\n';
         std::cerr.flush();
         std::_Exit(1);
     }
@@ -3158,6 +3204,10 @@ int main(int argc, char** argv) {
             return 0;
         }
 #ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--host-stderr") {
+            verifyHostStandardError();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--long-host-paths") {
             verifyLongHostPaths();
             return 0;
