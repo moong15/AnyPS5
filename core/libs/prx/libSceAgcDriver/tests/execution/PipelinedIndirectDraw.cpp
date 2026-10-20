@@ -61,6 +61,11 @@ alignas(256) std::array<std::uint32_t, 4> LateRecords{0, 1, 0, 0};
 alignas(256) std::array<std::uint32_t, 8> TrailingZeroRecords{3, 1, 0, 0, 0, 0, 0, 0};
 alignas(256) std::array<std::uint32_t, 10> IndexedRecords{3, 1, 0, 0, 0, 3, 1, 8, 0, 0};
 alignas(256) std::array<std::uint16_t, 4> Indices{0, 1, 2, 0};
+alignas(256) std::array<std::uint32_t, 4> StoredRecords{0, 1, 0, 0};
+alignas(256) std::array<std::uint32_t, 4> RewrittenRecords{3, 1, 0, 0};
+alignas(256) std::array<std::uint32_t, 4> ZeroRecords{0, 1, 0, 0};
+alignas(256) std::array<std::uint32_t, 8> CountedRecords{3, 1, 0, 0, 3, 1, 0, 0};
+alignas(256) std::array<std::uint32_t, 4> DrawCount{0, 0, 0, 0};
 
 struct Header {
     Shader shader{};
@@ -138,6 +143,25 @@ void AppendIndirect(std::vector<std::uint32_t>& commands) {
 
 void AppendIndirectMulti(std::vector<std::uint32_t>& commands, std::uint32_t count) {
     Append(commands, 0x2c, {0, BaseVertexLocation, 0, 0, count, 0, 0, 16, 2});
+}
+
+void AppendGpuSideIndirect(std::vector<std::uint32_t>& commands) {
+    Append(commands, 0x24, {0, 0, 0, 2});
+}
+
+void AppendGpuSideIndirectCounted(std::vector<std::uint32_t>& commands, std::uint32_t maxCount, const void* count) {
+    const auto address = reinterpret_cast<std::uintptr_t>(count);
+    Append(commands, 0x2c, {0, 0, 0, 1u << 30u, maxCount, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 16, 2});
+}
+
+void AppendDma(std::vector<std::uint32_t>& commands, const void* source, void* destination, std::uint32_t bytes) {
+    const auto from = reinterpret_cast<std::uintptr_t>(source);
+    const auto to = reinterpret_cast<std::uintptr_t>(destination);
+    Append(commands, 0x50, {0, static_cast<std::uint32_t>(from), static_cast<std::uint32_t>(from >> 32u), static_cast<std::uint32_t>(to), static_cast<std::uint32_t>(to >> 32u), bytes});
+}
+
+bool PipelinedIndirectDisabled() {
+    return std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr;
 }
 
 void AppendIndexBuffer(std::vector<std::uint32_t>& commands) {
@@ -451,6 +475,122 @@ void OutOfRangeIndexedRecordIsNotQueued() {
     SameAsDirect(IndexedMemory, IndexedDirectMemory, "the indexed draw whose second record is out of range");
 }
 
+void GpuSideIndirectDrawsQueueBehindTheCommitter() {
+    FirstMemory.fill(Kept);
+    SecondMemory.fill(Kept);
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendRecords(commands, Records.data());
+    AppendTarget(commands, FirstMemory, 0);
+    AppendGpuSideIndirect(commands);
+    AppendTarget(commands, SecondMemory, 0);
+    AppendGpuSideIndirect(commands);
+    Blocker blocker;
+    SubmitBehind(blocker, commands);
+    if (PipelinedIndirectDisabled()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto outstanding = DrawPipeline::Queue0().Outstanding();
+        blocker.release = true;
+        Finish();
+        Require(outstanding == 1, "disabled pipelined indirect draws queued a GPU-side indirect draw");
+    } else {
+        WaitForItems(3, blocker, "the GPU-side indirect draws drained the pipeline instead of queuing behind it");
+    }
+    Flush(FirstMemory);
+    Flush(SecondMemory);
+    SameAsDirect(FirstMemory, DirectMemory, "the first queued GPU-side indirect draw");
+    SameAsDirect(SecondMemory, DirectMemory, "the second queued GPU-side indirect draw");
+}
+
+void GpuSideIndirectDrawQueuesBehindTheStoreOfItsArguments() {
+    WrittenMemory.fill(Kept);
+    StoredRecords = {0, 1, 0, 0};
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendLabel(commands, &StoredRecords[0], 3);
+    AppendRecords(commands, StoredRecords.data());
+    AppendTarget(commands, WrittenMemory, 0);
+    AppendGpuSideIndirect(commands);
+    Blocker blocker;
+    SubmitBehind(blocker, commands);
+    if (PipelinedIndirectDisabled()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto outstanding = DrawPipeline::Queue0().Outstanding();
+        blocker.release = true;
+        Finish();
+        Require(outstanding == 1, "disabled pipelined indirect draws queued a GPU-side indirect draw behind the store of its arguments");
+    } else {
+        WaitForItems(3, blocker, "a GPU-side indirect draw drained for the queued store of its arguments instead of queuing behind it");
+    }
+    Flush(WrittenMemory);
+    Require(StoredRecords[0] == 3, "the queued label did not store the GPU-side record's vertex count");
+    SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw whose record a queued label wrote");
+}
+
+void GpuSideIndirectArgumentsRewrittenAfterEnqueue() {
+    WrittenMemory.fill(Kept);
+    RewrittenRecords = Records;
+    GuestAllocations::Mutation().Add(RewrittenRecords.data(), sizeof(RewrittenRecords), true, true, true);
+    GuestAllocations::Mutation().Add(ZeroRecords.data(), sizeof(ZeroRecords), true, true, true);
+    const auto address = reinterpret_cast<std::uintptr_t>(RewrittenRecords.data());
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendRecords(commands, RewrittenRecords.data());
+    AppendTarget(commands, WrittenMemory, 0);
+    AppendGpuSideIndirect(commands);
+    AppendDma(commands, ZeroRecords.data(), RewrittenRecords.data(), sizeof(RewrittenRecords));
+    bool held = false;
+    {
+        std::unique_lock gpuLock(AgcDriver::GuestMemory::GpuMutex());
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        AgcDriver::Submit(&packet, 0);
+        if (PipelinedIndirectDisabled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        } else {
+            const auto start = std::chrono::steady_clock::now();
+            while (!(held = DrawPipeline::HeldReads(address, sizeof(RewrittenRecords))) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    Finish();
+    Flush(WrittenMemory);
+    Require(PipelinedIndirectDisabled() || held, "a queued GPU-side indirect draw did not hold the read of its arguments");
+    Require(RewrittenRecords == ZeroRecords, "the DMA after the GPU-side indirect draw did not rewrite its arguments");
+    SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw whose arguments a later DMA rewrote");
+}
+
+void GpuSideIndirectCountQueuesBehindItsStore() {
+    WrittenMemory.fill(Kept);
+    DrawCount = {0, 0, 0, 0};
+    const auto count = reinterpret_cast<std::uintptr_t>(DrawCount.data());
+    const auto arguments = reinterpret_cast<std::uintptr_t>(CountedRecords.data());
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendLabel(commands, &DrawCount[0], 1);
+    AppendRecords(commands, CountedRecords.data());
+    AppendTarget(commands, WrittenMemory, 0);
+    AppendGpuSideIndirectCounted(commands, 2, DrawCount.data());
+    bool held = false;
+    std::size_t outstanding = 0;
+    {
+        std::unique_lock gpuLock(AgcDriver::GuestMemory::GpuMutex());
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        AgcDriver::Submit(&packet, 0);
+        if (PipelinedIndirectDisabled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        } else {
+            const auto start = std::chrono::steady_clock::now();
+            const auto queued = [&] { return DrawPipeline::Queue0().Outstanding() >= 2 && DrawPipeline::HeldReads(count, 4) && DrawPipeline::HeldReads(arguments, sizeof(CountedRecords)); };
+            while (!(held = queued()) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        outstanding = DrawPipeline::Queue0().Outstanding();
+    }
+    Finish();
+    Flush(WrittenMemory);
+    Require(DrawCount[0] == 1, "the queued label did not store the draw count");
+    Require(PipelinedIndirectDisabled() || (held && outstanding >= 2), "a GPU-side indirect draw drained for the queued store of its count instead of queuing with its count and arguments held");
+    SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw whose count a queued label wrote");
+}
+
 }
 
 int main() {
@@ -478,6 +618,10 @@ int main() {
         WriteCompletenessControlsIndirectDrain(false);
         TrailingZeroCountRecordIsNotQueued();
         OutOfRangeIndexedRecordIsNotQueued();
+        GpuSideIndirectDrawsQueueBehindTheCommitter();
+        GpuSideIndirectDrawQueuesBehindTheStoreOfItsArguments();
+        GpuSideIndirectArgumentsRewrittenAfterEnqueue();
+        GpuSideIndirectCountQueuesBehindItsStore();
         AgcDriverShutdown_nid_postfix();
         std::puts("pipelined indirect draw tests passed");
         return 0;

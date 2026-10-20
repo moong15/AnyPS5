@@ -72,12 +72,14 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     }
     const bool pipelined = DrawPipeline::Active();
     static const bool pipelinedIndirect = std::getenv("APS5_NO_PIPELINED_INDIRECT") == nullptr;
-    if (pipelined && drawParameters.indirect) {
+    const auto drainBeforeArgumentRead = [&] {
+        if (!pipelined || !drawParameters.indirect) return;
         const auto& indirect = *drawParameters.indirect;
         auto& pipeline = DrawPipeline::Queue0();
         const auto needsDrain = [&](std::uint64_t address, std::size_t bytes) { return pipelineMayWrite(pipeline, address, bytes); };
-        if (!pipelinedIndirect || (pipeline.Busy() && (needsDrain(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && needsDrain(indirect.countAddress, 4))))) pipeline.Drain(DrawPipeline::DrainReason::Indirect);
-    }
+        if (pipeline.Busy() && (needsDrain(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && needsDrain(indirect.countAddress, 4)))) pipeline.Drain(DrawPipeline::DrainReason::Indirect);
+    };
+    if (pipelined && drawParameters.indirect && !pipelinedIndirect) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Indirect);
     bool drainedForInline = false;
     const auto drainBeforeInline = [&] {
         if (!pipelined || drainedForInline) return;
@@ -620,7 +622,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         phaseTiming.Phase(DrawRowLabels);
     };
     if (drawParameters.indirect && indirectCpu) {
-
+        drainBeforeArgumentRead();
         const auto indirect = *drawParameters.indirect;
         for (std::size_t i = 0; i < programs.size(); ++i) {
             if (programResults[i] == nullptr) continue;
@@ -747,7 +749,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         }
         localDevice->PrewarmDrawPipeline(graphics, stages);
     }
-    if (pipelined && !drawParameters.indirect && deferredLabels().labels.empty()) {
+    if (pipelined && (!drawParameters.indirect || (pipelinedIndirect && !graphics.rectList)) && deferredLabels().labels.empty()) {
         phaseTiming.Phase(DrawRowVectors);
         auto writes = drawWriteRanges(graphics, stages);
         const bool writesComplete = DrawWritesComplete(graphics, stages);
