@@ -61,12 +61,20 @@ bool pipelineDma() {
     return enabled;
 }
 
-bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t header, std::uint32_t opcode) {
+bool inactivePredicateMarkersKeep() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("APS5_NO_INACTIVE_PREDICATE_KEEP");
+        return value == nullptr || value[0] == '\0' || value[0] == '0';
+    }();
+    return enabled;
+}
+
+bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t header, std::uint32_t opcode, bool predicated) {
     if (header == FlipPacketHeader || header == RenderingWaitPacketHeader) return false;
     if (Pm4::DrawOpcode(opcode)) return true;
     switch (opcode) {
         case 0x11: case 0x12: case 0x13: case 0x20: case 0x26: case 0x2a: case 0x2f: case 0x42: case 0x58: case 0x59: case 0x69: case 0x76: case 0x79: case 0x7a: case 0x81: return true;
-        case 0x3f: return DrawPipeline::PreciseReadDrains() && !DrawPipeline::Queue0().HasIncompleteWrites();
+        case 0x3f: return (!predicated && inactivePredicateMarkersKeep()) || (DrawPipeline::PreciseReadDrains() && !DrawPipeline::Queue0().HasIncompleteWrites());
         case 0x46: return packet.size() >= 2 && (packet[1] & 0x3fu) != 0x39u;
         case 0x15: return orderedFills();
         case 0x63: case 0x64: case 0x9f:
@@ -337,7 +345,7 @@ void Driver::execute(const Submission& submission) {
                 continue;
             }
         }
-        if (pipelined && DrawPipeline::Queue0().Busy() && !keepsDrawPipeline(packet, header, opcode)) {
+        if (pipelined && DrawPipeline::Queue0().Busy() && !keepsDrawPipeline(packet, header, opcode, predicated)) {
             const auto start = std::chrono::steady_clock::now();
             const auto queued = opcode == 0x50 ? DrawPipeline::QueuedItems() : 0;
             const auto drained = opcode == 0x50 && !pipelineDma() ? DrawPipeline::Queue0().DrainPacket(opcode, {}, {}, false) : DrawPipeline::Queue0().DrainPacket(packet);
