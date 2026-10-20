@@ -948,3 +948,4 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
   4. PR #7457 rebase onto origin/main 7526640c3 + adriadam10 (CHANGES_REQUESTED: ImportRequester, failedBlockImport missPolicy, overlap with state.refusals/failedBlocks) + CnRJay (reserved-heap commit stamp + test, 256-slot policy/hit rate) in E:\AnyPS5-memo -> agent-7457-rebase-result.md
 - Then for #7457: validation ctest main vs PR, 3 alternating main/PR Stellar Blade pairs (old evidence was off-switch only = doesn't count), summary lines+traces (fork release)+digest in body, draft replies to adriadam10 + CnRJay and SHOW USER before posting.
 - For each agent commit: ctest -R serially in lock with validation env, then one game run vs previous sb5 run (run317 8.62).
+- User 20:45: NEW tasks/investigations go to Sol (codex exec --approve-for-me, briefs in E:\AnyPS5-notes\sol\) until Sol's usage runs out; the 5 running Claude agents finish as they are.
