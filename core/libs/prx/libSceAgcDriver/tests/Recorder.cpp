@@ -5725,6 +5725,13 @@ void staleGenerationTests(const Device& device, Recorder& recorder) {
 #endif
 }
 
+std::atomic<std::size_t> unwatchHookCalls{0};
+
+void countUnwatchHook(std::uint64_t address, std::size_t bytes) {
+    unwatchHookCalls.fetch_add(1, std::memory_order_relaxed);
+    StorageTexture::SaveBeforeUnwatch(address, bytes);
+}
+
 bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, bool importDropsWatch = false) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -5740,17 +5747,18 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
         ImportWatch decided;
         ~Restore() { SetImportWatch(context, decided); }
     } restore{base, decided};
-    enum class Write { None, AfterPending, BeforePending, UnwatchedFullClear, UnwatchedPartialWrite, BeforeUnwatch };
+    enum class Write { None, AfterPending, BeforePending, UnwatchedFullClear, UnwatchedPartialWrite, BeforeUnwatch, RestoredAfterWriteBack };
     for (const std::uint32_t side : {256u, 1024u})
-    for (const auto write : {Write::None, Write::AfterPending, Write::BeforePending, Write::UnwatchedFullClear, Write::UnwatchedPartialWrite, Write::BeforeUnwatch}) {
+    for (const auto write : {Write::None, Write::AfterPending, Write::BeforePending, Write::UnwatchedFullClear, Write::UnwatchedPartialWrite, Write::BeforeUnwatch, Write::RestoredAfterWriteBack}) {
         if (importDropsWatch && write != Write::None) continue;
         const std::size_t surfaceBytes = static_cast<std::size_t>(side) * side * 4;
         const std::size_t allocationBytes = surfaceBytes + (importDropsWatch ? unit : 0);
         const std::size_t units = surfaceBytes / unit;
         const std::size_t lastUnit = units - 1;
         const bool large = side > 256;
-        const bool unwatchedWrite = write == Write::UnwatchedFullClear || write == Write::UnwatchedPartialWrite || write == Write::BeforeUnwatch;
-        const std::string what = std::string(large ? "1024x1024, " : "") + (write == Write::None ? "no CPU write" : write == Write::AfterPending ? "a CPU write after the results were pending again" : write == Write::BeforePending ? "a CPU write before the results were pending again" : write == Write::UnwatchedFullClear ? "a CPU write into the unwatched block before results that cover it" : write == Write::BeforeUnwatch ? "a CPU write before the block leaves the watch" : "a CPU write into the unwatched block before results that cover part of it");
+        const bool restored = write == Write::RestoredAfterWriteBack;
+        const bool unwatchedWrite = write == Write::UnwatchedFullClear || write == Write::UnwatchedPartialWrite || write == Write::BeforeUnwatch || restored;
+        const std::string what = std::string(large ? "1024x1024, " : "") + (write == Write::None ? "no CPU write" : write == Write::AfterPending ? "a CPU write after the results were pending again" : write == Write::BeforePending ? "a CPU write before the results were pending again" : write == Write::UnwatchedFullClear ? "a CPU write into the unwatched block before results that cover it" : write == Write::BeforeUnwatch ? "a CPU write before the block leaves the watch" : restored ? "a CPU write restoring the uploaded bytes after a write-back, before results that cover part of the unwatched block" : "a CPU write into the unwatched block before results that cover part of it");
         void* block = AllocateWatched(allocationBytes, unit);
         if (block == nullptr) {
             std::cout << "no write watching: results pending after a block left the watch not tested\n";
@@ -5828,24 +5836,40 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
                 AgcDriver::GuestMemory::Unwatch(address + surfaceBytes, unit);
                 clear(VkClearColorValue{{0.0f, 1.0f, 0.0f, 1.0f}});
                 Require(!image->GuestSnapshotValid(), "(p) a watched pending image already saved its bytes");
+                const auto generation = AgcDriver::GuestMemory::CollectWritesUncached(address, surfaceBytes);
+                struct RestoreHook {
+                    ~RestoreHook() { AgcDriver::GuestMemory::SetUnwatchHook(&StorageTexture::SaveBeforeUnwatch); }
+                } restoreHook;
+                unwatchHookCalls.store(0, std::memory_order_relaxed);
+                AgcDriver::GuestMemory::SetUnwatchHook(&countUnwatchHook);
                 Require(AgcDriver::GuestMemory::ImportWatched(address, allocationBytes, [] { return true; }, true), "(p) the import over an unwatched neighbour failed");
                 Require(AgcDriver::GuestMemory::Watched(address, surfaceBytes), "(p) a successful partial-coverage import dropped the watched surface");
                 Require(!image->GuestSnapshotValid(), "(p) a successful partial-coverage import saved a surface that stayed watched");
+                Require(unwatchHookCalls.load(std::memory_order_relaxed) == 0, "(p) the import ran the unwatch hook over a block that had already left the watch");
+                Require(AgcDriver::GuestMemory::UnchangedSince(address, surfaceBytes, generation), "(p) the import over an unwatched neighbour stamped the watched surface as written");
                 Require(!AgcDriver::GuestMemory::ImportWatched(address, allocationBytes, [] { return false; }, true), "(p) the failed import reported success");
-                Require(image->GuestSnapshotValid(), "(p) the import dropped a pending image's watch without saving its bytes");
-                Require(!AgcDriver::GuestMemory::Watched(address, surfaceBytes), "(p) the failed import did not drop the surface's watch");
+                Require(AgcDriver::GuestMemory::Watched(address, surfaceBytes), "(p) the failed import dropped the watch of the surface");
+                Require(!image->GuestSnapshotValid(), "(p) the failed import saved a pending image that stayed watched");
+                Require(unwatchHookCalls.load(std::memory_order_relaxed) == 0, "(p) the failed import ran the unwatch hook");
             } else {
                 if (write == Write::BeforeUnwatch) memory[lastUnit * unit] = 0x11;
-                AgcDriver::GuestMemory::Unwatch(address + lastUnit * unit, unit);
+                if (restored) {
+                    clear(VkClearColorValue{{0.0f, 1.0f, 0.0f, 1.0f}});
+                    store();
+                }
+                {
+                    std::lock_guard gpu(GpuMutex());
+                    AgcDriver::GuestMemory::Unwatch(address + lastUnit * unit, unit);
+                }
                 Require(!image->GuestSnapshotValid(), "(p) an idle unwatch eagerly saved guest bytes");
                 Require(!AgcDriver::GuestMemory::Watched(address, surfaceBytes) && AgcDriver::GuestMemory::Watched(address, lastUnit * unit), "(p) " + what + ": the last block did not leave the watch alone");
             }
-            const auto cpuUnit = [](std::size_t i) { return i % 4 == 0 ? static_cast<std::uint8_t>(0x11) : static_cast<std::uint8_t>(i * 131u + 7u); };
+            const auto cpuUnit = [restored](std::size_t i) { return restored ? static_cast<std::uint8_t>(0x5a) : i % 4 == 0 ? static_cast<std::uint8_t>(0x11) : static_cast<std::uint8_t>(i * 131u + 7u); };
             if (write == Write::BeforePending) writePage();
             if (unwatchedWrite) {
                 for (std::size_t i = 0; i < unit; ++i) memory[lastUnit * unit + i] = cpuUnit(i);
             }
-            if (write == Write::UnwatchedPartialWrite) {
+            if (write == Write::UnwatchedPartialWrite || restored) {
                 constexpr std::uint32_t patch = 16;
                 Buffer staging(context, patch * patch * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
                 const auto bytes = staging.Bytes();
@@ -5896,6 +5920,7 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
             }
             if (large && write == Write::UnwatchedPartialWrite) Require(refused, "(p) " + what + ": stored over an unwatched unit the CPU wrote, which the transition hash does not match");
             if (write == Write::BeforeUnwatch) Require(refused, "(p) " + what + ": accepted an idle unit without a valid generation proof at unwatch");
+            if (restored) Require(refused, "(p) " + what + ": accepted a unit whose guest bytes no longer matched them when it left the watch");
             if (unwatchedWrite) {
                 if (refused) {
                     std::cout << "(p) " + what + ": refused rather than stored\n";

@@ -4167,13 +4167,17 @@ void StorageTexture::SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes)
         for (auto* texture : pending.textures) take(texture);
         for (auto* texture : pending.flushing) take(texture);
     }
-    if (PendingUnwatchSaveEnabled()) {
-        auto& live = Live();
-        std::lock_guard lock(live.mutex);
-        for (auto* texture : live.textures) {
-            if (!texture->overlaps(address, bytes)) continue;
-            if (auto alive = texture->weak_from_this().lock(); alive && std::find(overlapping.begin(), overlapping.end(), alive) == overlapping.end()) overlapping.push_back(std::move(alive));
+    if (PendingUnwatchSaveEnabled() && GuestMemory::GpuMutex().HeldByThisThread()) {
+        std::vector<std::shared_ptr<StorageTexture>> idle;
+        {
+            auto& live = Live();
+            std::lock_guard lock(live.mutex);
+            for (auto* texture : live.textures) {
+                if (!texture->overlaps(address, bytes)) continue;
+                if (auto alive = texture->weak_from_this().lock(); alive && std::find(overlapping.begin(), overlapping.end(), alive) == overlapping.end()) idle.push_back(std::move(alive));
+            }
         }
+        for (const auto& texture : idle) texture->saveUploadBeforeUnwatch(address, bytes);
     }
     if (overlapping.empty()) return;
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
@@ -4213,7 +4217,7 @@ void StorageTexture::saveUploadBeforeUnwatch(std::uint64_t address, std::size_t 
         const auto length = static_cast<std::size_t>(layerBytes(unit));
         if (begin >= address + bytes || address >= begin + length || layerPending[unit] || layerOriginal[unit] || savedTicket[unit] != 0 || layerGeneration[unit] == 0) continue;
         if (GuestMemory::CollectWritesUncached(begin, length) == 0 || !GuestMemory::Watched(begin, length) || GuestMemory::NewestStamp(begin, length) > layerGeneration[unit]) continue;
-        if (guestBytes <= GenerationBaselineBytes && generationBaseline.size() != guestBytes) continue;
+        if (guestBytes <= GenerationBaselineBytes && (generationBaseline.size() != guestBytes || !GuestMemory::EqualsCommittedUnsynced(begin, std::span<const std::byte>(generationBaseline).subspan(static_cast<std::size_t>(begin - descriptor.baseAddress), length)))) continue;
         if (uploadHash.empty()) uploadHash.resize(trackedLayers);
         uploadHash[unit] = guestBytes > GenerationBaselineBytes ? unitContentHash(unit) : std::array<std::uint64_t, 2>{1, 0};
     }

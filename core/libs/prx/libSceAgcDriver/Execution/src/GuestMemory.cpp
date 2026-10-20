@@ -1897,9 +1897,17 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     const auto stop = (address + bytes + page - 1) & ~(page - 1);
     const bool covered = tracker.covers(first, static_cast<std::size_t>(stop - first));
     const auto unwatchRange = [&](std::uint64_t begin, std::uint64_t end) {
-        lock.unlock();
-        beforeUnwatch(begin, static_cast<std::size_t>(end - begin));
-        lock.lock();
+        bool anyCovered = false;
+        for (auto at = begin; at < end && !anyCovered;) {
+            const auto next = std::min<std::uint64_t>((at / WriteBlockBytes + 1) * WriteBlockBytes, end);
+            anyCovered = tracker.covers(at, static_cast<std::size_t>(next - at));
+            at = next;
+        }
+        if (anyCovered) {
+            lock.unlock();
+            beforeUnwatch(begin, static_cast<std::size_t>(end - begin));
+            lock.lock();
+        }
         unwatchLocked(tracker, begin, static_cast<std::size_t>(end - begin));
     };
     const auto runImport = [&] {
@@ -1910,10 +1918,7 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     };
     if (!staysWatched) {
         const bool before = covered && walkWrites(tracker, first, stop, StampKind::Cpu, true);
-        if (!runImport()) {
-            unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
-            return false;
-        }
+        if (!runImport()) return false;
         if (!before || !walkWrites(tracker, first, stop, StampKind::ImportWindow, true)) unwatchLocked(tracker, first, static_cast<std::size_t>(stop - first));
         unwatchLocked(tracker, address, bytes);
         return true;
@@ -1944,19 +1949,30 @@ bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function
     for (std::size_t index = 0; index < slots.size(); ++index) {
         if (slots[index] != WindowCopy::Zero) saved.insert(saved.end(), source + index * page, source + (index + 1) * page);
     }
-    std::erase_if(spans, [&](const auto& span) { return !walkWrites(tracker, span.first, span.second, StampKind::Cpu, true); });
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> drops;
+    std::erase_if(spans, [&](const auto& span) {
+        if (walkWrites(tracker, span.first, span.second, StampKind::Cpu, true)) return false;
+        drops.push_back(span);
+        return true;
+    });
     if (!runImport()) {
-        unwatchRange(first, stop);
+        for (const auto& [begin, end] : drops) unwatchRange(begin, end);
         return false;
     }
+    drops.clear();
+    const auto drop = [&](std::uint64_t begin, std::uint64_t end) {
+        if (!drops.empty() && drops.back().second == begin) drops.back().second = end;
+        else drops.emplace_back(begin, end);
+    };
     const WindowCopy window{first, saved, slots};
     auto unwatchedFrom = first;
     for (const auto& [begin, end] : spans) {
-        if (unwatchedFrom < begin) unwatchRange(unwatchedFrom, begin);
-        if (!walkWrites(tracker, begin, end, StampKind::Cpu, true, &window)) unwatchRange(begin, end);
+        if (unwatchedFrom < begin) drop(unwatchedFrom, begin);
+        if (!walkWrites(tracker, begin, end, StampKind::Cpu, true, &window)) drop(begin, end);
         unwatchedFrom = end;
     }
-    if (unwatchedFrom < stop) unwatchRange(unwatchedFrom, stop);
+    if (unwatchedFrom < stop) drop(unwatchedFrom, stop);
+    for (const auto& [begin, end] : drops) unwatchRange(begin, end);
     return true;
 }
 
