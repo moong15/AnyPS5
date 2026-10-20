@@ -932,3 +932,8 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
    - Name Stellar Blade in the evidence; keep the description generic.
    - Check: `check_conventions.py --base origin/main --head HEAD --title "<t>" --body <file>`, and `pr_labels.has_numbers(body)` must print True.
 6. Show the user the final body and numbers, and get explicit approval before `gh pr create` and before any push to upstream or comment.
+
+## 2026-10-20 19:45: PR #8484 opened (fps12 on main)
+- Branch perf/gpu-single-dcc-upload = b57c5be9d on origin/main 30fda0a03, pushed to fork, PR https://github.com/boykopovar/AnyPS5/pull/8484. Body in E:\AnyPS5-notes\pr-traces\pr-body.md says perf numbers follow in a comment.
+- Staged libs: E:\StellarBlade\libs-main-30fda0a03, libs-pr-b57c5be9d. Relinker identical to deployed exe (no core/relinker diff c963815e1..30fda0a03).
+- Running: series-pr.sh (BASE=APS5_PREBUILD_THREADS=16 only) run318 main warm, run319 main1, run320 pr1, run321 main2, run322 pr2. Then trace_digest + summary lines into a PR comment (name Stellar Blade there), check has_numbers.
