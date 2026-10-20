@@ -949,3 +949,4 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
 - Then for #7457: validation ctest main vs PR, 3 alternating main/PR Stellar Blade pairs (old evidence was off-switch only = doesn't count), summary lines+traces (fork release)+digest in body, draft replies to adriadam10 + CnRJay and SHOW USER before posting.
 - For each agent commit: ctest -R serially in lock with validation env, then one game run vs previous sb5 run (run317 8.62).
 - User 20:45: NEW tasks/investigations go to Sol (codex exec --approve-for-me, briefs in E:\AnyPS5-notes\sol\) until Sol's usage runs out; the 5 running Claude agents finish as they are.
+- 20:50 Sol running: sol-committer, sol-indirect-rp, sol-merge10-build (results sol\*-result.md). Claude tests what they build.
