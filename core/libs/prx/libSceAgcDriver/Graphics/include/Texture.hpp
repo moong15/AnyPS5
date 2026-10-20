@@ -541,6 +541,7 @@ public:
     static std::uint64_t SlabRetiles();
     static std::uint64_t PaddingSeedCopies();
     static std::uint64_t LinearImportRetiles();
+    static std::uint64_t RecordedCpuUploads();
     static std::uint64_t RefreshesProved();
     const char* RefreshObligation(std::uint32_t first = 0, std::uint32_t count = 0) const;
     static std::uint64_t ClearHandOvers();
