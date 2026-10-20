@@ -876,3 +876,8 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - sb5 = bb1de536f, pushed to the fork. run309 = 8.16 fps (best so far on this scene with bundle A; run295 was 7.77). Contains fps9, fps10, fps11 and the VB race fix.
 - Queued: run310/311 = the load-crash fix ba0db2640 (same tree as 388f0d192; Sol adapted #7048), switch APS5_NO_PENDING_UNWATCH_SAVE.
 - Open: CPU storage uploads are still ~1466 per 10 s, all reason keys / "imported buffer region" write-backs; span import made direct only 8. That is the next target.
+
+## 2026-10-20 19:15
+- sb5 = 0198a83f3 (fps12 GPU single-key DCC upload), pushed. Runs 8.82 and 9.61 fps (run309 8.16, run295 7.77 this morning). CPU storage uploads now 0.
+- Load-crash fix: ba0db2640 halved fps (3.86) -> parked on perf/wbwatch-slow; cheap rework 01149bc6a in E:\AnyPS5-wbw, untested.
+- Main merge 10 c963815e1 (on bb1de536f, without fps12) is building, relinking and running as run314/315; then fps12 merges onto it.
