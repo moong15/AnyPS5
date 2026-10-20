@@ -493,7 +493,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         for (const auto& region : captured) {
             if (!region.bytes.empty()) itemReads.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
         }
-        if (!cached && dispatchRelocationEnabled() && CacheableResult(compiled) && capture != nullptr && (capture->userDataUse.asBase & ~capture->userDataUse.asValue) != 0) itemReads = {{0, std::numeric_limits<std::uint64_t>::max()}};
+        if (!cached && dispatchRelocationEnabled() && CacheableResult(compiled) && capture != nullptr && (capture->userDataUse.asBase & ~(capture->userDataUse.asValue | capture->userDataUse.asOperand)) != 0) itemReads = {{0, std::numeric_limits<std::uint64_t>::max()}};
         if (!cached) itemMisses.fetch_add(1, std::memory_order_relaxed);
         const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
         const auto queueId = submission.queue;

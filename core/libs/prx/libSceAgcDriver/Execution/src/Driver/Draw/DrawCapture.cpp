@@ -361,7 +361,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     }
     stageCapture.capture = capture;
     timing.Mark("materialize");
-    const auto walked = capture->userDataUse.asValue | capture->userDataUse.asBase;
+    const auto walked = capture->userDataUse.asValue | capture->userDataUse.asOperand | capture->userDataUse.asBase;
     auto mask = walked == 0 ? ~std::uint64_t{0} : walked | stageCapture.compiled->userDataRegisterReads;
     if (program.tailContinuation != nullptr) mask = ~std::uint64_t{0};
     if (vertexInfos[i]) {
@@ -433,7 +433,9 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
             std::vector<ShaderRecompiler::MemoryRegion> regions(stageCapture.regions.begin(), stageCapture.regions.end());
             for (const auto& read : decodeReads[i]) regions.push_back({read.address, read.Bytes()});
             std::stable_sort(regions.begin(), regions.end(), [](const ShaderRecompiler::MemoryRegion& a, const ShaderRecompiler::MemoryRegion& b) { return a.guestAddress < b.guestAddress; });
-            tagVariantRuns(*variant, regions, stageCapture.userDataUse, drawRelocationEnabled() && decodeReads[i].empty() && (!vertexInfos[i] || vertexInfos[i]->resourcesNum == 0), programs[i].hiddenUserWords, stageCapture.supplied);
+            std::uint64_t forwardedWords = 0;
+            for (const auto word : stageCapture.compiled->shaderDataUserWords) forwardedWords |= word < 64u ? std::uint64_t{1} << word : std::uint64_t{0};
+            tagVariantRuns(*variant, regions, stageCapture.userDataUse, drawRelocationEnabled() && decodeReads[i].empty() && (!vertexInfos[i] || vertexInfos[i]->resourcesNum == 0), programs[i].hiddenUserWords, stageCapture.supplied, forwardedWords);
             if (drawStageDataHits() && stageCapture.capture != nullptr && !stageCapture.capture->readTrace.leaves.empty()) recordStageDataPositions(*variant, *stageCapture.capture, decodeReads[i]);
             tagBufferWords(*variant, stageCapture.bufferBaseWords);
             if (traceDrawCache() && entry != nullptr && matched[i] == nullptr && i < entry->stages.size()) {
