@@ -6466,6 +6466,160 @@ bool recordedCpuUploadTests(const Device& device, Recorder& recorder) {
     return true;
 }
 
+bool spanningImportUploadTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0 || 65536 % base.hostImportAlignment != 0) {
+        std::cout << "host imports unavailable: spanning storage imports not compared\n";
+        return false;
+    }
+    struct Case {
+        const char* name;
+        std::uint32_t format;
+        TextureTileMode tileMode;
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t mipCount;
+    };
+    constexpr Case cases[] = {
+        {"RGBA8 64 KiB R_X 520x260, 6 mips", 56, TextureTileMode::kR64KBX, 520, 260, 6},
+        {"RGBA16F 64 KiB R_X 300x200, 1 mip", 71, TextureTileMode::kR64KBX, 300, 200, 1},
+        {"R16 64 KiB R_X 640x360, 3 mips", 7, TextureTileMode::kR64KBX, 640, 360, 3},
+    };
+    constexpr std::size_t piece = 65536;
+    constexpr std::size_t window = 4 * piece;
+    const bool spanning = HostImportSpanningEnabled();
+    SetHostImportWindow(window);
+    struct Window {
+        ~Window() { SetHostImportWindow(0); }
+    } restore;
+    std::string failures;
+    std::size_t tested = 0;
+    for (const auto& test : cases) {
+        if (!StorageFormatAvailable(base, test.format)) continue;
+        GuestTextureResource resource{};
+        resource.width = test.width;
+        resource.height = test.height;
+        resource.mipCount = test.mipCount;
+        resource.tileMode = test.tileMode;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = test.format;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        const auto geometry = DescribeSurface(resource);
+        const auto elementBytes = BytesPerElement(test.format);
+        const auto surfaceBytes = static_cast<std::size_t>(geometry.guestBytes);
+        if (surfaceBytes <= piece) continue;
+        const auto offset = window - piece;
+        const auto registered = (offset + surfaceBytes + window - 1) / window * window + window;
+        const auto reserved = registered + window;
+#ifdef _WIN32
+        void* block = VirtualAlloc(nullptr, reserved, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+        void* block = std::aligned_alloc(window, reserved);
+#endif
+        Require(block != nullptr, "spanning storage import test memory");
+        const auto aligned = (reinterpret_cast<std::uint64_t>(block) + window - 1) / window * window;
+        auto* memory = reinterpret_cast<std::uint8_t*>(aligned);
+        std::uint32_t seed = 0x13579bdfu;
+        for (std::size_t i = 0; i < registered; ++i) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            memory[i] = static_cast<std::uint8_t>(seed >> 9);
+        }
+        {
+            GuestAllocations::Mutation mutation;
+            for (std::size_t at = 0; at < registered; at += piece) mutation.Add(memory + at, piece, true, true, true);
+        }
+        struct Unregister {
+            const Context& context;
+            void* block;
+            std::uint8_t* memory;
+            std::size_t registered;
+            ~Unregister() {
+                {
+                    GuestAllocations::Mutation mutation;
+                    for (std::size_t at = 0; at < registered; at += piece) mutation.Remove(memory + at);
+                }
+                HostImportFor(context, reinterpret_cast<std::uint64_t>(memory), piece);
+#ifdef _WIN32
+                VirtualFree(block, 0, MEM_RELEASE);
+#else
+                std::free(block);
+#endif
+            }
+        } unregister{base, block, memory, registered};
+        const auto address = aligned + offset;
+        if (HostImportFor(base, address, surfaceBytes) != nullptr) {
+            std::cout << "a surface across the import window was imported whole: " << test.name << " not compared\n";
+            continue;
+        }
+        if (HostImportFor(base, aligned, piece) == nullptr) {
+            std::cout << "host import refused: " << test.name << " not compared\n";
+            continue;
+        }
+        TextureDetiler detiler(base);
+        auto imported = base;
+        imported.detiler = &detiler;
+        auto copied = base;
+        copied.detiler = &detiler;
+        copied.hostImportAlignment = 0;
+        resource.baseAddress = address;
+        std::size_t linearBytes = 0;
+        for (const auto& mip : geometry.mips) linearBytes += static_cast<std::size_t>(mip.width) * mip.height * elementBytes;
+        const auto readImage = [&](const StorageTexture& image) {
+            Buffer readback(base, linearBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            const auto commands = recorder.Commands();
+            RecordMemoryBarrier(base, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            std::vector<VkBufferImageCopy> copies;
+            std::size_t at = 0;
+            for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = at;
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+                copy.imageExtent = {geometry.mips[level].width, geometry.mips[level].height, 1};
+                copies.push_back(copy);
+                at += static_cast<std::size_t>(geometry.mips[level].width) * geometry.mips[level].height * elementBytes;
+            }
+            base.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image.Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+            RecordMemoryBarrier(base, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+            recorder.Submit();
+            device.WaitQueue();
+            recorder.Sync();
+            const auto read = readback.Bytes();
+            return std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(read.data()), reinterpret_cast<const std::uint8_t*>(read.data()) + linearBytes);
+        };
+        {
+            const auto beforeCopy = StorageTexture::CpuUploadsWithoutImport();
+            auto fromCopy = StorageTexture::Create(copied, detiler, resource, 0);
+            recorder.Keep(fromCopy);
+            const auto copiedCpu = StorageTexture::CpuUploadsWithoutImport() - beforeCopy;
+            const auto copiedTexels = readImage(*fromCopy);
+            const auto beforeSpan = StorageTexture::CpuUploadsWithoutImport();
+            auto fromSpan = StorageTexture::Create(imported, detiler, resource, 0);
+            recorder.Keep(fromSpan);
+            const auto spanCpu = StorageTexture::CpuUploadsWithoutImport() - beforeSpan;
+            const auto spanTexels = readImage(*fromSpan);
+            if (copiedCpu == 0) failures += std::string(test.name) + ": the reference upload did not take the CPU path\n";
+            if (spanning ? spanCpu != 0 : spanCpu == 0) failures += std::string(test.name) + ": " + std::to_string(spanCpu) + " CPU uploads of the surface across the import window, want " + (spanning ? "0" : "at least 1") + "\n";
+            if (spanning && HostImportSpanning(base, address, surfaceBytes) == nullptr) failures += std::string(test.name) + ": no joined import covers the surface across the import window\n";
+            if (copiedTexels != spanTexels) {
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < copiedTexels.size(); ++i) differ += copiedTexels[i] != spanTexels[i];
+                failures += std::string(test.name) + ": the upload across the import window differs from the CPU upload in " + std::to_string(differ) + " bytes\n";
+            }
+        }
+        recorder.Sync();
+        ++tested;
+    }
+    if (!failures.empty()) throw std::runtime_error("spanning storage imports:\n" + failures);
+    if (tested == 0) return false;
+    std::cout << "spanning storage imports" << (spanning ? "" : " (CPU path)") << ": ok (" << tested << " surfaces)\n";
+    return true;
+}
+
 class StorageUploadProbe {
 public:
     StorageUploadProbe(Context& context, bool failView) : context(context), resolver(context.deviceProc), failView(failView) {
@@ -10365,6 +10519,9 @@ int main(int argc, char** argv) {
         recorder.Activate();
         if (argc == 2 && std::string_view(argv[1]) == "--recorded-cpu-upload-only") {
             return recordedCpuUploadTests(device, recorder) ? 0 : 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--spanning-import-upload-only") {
+            return spanningImportUploadTests(device, recorder) ? 0 : 77;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--storage-clear-fast-path-only") {
             return storageClearFastPathTests(device, recorder) ? 0 : 77;

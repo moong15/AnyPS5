@@ -98,7 +98,7 @@ thread_local const char* uploadReason = "first";
 // selections widened to every pending unit (the hysteresis in writeBack), units dropped as dead
 // (DiscardPendingInside) and units an alias's own results superseded (markLayersPending); relaxed,
 // reported only.
-std::atomic<std::uint64_t> singlePassMoves{0}, slabRetiles{0}, recordedCpuUploads{0};
+std::atomic<std::uint64_t> singlePassMoves{0}, slabRetiles{0}, recordedCpuUploads{0}, cpuUploadsKeys{0}, cpuUploadsNoImport{0};
 std::atomic<std::uint64_t> partialUploads{0}, partialUploadBytes{0}, partialWriteBacks{0}, partialWriteBackBytes{0}, emptyWriteBacks{0}, coalescedWriteBacks{0}, unitsDropped{0}, unitsSuperseded{0};
 // FlushPending listings skipped because no pending unit of the image lay inside the range, images
 // whose selected pending units were dropped because their memory is no longer registered (see
@@ -185,7 +185,7 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     const auto take = [](std::atomic<std::uint64_t>& counter) { return static_cast<unsigned long long>(counter.exchange(0, std::memory_order_relaxed)); };
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
-    AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu, evicted stale %llu\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(staleEvicted));
+    AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu, evicted stale %llu; cpu uploads by cause (cumulative): keys %llu, no import %llu\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(staleEvicted), static_cast<unsigned long long>(cpuUploadsKeys.load(std::memory_order_relaxed)), static_cast<unsigned long long>(cpuUploadsNoImport.load(std::memory_order_relaxed)));
     for (const auto& [site, counts] : traffic.smallStores) {
         AgcDriver::ProfilePrint_nid_no_patch("[storage] small stores %s (10 s): now %llu deferred %llu retried %llu later %llu blocking attempts %llu blocking fences %llu\n", site.c_str(), static_cast<unsigned long long>(counts.now), static_cast<unsigned long long>(counts.deferred), static_cast<unsigned long long>(counts.retried), static_cast<unsigned long long>(counts.later), static_cast<unsigned long long>(counts.waits), static_cast<unsigned long long>(counts.fences));
     }
@@ -2164,7 +2164,7 @@ bool StorageTexture::Refresh() {
     auto alias = pendingAlias();
     targetSample.Step(TargetRefreshStep::AliasCheck);
     if (alias != nullptr) TargetRefreshSample::Add("alias_found");
-    if (alias != nullptr && !(ProvedClearKeys(descriptor, guestBytes, keyProof) == DccKeys::Uncompressed && HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr)) alias = nullptr;
+    if (alias != nullptr && !(ProvedClearKeys(descriptor, guestBytes, keyProof) == DccKeys::Uncompressed && HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr)) alias = nullptr;
     if (alias != nullptr) {
         std::vector<std::uint8_t> aliasStamped(trackedLayers);
         if (!GuestMemory::ChangedBlocks(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), alias->layerGeneration, aliasStamped)) alias = nullptr;
@@ -2292,7 +2292,10 @@ bool StorageTexture::Refresh() {
         }
         // Only the direct path uploads the selected layers alone (see upload); the others replace
         // the whole image, so every pending layer's results are stored first.
-        direct = keys == DccKeys::Uncompressed && MeasureTargetRefresh(TargetRefreshStep::Import, [&] { return RefreshLookupsEnabled() ? HostImportForCached(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes), importLookup) : HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)); }) != nullptr;
+        direct = keys == DccKeys::Uncompressed && MeasureTargetRefresh(TargetRefreshStep::Import, [&] {
+            const auto* found = RefreshLookupsEnabled() ? HostImportForCached(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes), importLookup) : HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+            return found != nullptr ? found : HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+        }) != nullptr;
         if (alias != nullptr && direct) {
             // The alias's pending units that nothing stamped since its generation (a CPU store or a
             // driver store there wins over its results, as at its own write-back) are taken from
@@ -2444,6 +2447,10 @@ std::uint64_t StorageTexture::SinglePassMoves() {
 
 std::uint64_t StorageTexture::SlabRetiles() {
     return slabRetiles.load(std::memory_order_relaxed);
+}
+
+std::uint64_t StorageTexture::CpuUploadsWithoutImport() {
+    return cpuUploadsNoImport.load(std::memory_order_relaxed);
 }
 
 std::uint64_t StorageTexture::RecordedCpuUploads() {
@@ -2647,7 +2654,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         // The clear is recorded into the open batch like a direct upload (the image kept by it): a
         // batch of its own submitted the recorder's work first and waited for all of it, 25-40 ms
         // under the GPU mutex at the movie stage. APS5_NO_RECORDED_CLEAR=1 waits as before.
-        static_cast<void>(HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)));
+        static_cast<void>(HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)));
         if (GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
             layerOriginal.assign(trackedLayers, false);
             cancelStoredSaves();
@@ -2704,7 +2711,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         if (profile) LookupOutcomes::Add(LookupOutcomes::UploadClear, start);
         return;
     }
-    if (const auto* import = uploadedKeys == DccKeys::Uncompressed ? HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) : nullptr) {
+    if (const auto* import = uploadedKeys == DccKeys::Uncompressed ? HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) : nullptr) {
         if (GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
             layerOriginal.assign(trackedLayers, false);
             cancelStoredSaves();
@@ -2836,6 +2843,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     forgetBorrowed(0, trackedLayers);
     stampLayers(false);
     resizeOriginal(static_cast<std::size_t>(guestBytes));
+    (uploadedKeys == DccKeys::Uncompressed ? cpuUploadsNoImport : cpuUploadsKeys).fetch_add(1, std::memory_order_relaxed);
     GuestMemory::ReadCommitted(descriptor.baseAddress, original);
     {
             static const bool recordCpuUploads = std::getenv("APS5_NO_RECORDED_CPU_UPLOAD") == nullptr;
@@ -5075,7 +5083,7 @@ const char* StorageTexture::CopyRefusal(const Context& context, const StorageTex
     if (destination != nullptr && (destination == &source || !destination->SameSurfaceShape(source))) return "shape";
     if (source.descriptor.dccAddress != 0 || (destination != nullptr && destination->descriptor.dccAddress != 0)) return "keys";
     if (source.released || !source.Cached() || (destination != nullptr && (destination->released || !destination->Cached()))) return "released";
-    if (HostImportFor(context, address, static_cast<std::size_t>(source.guestBytes)) == nullptr) return "not imported";
+    if (HostImportSpanning(context, address, static_cast<std::size_t>(source.guestBytes)) == nullptr) return "not imported";
     if (Recorder::Active() == nullptr) return "no recorder";
     return nullptr;
 }
@@ -5552,7 +5560,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         settle(true);
         return;
     }
-    if (const auto* import = HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) segments.push_back({import, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
+    if (const auto* import = HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) segments.push_back({import, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
     else segments = importSegments();
     if (!segments.empty()) {
         Require(!unsavedOutsideWatch, "storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented");
