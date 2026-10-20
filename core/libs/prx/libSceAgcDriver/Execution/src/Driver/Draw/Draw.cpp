@@ -605,7 +605,10 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     snapshot();
     timing.Mark("post_compile_prepare");
     const auto lockForDraw = [&] {
-        if (gpuLock.owns_lock()) return;
+        if (gpuLock.owns_lock()) {
+            localDevice->FlushIndirectDraws();
+            return;
+        }
         phaseTiming.Phase(DrawRowVectors);
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Draw);
         gpuLock.lock();
@@ -618,11 +621,17 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             localDevice = std::move(current);
         }
 
+        localDevice->FlushIndirectDraws();
         recordLabelsForPacket(localDevice.get(), submission.queue);
         phaseTiming.Phase(DrawRowLabels);
     };
     if (drawParameters.indirect && indirectCpu) {
         drainBeforeArgumentRead();
+        {
+            std::unique_lock indirectLock(GuestMemory::GpuMutex(), std::defer_lock);
+            if (!gpuLock.owns_lock()) indirectLock.lock();
+            if (const auto current = device.Load()) current->FlushIndirectDraws();
+        }
         const auto indirect = *drawParameters.indirect;
         for (std::size_t i = 0; i < programs.size(); ++i) {
             if (programResults[i] == nullptr) continue;

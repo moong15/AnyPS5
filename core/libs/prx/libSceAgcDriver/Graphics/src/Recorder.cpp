@@ -45,6 +45,9 @@ namespace {
 
 Recorder* activeRecorder = nullptr;
 
+std::atomic<std::uint64_t> indirectBatchDraws{0}, indirectBatches{0}, indirectAvoided{0};
+std::atomic<std::int64_t> indirectReportMs{0};
+
 void TraceLoadWrite(const char* operation, const void* recorder, std::uint64_t serial, std::uint64_t address = 0, std::size_t bytes = 0, int value = -1) {
     static const bool enabled = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
     if (!enabled) return;
@@ -1679,6 +1682,7 @@ bool Recorder::SmallDmaDestinationOverlaps(std::uint64_t address, std::size_t by
 }
 
 VkCommandBuffer Recorder::Commands(VkAccessFlags* coveredAccess) {
+    FlushIndirectDraws();
     if (ProfilingSmallDma()) {
         ++SmallDmaStats().commands;
         if (open != nullptr && open->renderPass.open) ++SmallDmaStats().passEnds;
@@ -1699,6 +1703,13 @@ void Recorder::MarkCovered(VkAccessFlags access) {
 }
 
 Recorder::DrawPassStart Recorder::StartDrawPass(std::uint64_t key, bool forced, bool fenced, const PassAccess& access) {
+    if (!indirectDraws.empty()) {
+        const ReadList reads(access.reads.begin(), access.reads.end()), writes(access.writes.begin(), access.writes.end());
+        const std::vector<std::pair<VkImage, bool>> images(access.images.begin(), access.images.end()), attachments(access.attachments.begin(), access.attachments.end());
+        const PassAccess saved{reads, writes, images, attachments, access.anyReads, access.anyWrites};
+        FlushIndirectDraws();
+        return StartDrawPass(key, forced, fenced, saved);
+    }
     ensureOpen();
     auto& pass = open->renderPass;
     if (!pass.open || forced || (countingSamples && segmentMode() && !segmentSlotReady(*open))) {
@@ -1718,6 +1729,80 @@ Recorder::DrawPassStart Recorder::StartDrawPass(std::uint64_t key, bool forced, 
     open->passHazards.BeginPass();
     open->renderPass.drawState = {};
     return {commands, false, !elide, &open->renderPass.drawState};
+}
+
+bool Recorder::CanBatchIndirect() const {
+    static const bool enabled = std::getenv("APS5_NO_INDIRECT_BATCH") == nullptr;
+    return enabled && ReadTracking() && !countingSamples && !CaptureTrace::Enabled();
+}
+
+void Recorder::PrepareDrawQueue() {
+    ensureOpen();
+}
+
+Recorder::IndirectBatchStatistics Recorder::IndirectBatchCounts() {
+    return {indirectBatchDraws.load(std::memory_order_relaxed), indirectBatches.load(std::memory_order_relaxed), indirectAvoided.load(std::memory_order_relaxed)};
+}
+
+void Recorder::QueueIndirectDraw(std::uint64_t key, const PassAccess& access, IndirectPreparation preparation) {
+    Require(preparation.bytes <= IndirectBatchBytes, "indirect preparation exceeds batch arena bound");
+    const ReadList reads(access.reads.begin(), access.reads.end()), writes(access.writes.begin(), access.writes.end());
+    const std::vector<std::pair<VkImage, bool>> images(access.images.begin(), access.images.end()), attachments(access.attachments.begin(), access.attachments.end());
+    const PassAccess saved{reads, writes, images, attachments, access.anyReads, access.anyWrites};
+    ensureOpen();
+    if (!indirectDraws.empty() && (indirectKey != key || indirectQueue != GuestMemory::GpuLockThreadTag() || indirectDraws.size() >= IndirectBatchDraws || preparation.bytes > IndirectBatchBytes - indirectBytes || indirectHazards.Check(saved, true) != PassHazard::None)) FlushIndirectDraws();
+    if (indirectDraws.empty()) {
+        indirectKey = key;
+        indirectQueue = GuestMemory::GpuLockThreadTag();
+        indirectHazards.BeginPass();
+    }
+    preparation.offset = indirectBytes;
+    indirectBytes += preparation.bytes;
+    indirectHazards.Add(saved);
+    indirectDraws.push_back(std::move(preparation));
+}
+
+void Recorder::FlushIndirectDraws() {
+    if (indirectDraws.empty()) return;
+    auto draws = std::move(indirectDraws);
+    indirectDraws.clear();
+    const auto bytes = std::exchange(indirectBytes, 0);
+    indirectHazards.Clear();
+    const auto commands = Commands();
+    std::shared_ptr<DeviceBuffer> arena;
+    if (bytes != 0) {
+        arena = std::make_shared<DeviceBuffer>(context, static_cast<std::size_t>(bytes), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        Keep(arena, static_cast<std::size_t>(bytes));
+    }
+    const auto buffer = arena != nullptr ? arena->Handle() : VK_NULL_HANDLE;
+    const auto timing = beginTiming(ClassKey(CommandClass::Draw));
+    recordBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+    CountBarriers(CommandClass::Draw);
+    for (const auto& draw : draws) {
+        if (draw.bytes != 0) draw.copy(commands, buffer, draw.offset);
+    }
+    if (bytes != 0) {
+        recordBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        for (const auto& draw : draws) {
+            if (draw.bytes != 0) draw.update(commands, buffer, draw.offset);
+        }
+        recordBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+        CountBarriers(CommandClass::Draw, 2);
+    }
+    EndGpuTiming(timing, bytes);
+    std::uint64_t avoided = 0;
+    for (const auto& draw : draws) avoided += draw.draw(buffer, draw.offset) ? 1u : 0u;
+    indirectBatchDraws.fetch_add(draws.size(), std::memory_order_relaxed);
+    indirectBatches.fetch_add(1, std::memory_order_relaxed);
+    indirectAvoided.fetch_add(avoided, std::memory_order_relaxed);
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!profile) return;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto last = indirectReportMs.load(std::memory_order_relaxed);
+    if (now - last >= 10000 && indirectReportMs.compare_exchange_strong(last, now)) {
+        const auto counts = IndirectBatchCounts();
+        AgcDriver::ProfilePrint_nid_no_patch("[indirect] %llu draws in %llu batches, %llu pass breaks avoided (cumulative)\n", static_cast<unsigned long long>(counts.draws), static_cast<unsigned long long>(counts.batches), static_cast<unsigned long long>(counts.avoided));
+    }
 }
 
 void Recorder::LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass) {
@@ -1755,6 +1840,7 @@ void Recorder::endOpenRenderPass(bool barrier) {
 }
 
 void Recorder::QueueKeyStore(VkBuffer buffer, VkDeviceSize first, VkDeviceSize last, std::shared_ptr<void> seed, std::uint64_t begin, std::uint64_t end) {
+    FlushIndirectDraws();
     ensureOpen();
     // A queued label store over the keys lands first (program order: the key store is later).
     FlushStoresOverlapping(begin, static_cast<std::size_t>(end - begin));
@@ -1784,6 +1870,7 @@ bool Recorder::AnyQueuedKeyStore(const std::function<bool(std::uint64_t, std::ui
 }
 
 void Recorder::FlushKeyStores() {
+    FlushIndirectDraws();
     if (open == nullptr || open->keyStores.empty()) return;
     recordKeyStores(true);
 }
@@ -1823,6 +1910,7 @@ void Recorder::recordKeyStores(bool forWriter) {
 
 void Recorder::ensureOpen() {
     GuestMemory::AssertGpuLockHeld("Recorder::Commands");
+    if (!indirectDraws.empty() && indirectQueue != GuestMemory::GpuLockThreadTag()) FlushIndirectDraws();
     if (open == nullptr) {
         auto batch = std::make_unique<Batch>();
         try {
@@ -1865,6 +1953,7 @@ void Recorder::ensureOpen() {
 }
 
 void Recorder::RecordStore(VkBuffer buffer, VkDeviceSize offset, std::span<const std::byte> bytes, std::uint64_t address) {
+    FlushIndirectDraws();
     if (bytes.empty()) return;
     ensureOpen();
     auto& run = open->run;
@@ -2065,6 +2154,7 @@ bool Recorder::AnyQueuedStore(const std::function<bool(std::uint64_t, std::uint6
 }
 
 void Recorder::FlushStores() {
+    FlushIndirectDraws();
     if (open == nullptr || open->run.queued.empty()) return;
     closeStoreRun(false);
 }
@@ -2345,6 +2435,7 @@ bool Recorder::RecordDispatchArguments(VkCommandBuffer commands, VkDeviceAddress
 }
 
 void Recorder::CountSamples() {
+    FlushIndirectDraws();
     GuestMemory::AssertGpuLockHeld("Recorder::CountSamples");
     gpuSampleCounter();
     countingSamples = true;
@@ -2482,6 +2573,7 @@ void Recorder::PrepareSampleSlot() {
 }
 
 void Recorder::EndPassSamples() {
+    FlushIndirectDraws();
     if (open != nullptr && open->segmentActive) endSegment(*open);
 }
 
@@ -2664,6 +2756,7 @@ void Recorder::foldSamples(Batch& batch, VkDeviceAddress target) {
 }
 
 bool Recorder::DumpSamples(VkDeviceAddress target, std::uint64_t address) {
+    FlushIndirectDraws();
     GuestMemory::AssertGpuLockHeld("Recorder::DumpSamples");
     if (target == 0 || !gpuSampleCounter()) return false;
     countingSamples = true;
@@ -3674,6 +3767,7 @@ bool Recorder::unsignaled(std::uint64_t serial) const {
 }
 
 void Recorder::AfterCompletions(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool storedOnGpu) {
+    FlushIndirectDraws();
     Require(open != nullptr || !inFlight.empty(), "no batch to append a completion label to");
     Batch& batch = open != nullptr ? *open : *inFlight.back();
     std::vector<std::byte> copy(bytes.begin(), bytes.end());
@@ -3792,6 +3886,7 @@ void Recorder::HoldNextSubmit(VkSemaphore semaphore, std::uint64_t value) {
 }
 
 void Recorder::Submit() {
+    FlushIndirectDraws();
     PerformanceTimer frameTiming("Recorder.Submit");
     // The work count is cleared even when nothing is open: the driver counts a dispatch after its
     // call returns (outside the mutex), so a submit by another thread in between leaves a stale

@@ -3009,6 +3009,17 @@ if(BUILD_TESTING)
             set_tests_properties(agc_driver_pipelined_indirect_draw_${pipelinedIndirectName}_off PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         endif()
     endforeach()
+    foreach(mode IN ITEMS alias strided indexed count producer count_producer label bound following committer)
+        set(batchTest "agc_driver_indirect_batch_${mode}")
+        add_test(NAME ${batchTest} COMMAND ${CMAKE_COMMAND}
+            "-DPROGRAM=$<TARGET_FILE:agc_driver_pipelined_indirect_draw_tests>" "-DMODE=${mode}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/execution/IndirectBatchCompare.cmake")
+        set_tests_properties(${batchTest} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" TIMEOUT 30
+            SKIP_REGULAR_EXPRESSION "indirect batch comparison skipped")
+        if(WIN32)
+            set_tests_properties(${batchTest} PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
     set_property(TEST agc_driver_queued_index_read_order APPEND PROPERTY ENVIRONMENT "APS5_NO_GPU_SMALL_DMA_COPY=1")
     add_test(NAME agc_driver_pipelined_predication_read_precise COMMAND agc_driver_pipelined_predication_read_tests)
     set_tests_properties(agc_driver_pipelined_predication_read_precise PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_PRECISE_READ_DRAINS=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 60)

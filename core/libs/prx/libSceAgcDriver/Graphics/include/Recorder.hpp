@@ -92,6 +92,26 @@ public:
         PassDrawState* drawState = nullptr;
     };
     DrawPassStart StartDrawPass(std::uint64_t key, bool forced, bool fenced, const PassAccess& access);
+    static constexpr std::size_t IndirectBatchDraws = 32;
+    static constexpr VkDeviceSize IndirectBatchBytes = VkDeviceSize{16} << 20u;
+    struct IndirectPreparation {
+        VkDeviceSize bytes = 0;
+        std::function<void(VkCommandBuffer, VkBuffer, VkDeviceSize)> copy;
+        std::function<void(VkCommandBuffer, VkBuffer, VkDeviceSize)> update;
+        std::function<bool(VkBuffer, VkDeviceSize)> draw;
+        VkDeviceSize offset = 0;
+    };
+    struct IndirectBatchStatistics {
+        std::uint64_t draws = 0;
+        std::uint64_t batches = 0;
+        std::uint64_t avoided = 0;
+    };
+    bool CanBatchIndirect() const;
+    void PrepareDrawQueue();
+    void QueueIndirectDraw(std::uint64_t key, const PassAccess& access, IndirectPreparation preparation);
+    void FlushIndirectDraws();
+    void BoundIndirectDraws() { if (indirectDraws.size() >= IndirectBatchDraws || indirectBytes >= IndirectBatchBytes) FlushIndirectDraws(); }
+    static IndirectBatchStatistics IndirectBatchCounts();
     void LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass = {});
     void SealPassWriteOnly();
     // DCC "uncompressed" key stores (DccMetadata.cpp StoreUncompressedOnGpu): queued on the open
@@ -937,6 +957,11 @@ private:
     bool unsignaled(std::uint64_t serial) const;
 
     Context context;
+    std::vector<IndirectPreparation> indirectDraws;
+    PassHazards indirectHazards;
+    VkDeviceSize indirectBytes = 0;
+    std::uint64_t indirectKey = 0;
+    std::uint32_t indirectQueue = 0;
     VkSemaphore timeline = VK_NULL_HANDLE;
     VkSemaphore submitHold = VK_NULL_HANDLE;
     std::uint64_t submitHoldValue = 0;

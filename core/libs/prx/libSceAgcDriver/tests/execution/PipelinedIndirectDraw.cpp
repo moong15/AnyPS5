@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "VulkanTestDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <cstring>
 #include <limits>
@@ -22,7 +23,9 @@
 #include <future>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <utility>
@@ -125,7 +128,7 @@ void AppendState(std::vector<std::uint32_t>& commands) {
     for (const auto& [offset, value] : shader) Append(commands, 0x76, {offset, value});
 }
 
-void AppendTarget(std::vector<std::uint32_t>& commands, std::array<std::byte, 1024>& memory, std::uint32_t userWord) {
+void AppendTarget(std::vector<std::uint32_t>& commands, std::span<std::byte> memory, std::uint32_t userWord) {
     const auto color = reinterpret_cast<std::uintptr_t>(memory.data());
     Append(commands, 0x69, {0x318, static_cast<std::uint32_t>(color >> 8u)});
     Append(commands, 0x69, {0x390, static_cast<std::uint32_t>(color >> 40u)});
@@ -641,6 +644,152 @@ void GpuSideIndirectDisjointDmaDoesNotDrain() {
     SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw held across a disjoint DMA control");
 }
 
+void IndirectBatch(const std::string& mode) {
+    using Recorder = AgcDriver::Graphics::Recorder;
+    struct alignas(65536) Slot {
+        std::array<std::byte, 65536> pixels;
+        std::array<std::uint32_t, 16385> records;
+    };
+    static auto referenceStorage = std::make_unique<Slot>();
+    static auto actualStorage = std::make_unique<Slot>();
+    static auto producerStorage = std::make_unique<Slot>();
+    auto& reference = *referenceStorage;
+    auto& actual = *actualStorage;
+    auto& produced = *producerStorage;
+    const bool committer = mode == "committer";
+    const bool indexed = mode == "indexed";
+    const bool counted = mode == "count" || mode == "count_producer";
+    const bool strided = mode == "strided" || indexed || counted;
+    const bool producer = mode == "producer" || mode == "count_producer";
+    const bool label = mode == "label";
+    const bool bound = mode == "bound";
+    const bool following = mode == "following";
+    Require(mode == "alias" || strided || producer || label || bound || following || committer, "unknown indirect batch case");
+    GuestAllocations::Mutation().Add(&reference, sizeof(reference), true, true, true);
+    GuestAllocations::Mutation().Add(&actual, sizeof(actual), true, true, true);
+    GuestAllocations::Mutation().Add(&produced, sizeof(produced), true, true, true);
+    reference.pixels.fill(Kept);
+    actual.pixels.fill(Kept);
+    reference.records[0] = 2;
+    actual.records.fill(Clipped);
+    const auto recordWords = indexed ? 5u : 4u;
+    const auto strideWords = strided ? 8u : recordWords;
+    const auto count = strided ? 2u : 1u;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto offset = index * strideWords;
+        actual.records[offset] = strided && index == 0 ? 0u : 3u;
+        actual.records[offset + 1] = 1u;
+        if (indexed) actual.records[offset + 2] = 0;
+    }
+    produced.records.fill(0);
+    produced.records[1] = 1;
+    const auto submit = [](std::vector<std::uint32_t>& commands) {
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "indirect batch submission failed");
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    const auto state = [&](std::vector<std::uint32_t>& commands, Slot& slot) {
+        AppendState(commands);
+        Append(commands, 0x69, {0x3b8, 0x9000000u | (0x1bu << 14u)});
+        AppendTarget(commands, slot.pixels, 0);
+        if (indexed) AppendIndexBuffer(commands);
+    };
+    const auto draws = bound ? static_cast<std::uint32_t>(Recorder::IndirectBatchDraws + 1) : producer ? 4u : 2u;
+    const auto drawState = [&](std::vector<std::uint32_t>& commands, std::uint32_t index) {
+        Append(commands, 0x79, {0x24a, indexed || producer || committer ? 0u : index % 2u});
+        if (producer || committer) Append(commands, 0x76, {0x00c, std::bit_cast<std::uint32_t>(1.0f - 0.2f * static_cast<float>(index))});
+    };
+    std::vector<std::uint32_t> direct;
+    state(direct, reference);
+    for (std::uint32_t index = 0; index < draws; ++index) {
+        if ((producer && index == 2) || (label && index == 1)) break;
+        drawState(direct, index);
+        if (indexed) AppendIndexedDirect(direct);
+        else Append(direct, 0x2d, {3, 2});
+    }
+    if (following) {
+        Append(direct, 0x79, {0x24a, 2});
+        Append(direct, 0x2d, {3, 2});
+    }
+    submit(direct);
+    AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uintptr_t>(reference.pixels.data()), reference.pixels.size());
+    Require(std::any_of(reference.pixels.begin(), reference.pixels.end(), [](std::byte value) { return value != Kept; }), "indirect batch reference drew no pixels");
+    if (producer) {
+        produced.pixels.fill(Kept);
+        std::vector<std::uint32_t> stale;
+        state(stale, produced);
+        for (std::uint32_t index = 0; index < draws; ++index) {
+            drawState(stale, index);
+            Append(stale, 0x2d, {3, 2});
+        }
+        submit(stale);
+        AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uintptr_t>(produced.pixels.data()), produced.pixels.size());
+        Require(produced.pixels != reference.pixels, "indirect batch producer fixture cannot distinguish stale arguments");
+    }
+    const auto before = Recorder::IndirectBatchCounts();
+    std::vector<std::uint32_t> commands;
+    state(commands, actual);
+    AppendRecords(commands, actual.records.data());
+    for (std::uint32_t index = 0; index < draws; ++index) {
+        if (index == 2 && producer) {
+            const auto source = reinterpret_cast<std::uintptr_t>(produced.records.data());
+            const auto destination = reinterpret_cast<std::uintptr_t>(counted ? reference.records.data() : actual.records.data());
+            Append(commands, 0x50, {0, static_cast<std::uint32_t>(source), static_cast<std::uint32_t>(source >> 32u), static_cast<std::uint32_t>(destination), static_cast<std::uint32_t>(destination >> 32u), static_cast<std::uint32_t>(sizeof(produced.records))});
+        }
+        if (index == 1 && label) AppendLabel(commands, actual.records.data(), 0);
+        drawState(commands, index);
+        const auto countAddress = counted ? reinterpret_cast<std::uintptr_t>(reference.records.data()) : 0;
+        if (strided) Append(commands, indexed ? 0x38u : 0x2cu, {0, 0, 0, counted ? 1u << 30u : 0u, count, static_cast<std::uint32_t>(countAddress), static_cast<std::uint32_t>(countAddress >> 32u), strideWords * 4u, indexed ? 0u : 2u});
+        else Append(commands, 0x24, {0, 0, 0, 2});
+    }
+    if (following) {
+        Append(commands, 0x79, {0x24a, 2});
+        Append(commands, 0x2d, {3, 2});
+    }
+    if (committer) {
+        Blocker blocker;
+        SubmitBehind(blocker, commands);
+        if (PipelinedIndirectDisabled()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            const auto outstanding = DrawPipeline::Queue0().Outstanding();
+            blocker.release = true;
+            Finish();
+            Require(outstanding == 1, "disabled pipelined indirect batch queued draw items");
+        } else {
+            WaitForItems(3, blocker, "indirect batch did not queue two separate committer items");
+        }
+    } else {
+        submit(commands);
+    }
+    AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uintptr_t>(actual.pixels.data()), actual.pixels.size());
+    Require(actual.pixels == reference.pixels, "indirect batch output differs from the same direct draw sequence");
+    if (producer) {
+        auto& destination = counted ? reference.records : actual.records;
+        AgcDriver::GuestMemory::FlushGpuWrites(reinterpret_cast<std::uintptr_t>(destination.data()), sizeof(destination));
+        Require(destination == produced.records, "indirect batch producer did not publish its records");
+    }
+    if (!producer && !label) {
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const auto offset = index * strideWords;
+            Require(actual.records[offset + (indexed ? 3u : 2u)] == Clipped && actual.records[offset + (indexed ? 4u : 3u)] == Clipped, "indirect normalization modified an aliased source record");
+            for (std::uint32_t word = recordWords; word < strideWords; ++word) Require(actual.records[offset + word] == Clipped, "indirect normalization modified source stride padding");
+        }
+    }
+    const auto after = Recorder::IndirectBatchCounts();
+    const bool disabled = std::getenv("APS5_NO_INDIRECT_BATCH") != nullptr;
+    if (disabled) Require(after.draws == before.draws && after.batches == before.batches, "disabled indirect batching still queued draws");
+    else if (label) Require(after.batches > before.batches, "label boundary did not complete the first indirect draw batch");
+    else {
+        Require(after.draws - before.draws == draws, "indirect batch fixture did not use the GPU batching path");
+        const auto batches = producer || bound || (committer && PipelinedIndirectDisabled()) ? 2u : 1u;
+        Require(after.batches - before.batches == batches, "indirect draws did not form the expected dependency batches");
+        Require(after.avoided - before.avoided == draws - batches, "indirect batch did not preserve compatible rendering");
+    }
+    std::uint64_t digest = 14695981039346656037ull;
+    for (const auto value : actual.pixels) digest = (digest ^ static_cast<unsigned>(value)) * 1099511628211ull;
+    std::printf("indirect-batch-output %016llx\n", static_cast<unsigned long long>(digest));
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -658,7 +807,7 @@ int main(int argc, char** argv) {
         {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
-            if (countOnly) {
+            if (countOnly || (argc == 3 && std::string(argv[1]) == "--indirect-batch" && (std::string(argv[2]) == "count" || std::string(argv[2]) == "count_producer"))) {
                 const auto support = device->DrawIndirectSupport();
                 if (!support.count || !support.multi) {
                     std::puts("pipelined indirect count requires indirect-count and multi-draw support");
@@ -668,6 +817,11 @@ int main(int argc, char** argv) {
         }
         Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
         Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
+        if (argc == 3 && std::string(argv[1]) == "--indirect-batch") {
+            IndirectBatch(argv[2]);
+            AgcDriverShutdown_nid_postfix();
+            return 0;
+        }
         DrawDirectReference();
         if (countOnly || pendingImageOnly || disjointDmaOnly) {
             if (countOnly) GpuSideIndirectCountQueuesBehindItsStore();

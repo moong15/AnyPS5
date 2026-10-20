@@ -269,6 +269,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_IMPORT_MISS_MEMO` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | retries structural host import failures instead of memoizing them |
 | `APS5_NO_IMPORT_PROOF_RECONCILE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | disables reconciling import proofs during resource revalidation |
 | `APS5_NO_INACTIVE_PREDICATE_KEEP` | string | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp` |  | a nonempty value other than 0 drains the queue-0 draw pipeline at a predicated INDIRECT_BUFFER marker while predication is off, as before; by default such a marker, which reads no memory, keeps the pipeline |
+| `APS5_NO_INDIRECT_BATCH` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | restores per-draw GPU indirect argument preparation and render-pass breaks |
 | `APS5_NO_INDIRECT_DRAW` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Pm4.cpp` |  | rejects indirect draw packets at submission validation |
 | `APS5_NO_JOIN_WAW_CHECK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | lets a contiguous store join the pending one without the write-after-write check |
 | `APS5_NO_KEEP_NEW_STORAGE` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | does not keep a newly created storage image alive with the open batch |

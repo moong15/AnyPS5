@@ -1668,24 +1668,22 @@ void recordDrawCommands(const Context& context, VkCommandBuffer commands, const 
     }
 }
 
-// The GPU-side records of an indirect draw, recorded outside the render pass: the stores that
-// produced them (a dispatch in place, a fill, the host) precede the indirect read, as for
-// DISPATCH_INDIRECT; a Constant dimension is rewritten in a scratch copy (vkCmdDrawIndirect reads
-// the record's dword as the first vertex / instance, and the constant is what the fixed-function
-// fetch must start at). The scratch is kept until the batch completed. Returns whether a copy was
-// rewritten; `argumentBuffer`/`argumentOffset` receive where the draw reads the records.
-bool recordIndirectArguments(const Context& context, VkCommandBuffer commands, Recorder* recorder, bool recorded, const IndirectRecord& indirect, std::unique_ptr<DeviceBuffer>& scratch, VkBuffer& argumentBuffer, VkDeviceSize& argumentOffset, const std::function<void(std::uint32_t)>& countBarrier) {
-    using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+void resolveIndirectArguments(Recorder* recorder, bool recorded, const IndirectRecord& indirect, VkBuffer& argumentBuffer, VkDeviceSize& argumentOffset) {
     const auto* args = indirect.args;
-    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
-    countBarrier(1);
     if (recorded) {
-        // Read in place from the import when the batch runs (a synchronous draw waits for its own).
         recorder->NotePendingRead(args->arguments, static_cast<std::size_t>(args->RangeBytes()), Recorder::ReadKind::Indirect);
         if (args->countIndirect) recorder->NotePendingRead(args->countAddress, 4, Recorder::ReadKind::Indirect);
     }
     argumentBuffer = indirect.argumentImport->buffer;
     argumentOffset = HostImportOffset(*indirect.argumentImport, args->arguments);
+}
+
+bool recordIndirectArguments(const Context& context, VkCommandBuffer commands, Recorder* recorder, bool recorded, const IndirectRecord& indirect, std::unique_ptr<DeviceBuffer>& scratch, VkBuffer& argumentBuffer, VkDeviceSize& argumentOffset, const std::function<void(std::uint32_t)>& countBarrier) {
+    using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+    const auto* args = indirect.args;
+    resolveIndirectArguments(recorder, recorded, indirect, argumentBuffer, argumentOffset);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+    countBarrier(1);
     const bool rewritten = args->vertexRule == Rule::Constant || args->instanceRule == Rule::Constant;
     if (!rewritten) return false;
     const auto bytes = static_cast<std::size_t>(args->RangeBytes());
@@ -1858,6 +1856,23 @@ struct RecordedDraw {
     const std::array<std::byte, PipelinePushConstantBytes>* pushBytes = nullptr;
     VkShaderStageFlags pushStages = 0;
     std::vector<std::pair<std::uint32_t, std::shared_ptr<Pipeline>>> stencilReplay;
+    bool prepared = false;
+    bool profilePass = false;
+    VkBuffer argumentBuffer = VK_NULL_HANDLE;
+    VkDeviceSize argumentOffset = 0;
+    std::shared_ptr<ShaderResources::DrawBindings> drawBindings;
+};
+
+struct BufferedIndirectDraw {
+    State state;
+    Pm4::DrawParameters draw;
+    DrawInputs inputs;
+    RecordedDraw record;
+    std::vector<VkImageView> views;
+    HostImport arguments;
+    HostImport count;
+    IndirectRecord indirect;
+    std::array<std::byte, PipelinePushConstantBytes> push;
 };
 
 // A remapped viewport depth range reads its scale and offset from the draw's push block (the vertex shader's
@@ -2024,6 +2039,7 @@ bool WriteOnlyPasses() {
 
 void recordDraw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, DrawInputs& inputs, RecordedDraw& record, DrawOutcome& outcome, DrawTimer& timer, double& ownWaitedMs) {
     auto* recorder = record.recorder;
+    recorder->PrepareDrawQueue();
     auto& resources = *record.resources;
     const auto* args = record.indirect != nullptr ? record.indirect->args : nullptr;
     const bool gpuIndirect = args != nullptr && record.indirect->path == IndirectDrawPath::Gpu;
@@ -2053,12 +2069,13 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         recorder->FlushStores();
         outcome.storesFlushed = true;
     }
-    const auto drawBindings = resources.PrepareDrawBindings(*recorder, record.moved);
+    const auto drawBindings = record.prepared ? record.drawBindings : resources.PrepareDrawBindings(*recorder, record.moved);
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();
     struct PassReadsSlotTag {};
-    auto& passReads = ThreadScratch<std::vector<std::pair<std::uint64_t, std::uint64_t>>, PassReadsSlotTag>();
+    struct PreparedPassReadsSlotTag {};
+    auto& passReads = record.prepared ? ThreadScratch<std::vector<std::pair<std::uint64_t, std::uint64_t>>, PreparedPassReadsSlotTag>() : ThreadScratch<std::vector<std::pair<std::uint64_t, std::uint64_t>>, PassReadsSlotTag>();
     passReads.clear();
     if (!addressBased) resources.DeviceReads(passReads);
     const auto deviceReads = passReads.size();
@@ -2103,11 +2120,80 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     }
     const PassAccess passAccess{passReads, passWrites, passImages, passAttachments, unknownMemory, unknownWrites, passWriteOnly};
     const bool fenced = state.depth.has_value() || !record.proxies.empty();
-    const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || gpuIndirect || meshIndirect, fenced, passAccess);
+    using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+    const bool normalize = gpuIndirect && (args->vertexRule == Rule::Constant || args->instanceRule == Rule::Constant);
+    if (!record.prepared && gpuIndirect && recorder->CanBatchIndirect() && !capture && !readsTarget && !meshIndirect && !state.rectList && !unknownMemory && !record.waited && record.proxies.empty() && record.multisampleImages.empty() && inputs.restartTable.empty() && !inputs.vertexInputBehindGpuWrite && record.stencilReplay.empty() && args->RangeBytes() <= Recorder::IndirectBatchBytes) {
+        auto buffered = std::make_shared<BufferedIndirectDraw>();
+        buffered->state = state;
+        buffered->draw = draw;
+        buffered->inputs = inputs;
+        buffered->record = record;
+        buffered->views.assign(record.targetViews.begin(), record.targetViews.end());
+        buffered->arguments = *record.indirect->argumentImport;
+        if (args->countIndirect) buffered->count = *record.indirect->countImport;
+        buffered->indirect = *record.indirect;
+        buffered->indirect.args = &*buffered->draw.indirect;
+        buffered->indirect.argumentImport = &buffered->arguments;
+        buffered->indirect.countImport = args->countIndirect ? &buffered->count : nullptr;
+        buffered->record.indirect = &buffered->indirect;
+        buffered->record.targetViews = buffered->views;
+        buffered->record.moved = {};
+        buffered->record.prepared = true;
+        buffered->record.profilePass = timer.profile;
+        buffered->record.drawBindings = drawBindings;
+        buffered->push = record.pushBytes != nullptr ? *record.pushBytes : AssemblePushConstants(shaders);
+        if (record.pushBytes == nullptr) resources.PatchPushConstants(buffered->push);
+        buffered->record.pushBytes = &buffered->push;
+        buffered->record.pushStages = record.pushBytes != nullptr ? record.pushStages : PushConstantStages(shaders);
+        resolveIndirectArguments(recorder, true, buffered->indirect, buffered->record.argumentBuffer, buffered->record.argumentOffset);
+        Recorder::IndirectPreparation preparation;
+        preparation.bytes = normalize ? args->RangeBytes() : 0;
+        preparation.copy = [context, buffered](VkCommandBuffer commands, VkBuffer arena, VkDeviceSize offset) {
+            CopyBuffer(context, commands, buffered->record.argumentBuffer, buffered->record.argumentOffset, arena, offset, static_cast<std::size_t>(buffered->draw.indirect->RangeBytes()));
+        };
+        preparation.update = [context, args = *args](VkCommandBuffer commands, VkBuffer arena, VkDeviceSize offset) {
+            const auto update = context.Resolved(&DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer");
+            for (std::uint32_t index = 0; index < args.count; ++index) {
+                const auto base = offset + static_cast<VkDeviceSize>(index) * args.stride;
+                if (args.vertexRule == Rule::Constant) update(commands, arena, base + args.VertexDwordOffset(), 4, &args.vertexConstant);
+                if (args.instanceRule == Rule::Constant) update(commands, arena, base + args.InstanceDwordOffset(), 4, &args.instanceConstant);
+            }
+        };
+        preparation.draw = [context, buffered, normalize](VkBuffer arena, VkDeviceSize offset) {
+            if (normalize) {
+                buffered->record.argumentBuffer = arena;
+                buffered->record.argumentOffset = offset;
+            }
+            DrawTimer bufferedTimer(false);
+            DrawOutcome bufferedOutcome;
+            double waited = 0;
+            recordDraw(context, buffered->state, buffered->draw, {}, buffered->inputs, buffered->record, bufferedOutcome, bufferedTimer, waited);
+            return bufferedOutcome.passContinued;
+        };
+        recorder->QueueIndirectDraw(passKey, passAccess, std::move(preparation));
+        recorder->Keep(buffered);
+        timer.phase(PhaseRecord);
+        keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(record.targetSlices), {}, indirectRecordCheck(record.indirect), record.listed, record.completion, outcome);
+        recorder->BoundIndirectDraws();
+        timer.phase(PhaseKeep);
+        return;
+    }
+    const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || (gpuIndirect && !record.prepared) || meshIndirect, fenced, passAccess);
     for (const auto& target : record.multisampleTargets) KeepMultisampleTarget_nid_no_patch(target);
     const bool continued = start.continued;
     outcome.passContinued = continued;
     outcome.passBegun = !continued;
+    if (record.prepared && record.profilePass) {
+        auto& profile = Profile();
+        std::lock_guard lock(profile.mutex);
+        if (continued) {
+            ++profile.passesContinued;
+            ++profile.passTotals[0].passesContinued;
+        } else {
+            ++profile.passesBegun;
+            ++profile.passTotals[0].passesBegun;
+        }
+    }
     const auto commands = start.commands;
     if (!continued) recorder->PrepareSampleSlot();
     if (capture) captureInputs(context, *recorder, commands, resources, drawBindings, record.targets.empty() || record.targets.front() == nullptr ? 0 : record.targets.front()->Descriptor().baseAddress);
@@ -2129,9 +2215,9 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     }
     std::unique_ptr<DeviceBuffer> scratch;
     std::shared_ptr<Buffer> meshArguments;
-    VkBuffer argumentBuffer = VK_NULL_HANDLE;
-    VkDeviceSize argumentOffset = 0;
-    bool rewritten = false;
+    VkBuffer argumentBuffer = record.argumentBuffer;
+    VkDeviceSize argumentOffset = record.argumentOffset;
+    bool rewritten = record.prepared && normalize;
     if (!meshIndirect && !inputs.restartTable.empty()) meshArguments = directMeshArguments(context, draw, inputs.restartTable);
     if (continued) {
         record.pipeline->Continue(commands, state, start.drawState);
@@ -2153,7 +2239,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         if (meshIndirect) {
             meshArguments = recordMeshArguments(context, commands, recorder, true, state, draw, *record.indirect, countBarrier, inputs.restartTable);
             argumentBuffer = meshArguments->Handle();
-        } else if (gpuIndirect) {
+        } else if (gpuIndirect && !record.prepared) {
             rewritten = recordIndirectArguments(context, commands, recorder, true, *record.indirect, scratch, argumentBuffer, argumentOffset, countBarrier);
         }
         // Earlier recorded work (dispatches, the previous draw) wrote the images in the general
@@ -2202,6 +2288,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     }
     recorder->LeaveRenderPassOpen(passKey, drawTiming, fenced, passAccess, std::move(storeProxies));
     timer.phase(PhaseRecord);
+    if (record.prepared) return;
     keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(record.targetSlices), std::move(scratch), std::move(checkRecords), record.listed, record.completion, outcome);
     timer.phase(PhaseKeep);
     if (record.waited) {
@@ -2298,7 +2385,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         recipeOut = nullptr;
     }
     if (state.quadList) recipeOut = nullptr;
-    if (context.recorder != nullptr) context.recorder->BoundKeptBytes();
+    if (context.recorder != nullptr) {
+        context.recorder->PrepareDrawQueue();
+        context.recorder->BoundKeptBytes();
+    }
     PerformanceTimer timing("Graphics.Draw");
     // APS5_PROFILE_DRAW prints the time of each phase of the draw (microseconds) and the [draws] totals.
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -2522,6 +2612,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             indirect.path = decide(args->countAddress, 4, indirect.countImport);
         }
         if (indirect.path != IndirectDrawPath::Gpu) {
+            if (recorder != nullptr) recorder->FlushIndirectDraws();
             // The reads wait for the producing batch through the flush hook, as the driver's
             // resolve did for every indirect dispatch before its GPU path.
             const auto readStart = std::chrono::steady_clock::now();

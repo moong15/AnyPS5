@@ -2537,6 +2537,11 @@ void VulkanDevice::StoreIdleResults(bool reapFirst) {
     SubmitRecorded(reapFirst);
 }
 
+void VulkanDevice::FlushIndirectDraws() {
+    GuestMemory::AssertGpuLockHeld("VulkanDevice::FlushIndirectDraws");
+    if (state->recorder) state->recorder->FlushIndirectDraws();
+}
+
 void VulkanDevice::SubmitRecorded(bool reapFirst) {
     if (!state->recorder) return;
     // Finished batches are retired first (a non-blocking fence status check on the front of the
