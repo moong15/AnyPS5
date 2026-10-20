@@ -6,6 +6,7 @@
 #include "prx/libScePad/include/KeyboardMouse.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include <chrono>
+#include "prx/libSceVideoOut/include/Telemetry.hpp"
 
 class DisplayWindow;
 
@@ -14,15 +15,15 @@ public:
     PadInput();
     ~PadInput();
     void HandleEvent(const SDL_Event& event, DisplayWindow& window);
-    void Update();
+    void Update(const DisplayWindow& window);
     bool MouseModeEnabled() const { return keyboardMouse.MouseMode(); }
     // Diagnostic aid: holds a pad button with no physical controller behind it, so an
     // unattended run can get past a screen that waits for one. Cleared by CloseScripted.
-    void SetScriptedButton(Pad::PadButton button, bool down);
+    void SetScriptedButton(Pad::PadButton button, bool down, std::uint64_t frame);
 
 private:
     explicit PadInput(Pad::InputConfiguration configuration);
-    void publish();
+    void publish(std::uint64_t frame);
     void setMouseMode(bool enabled);
     void openFirstAvailableController();
     void openController(int deviceIndex);
@@ -38,6 +39,7 @@ private:
     std::uint32_t outputSequence = 0;
     PadOutputState outputState{};
     bool outputPending = false;
+    VideoOutTelemetry::PadChangeFilter telemetryFilter;
     std::chrono::steady_clock::time_point nextRumbleRefresh{};
 };
 

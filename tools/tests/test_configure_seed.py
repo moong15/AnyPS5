@@ -89,6 +89,38 @@ class ConfigureSeedTests(unittest.TestCase):
         cache.write_text("//Path to a program.\nCMAKE_AR:FILEPATH=/usr/bin/ar\n", encoding="utf-8")
         self.assertEqual(self.seed(cache, "empty.cmake").read_text(encoding="utf-8"), "")
 
+    def test_seed_filters_leave_excluded_checks_to_the_new_configure(self):
+        seed = self.root / "filtered.cmake"
+        result = subprocess.run([sys.executable, str(TOOL), str(self.root / "fresh" / "CMakeCache.txt"), str(seed),
+                                 "--include", "MINI_HAVE_*", "--include", "MINI_COMPILES", "--exclude", "*MISSING*"],
+                                check=True, capture_output=True, text=True)
+        self.assertIn("3 check results", result.stdout)
+        seeded = seed.read_text(encoding="utf-8")
+        self.assertIn("MINI_HAVE_STDIO_H", seeded)
+        self.assertIn("MINI_HAVE_PRINTF", seeded)
+        self.assertIn("MINI_COMPILES", seeded)
+        self.assertNotIn("MINI_HAVE_MISSING_H", seeded)
+        self.assertNotIn("MINI_FAILS", seeded)
+        output = self.configure("filter-seeded", "-C", str(seed))
+        self.assertIn("Looking for mini_missing_header.h", output)
+        self.assertNotIn("Looking for stdio.h", output)
+        self.assertNotIn("Performing Test MINI_COMPILES", output)
+        self.assertEqual(configure_seed.checks(self.root / "filter-seeded" / "CMakeCache.txt"),
+                         configure_seed.checks(self.root / "fresh" / "CMakeCache.txt"))
+        subprocess.run([sys.executable, str(TOOL), str(self.root / "fresh" / "CMakeCache.txt"), str(seed),
+                        "--include", "no_match_*"], check=True, capture_output=True)
+        self.assertEqual(seed.read_text(encoding="utf-8"), "")
+
+
+
+class ChecksParsingTests(unittest.TestCase):
+    def test_checks_reads_cache_with_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "CMakeCache.txt"
+            cache.write_bytes(b"\xef\xbb\xbf//Test FIRST_CHECK\nFIRST_CHECK:INTERNAL=1\n")
+            found = configure_seed.checks(cache)
+            self.assertEqual(found, {"FIRST_CHECK": ("1", "Test FIRST_CHECK")})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,8 +15,6 @@ namespace {
 
 constexpr int PAD_ERROR_DEVICE_NOT_CONNECTED = static_cast<int>(0x80920007);
 constexpr int PAD_ERROR_DEVICE_NO_HANDLE = static_cast<int>(0x80920008);
-constexpr int PAD_UNKNOWN_N3KSX62FGNO_BEFORE_INIT = static_cast<int>(0x80920005);
-constexpr int PAD_UNKNOWN_N3KSX62FGNO_AFTER_INIT = static_cast<int>(0x809200ff);
 
 bool g_opened = false;
 std::atomic_bool g_initialized{false};
@@ -317,8 +315,7 @@ int APS5_VABI scePadSetAngularVelocityBiasCorrectionState(int handle, bool enabl
 
 APS5_EXPORT("n3kSX62fgNo", scePadUnknown_n3kSX62fgNo);
 int APS5_VABI scePadUnknown_n3kSX62fgNo() {
-    if (g_opened) NotImplemented_nid_no_patch(__func__);
-    return g_initialized.load(std::memory_order_acquire) ? PAD_UNKNOWN_N3KSX62FGNO_AFTER_INIT : PAD_UNKNOWN_N3KSX62FGNO_BEFORE_INIT;
+    return g_initialized.load(std::memory_order_acquire) ? PAD_OK : PAD_ERROR_NOT_INITIALIZED;
 }
 
 int APS5_VABI scePadVrControllerGetTriggerEffectStates(void) {
@@ -326,10 +323,12 @@ int APS5_VABI scePadVrControllerGetTriggerEffectStates(void) {
     return 0;
 }
 
-APS5_EXPORT("zBsgF0q8DIM", scePadUnknown_zBsgF0q8DIM);
-int APS5_VABI scePadUnknown_zBsgF0q8DIM() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI scePadGetAccessibilityControllerState(int handle, std::uint32_t* state) {
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (state == nullptr) return PAD_ERROR_INVALID_ARG;
+    if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+    *state = 0;
+    return PAD_OK;
 }
 
 int APS5_VABI scePadSetTriggerEffectExt(void) {

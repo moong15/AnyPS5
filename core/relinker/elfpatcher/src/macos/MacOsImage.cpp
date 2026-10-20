@@ -33,6 +33,7 @@ constexpr std::uint32_t MhDylib = 6;
 constexpr std::uint32_t MhNoUndefs = 0x1;
 constexpr std::uint32_t MhDyldLink = 0x4;
 constexpr std::uint32_t MhTwoLevel = 0x80;
+constexpr std::uint32_t MhWeakDefines = 0x8000;
 
 constexpr std::uint32_t LcSegment64 = 0x19;
 constexpr std::uint32_t LcSymtab = 0x2;
@@ -311,7 +312,7 @@ public:
 private:
     struct Node {
         std::vector<std::pair<std::string, std::unique_ptr<Node>>> Children;
-        std::optional<std::uint32_t> Rva;
+        std::optional<MacOsExport> Export;
         std::uint64_t Offset = 0;
     };
 
@@ -343,8 +344,8 @@ private:
                 rest = {};
             }
         }
-        if (node->Rva) throw Domain::RelinkerException("Duplicate Mach-O export: " + entry.Symbol);
-        node->Rva = entry.Rva;
+        if (node->Export) throw Domain::RelinkerException("Duplicate Mach-O export: " + entry.Symbol);
+        node->Export = entry;
     }
 
     static void Collect(Node* node, std::vector<Node*>& order) {
@@ -354,9 +355,9 @@ private:
 
     static std::vector<std::uint8_t> TerminalBytes(const Node& node) {
         std::vector<std::uint8_t> bytes;
-        if (!node.Rva) return bytes;
-        AppendUleb(bytes, 0);
-        AppendUleb(bytes, *node.Rva);
+        if (!node.Export) return bytes;
+        AppendUleb(bytes, node.Export->Flags);
+        AppendUleb(bytes, node.Export->Value);
         return bytes;
     }
 
@@ -481,7 +482,7 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
         Io::WriteU64(meta, at, imageBase + descriptor);
         Io::WriteU64(meta, at + 8, variable.Offset);
         input.Rebases.push_back(metaRva + static_cast<std::uint32_t>(at));
-        input.Exports.push_back({variable.Symbol, metaRva + static_cast<std::uint32_t>(at)});
+        input.Exports.push_back({variable.Symbol, metaRva + static_cast<std::uint32_t>(at), variable.Flags});
     }
     const auto codeRva = static_cast<std::uint32_t>(AlignUp(metaRva + metaEnd, PageSize));
     Windows::WindowsStubEmitter code(codeRva);
@@ -860,7 +861,8 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     Io::WriteU32(file, 12, input.Executable ? MhExecute : MhDylib);
     Io::WriteU32(file, 16, commandCount);
     Io::WriteU32(file, 20, static_cast<std::uint32_t>(commands.size()));
-    Io::WriteU32(file, 24, MhNoUndefs | MhDyldLink | MhTwoLevel);
+    const bool weakDefinitions = std::any_of(input.Exports.begin(), input.Exports.end(), [](const auto& entry) { return (entry.Flags & ExportWeakDefinition) != 0; });
+    Io::WriteU32(file, 24, MhNoUndefs | MhDyldLink | MhTwoLevel | (weakDefinitions ? MhWeakDefines : 0));
     std::copy(commands.begin(), commands.end(), file.begin() + HeaderSize);
     return file;
 }

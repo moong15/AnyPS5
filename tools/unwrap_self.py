@@ -43,6 +43,7 @@ RECORD_SIZE = 0x20
 RECORD_HAS_SEGMENT = 0x800
 RECORD_SEGMENT_SHIFT = 20
 FIRST_REGION = 0x400
+MAX_EMPTY_LOAD_PADDING = 64 * 1024 * 1024
 PT_LOAD = 1
 PT_NOTE = 4
 ENTROPY_LIMIT = 7.5
@@ -264,7 +265,8 @@ def unwrap(path, output, verbose=False):
         if header["type"] == PT_LOAD or header["size"] == 0:
             continue
         if region_for(header["source"], header["size"]) is None:
-            regions.append({"old": header["source"], "size": header["size"], "vaddr": 0, "align": 1})
+            regions.append({"old": header["source"], "size": header["size"],
+                            "vaddr": header["vaddr"], "align": header["align"]})
 
     regions.sort(key=lambda region: region["old"])
     program_offset = struct.unpack_from("<Q", elf_header, 0x20)[0]
@@ -277,13 +279,21 @@ def unwrap(path, output, verbose=False):
         region["new"] = placed
         cursor = placed + region["size"]
 
+    empty_end = cursor
+    for header in headers:
+        if header["type"] == PT_LOAD and header["size"] == 0:
+            empty_end = max(empty_end, header["vaddr"] % max(header["align"], 1))
+    if empty_end - cursor > MAX_EMPTY_LOAD_PADDING:
+        raise Refused("empty load alignment requires more than %d bytes of output padding" % MAX_EMPTY_LOAD_PADDING)
+    cursor = empty_end
+
     result = bytearray(cursor)
     for region in regions:
         result[region["new"]:region["new"] + region["size"]] = data[region["old"]:region["old"] + region["size"]]
 
     for header in headers:
         if header["size"] == 0 and (header["type"] == PT_LOAD or header["source"] == 0):
-            header["new"] = 0
+            header["new"] = header["vaddr"] % max(header["align"], 1) if header["type"] == PT_LOAD else 0
             continue
         region = region_for(header["source"], header["size"])
         header["new"] = header["source"] if region is None else region["new"] + (header["source"] - region["old"])
@@ -334,4 +344,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     sys.exit(main())

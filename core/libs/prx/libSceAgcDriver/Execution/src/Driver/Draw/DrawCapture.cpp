@@ -21,14 +21,8 @@ namespace AgcDriver::DriverDetail {
 
 namespace {
 
-// Aliased rather than named directly: ShaderCacheVersion.cmake rejects an unreviewed ShaderRecompiler::
-// call or using-declaration in a guarded file, and adding a name to shaderCacheReviewedNames would mean
-// editing core/shader/recompiler/CMakeLists.txt, which *is* a hashed cache-key source.
 using SrtRole = ShaderRecompiler::DescriptorRole;
 
-// The V# buffer-descriptor decode ShaderResources::addGuestBuffer applies, written out here rather than
-// called, for the same reason. base48 = fields[0] | fields[1]<<32 (48 bits), stride = fields[1][29:16],
-// numRecords = fields[2], size = stride ? stride * numRecords : numRecords.
 struct DecodedBuffer {
     std::uint64_t base = 0;
     std::uint32_t stride = 0;
@@ -63,13 +57,8 @@ const char* roleLabel(SrtRole role) {
 
 constexpr std::size_t ProbeBytes = 64;
 
-// Corrected missing-base candidate, kept as plain arithmetic: waits live just above 2^36
-// (0x1022...), descriptor bases just below 2^32 (0x20...).
 constexpr std::uint64_t RebaseCandidate = 0x1000000000ull;
 
-// How much of [base, base+size) is continuously host-readable. Whole-range probes make
-// accessibility monotonic in the length; probing only endpoints can jump over unmapped holes.
-// This runs only on the already-failing diagnostic path.
 std::uint64_t readablePrefix(std::uint64_t base, std::uint64_t size) {
     constexpr std::uint64_t SpaceEnd = 0x1000000000000ull;
     if (size == 0 || base >= SpaceEnd) return 0;
@@ -89,21 +78,11 @@ std::uint64_t readablePrefix(std::uint64_t base, std::uint64_t size) {
     return good;
 }
 
-// Non-throwing register read. readRegister throws "required shader register has not been written" when
-// the offset is absent, which both truncated this dump at the first register the guest never wrote and
-// injected a spurious "[agc] driver failure, continuing" into the run. The shader path itself reads
-// these non-throwingly (DrawDecode.cpp: ReadGraphicsRegister / readUserData both return 0), so an
-// absent register is simply not written.
 std::uint32_t peekRegister(const Registers& registers, std::uint32_t offset) {
     const auto found = registers.find(offset);
     return found == registers.end() ? 0u : found->second;
 }
 
-// Whether [base, base+ProbeBytes) is mapped and readable, and if so what it contains. Written to the
-// dump so a descriptor's base address can be judged against guest memory instead of inferred from the
-// descriptor alone: a base holding sane descriptors means the decode is wrong, a base holding the same
-// repeating pattern means the user-data SGPRs are wrong, and an unreadable base means the address is
-// fabricated. An unreadable base alone does not say whether the high bits were lost (see below).
 void probeBase(std::FILE* file, std::uint64_t base) {
     if (base == 0 || base > 0xFFFFFFFFFFFFull || base + ProbeBytes > 0x1000000000000ull) {
         std::fprintf(file, "  base 0x%llx: out of the guest address space, not probed\n", static_cast<unsigned long long>(base));
@@ -126,17 +105,6 @@ void probeBase(std::FILE* file, std::uint64_t base) {
     }
 }
 
-// Reports a guest buffer descriptor that decodes past the 4 GiB range limit, which is what
-// ShaderResources::addGuestBuffer refuses with "shader buffer exceeds descriptor range limit". That
-// refusal is thrown from the Graphics layer at bind time, after DrawCapture's own failure dumps, so the
-// draw that trips it never reached a .req and could not be replayed. This fires from the Execution layer
-// instead, where the register bank and guest memory are both reachable.
-//
-// It writes the three things that separate the remaining explanations: the raw shader registers over the
-// whole fragment window, the user data as SGPR numbers (what the recompiler was handed), and the guest
-// memory at each descriptor base. A descriptor that appears verbatim in both a binding and the user data
-// proves nothing on its own, because DescriptorBindingBuilder copies the user data into the shader data
-// block by construction; only the memory behind the base address discriminates.
 bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queue, const Submission& submission, const ShaderRecompiler::RecompileResult& result) {
     static std::atomic<std::uint64_t> reports{0};
     constexpr std::uint64_t MaxStorageBufferRange = 0xFFFFFFFFull;
@@ -171,8 +139,6 @@ bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queu
         std::fprintf(stderr, "[rejected-desc] cannot write %s\n", name);
         return true;
     }
-    // Unbuffered: the process is about to abort on this very descriptor, and a buffered stdio stream
-    // loses everything it has not yet flushed. A first attempt produced a zero-byte file this way.
     std::setvbuf(file, nullptr, _IONBF, 0);
     std::fprintf(file, "# oversized guest buffer descriptor; shader 0x%llx stage %u\n",
         static_cast<unsigned long long>(program.binary.codeAddress), static_cast<unsigned>(program.binary.stage));
@@ -182,8 +148,6 @@ bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queu
         static_cast<unsigned>(program.snapshot->type), program.codeOffset, program.binary.code.size(), program.binary.header.size());
     std::fprintf(file, "# submission=%llu queue=0x%x commandWords=%zu\n",
         static_cast<unsigned long long>(submission.serial), submission.queue, submission.commands.size());
-    // Registered snapshots retain code from registration. Compare the entire submitted
-    // program at the failure, rather than inferring freshness from the 64-byte band probe.
     const auto codeBytes = std::as_bytes(std::span(program.binary.code));
     GuestMemory::FlushGpuWrites(program.binary.codeAddress, codeBytes.size());
     const auto codeComparison = GuestMemory::CompareMapped(program.binary.codeAddress, codeBytes);
@@ -202,8 +166,6 @@ bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queu
         }
     }
 
-    // User data first: it is the data the descriptor was actually decoded from, so it must be on disk
-    // before anything that could fault.
     std::fprintf(file, "\n# user data as SGPR numbers: what the recompiler was handed\n");
     for (std::size_t i = 0; i < program.userData.size(); ++i) {
         std::fprintf(file, "sgpr 0x%03x = %08x\n", program.userDataBase + static_cast<std::uint32_t>(i), program.userData[i]);
@@ -247,19 +209,11 @@ bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queu
         std::fprintf(file, "binding[%zu] element %zu: stride=%u numRecords=%u bytes=%llu\n", index, element, decoded.stride,
             decoded.numRecords, static_cast<unsigned long long>(decoded.bytes));
         probeBase(file, decoded.base);
-        // Corrected missing-base candidate: waits live just above 2^36 (0x1022...), descriptor bases
-        // just below 2^32 (0x20...), and 0x2036f800 + 0x1000000000 = 0x102036f800 lands in the wait
-        // band. (The earlier note added 0x10000000000, 2^40, which overshoots to 0x1002036f800.)
-        // Mapped with sane bytes here means the descriptor's high address bits were lost.
         std::fprintf(file, "  rebased +0x1000000000 (2^36 band test):\n");
         probeBase(file, decoded.base + RebaseCandidate);
         std::fprintf(file, "  readable prefix of [base, base+bytes): 0x%llx\n",
             static_cast<unsigned long long>(readablePrefix(decoded.base, decoded.bytes)));
     }
-    // Band control: the shader's own code address must be readable, and it lives in the same
-    // 0x20... band as the descriptor bases. If it ever probes unmapped, the run's low band is
-    // gone (or the probe itself is broken), and no "unmapped base" verdict in this dump means
-    // anything.
     std::fprintf(file, "band control (shader code, same 0x20... band):\n");
     probeBase(file, program.binary.codeAddress);
     for (std::size_t b = 0; b < result.bindings.size(); ++b) {
@@ -314,8 +268,7 @@ bool dumpOversizedDescriptors(const DrawProgram& program, const QueueState& queu
 
 }
 
-
-std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDrawStage(std::size_t i, std::uint32_t pushOffset, const QueueState& queue, const Submission& submission, const std::vector<DrawProgram>& programs, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, std::vector<ShaderRecompiler::MemoryRegion>& memory, const std::vector<ShaderRecompiler::LinkedProgram>& linked, const Pm4::DrawParameters& drawParameters, const std::shared_ptr<VulkanDevice>& localDevice, ShaderMemory& shaderMemory, std::vector<StageCapture>& stageCaptures, std::vector<bool>& recompiled, bool drawHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, const std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool profile, std::uint64_t dumpTarget, std::uint64_t dumpSlot1, std::uint64_t& captures, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs, std::string& rejected) {
+std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDrawStage(std::size_t i, std::uint32_t pushOffset, const QueueState& queue, const Submission& submission, const std::vector<DrawProgram>& programs, const Graphics::State& graphics, const ShaderRecompiler::ShaderPixelStageInfo& pixel, const std::vector<std::optional<ShaderRecompiler::ShaderVertexStageInfo>>& vertexInfos, std::vector<ShaderRecompiler::MemoryRegion>& memory, const std::vector<ShaderRecompiler::LinkedProgram>& linked, const Pm4::DrawParameters& drawParameters, const std::shared_ptr<VulkanDevice>& localDevice, ShaderMemory& shaderMemory, std::vector<StageCapture>& stageCaptures, std::vector<bool>& recompiled, bool drawHit, const std::vector<std::shared_ptr<DispatchVariant>>& matched, const std::vector<std::vector<ShaderRecompiler::MemoryRegion>>& matchedRegions, bool profile, std::uint64_t dumpTarget, std::uint64_t dumpSlot1, std::uint64_t& captures, DrawPhaseTiming& phaseTiming, std::array<double, DrawDriverPhaseCount>& phaseMs, std::string& rejected, const std::optional<ShaderRecompiler::MeshBarycentricLayout>& meshBarycentrics) {
     PerformanceTimer timing("Shader.DrawStage");
     using Stage = ShaderRecompiler::ShaderStage;
     phaseTiming.Phase(DrawRowVectors);
@@ -326,7 +279,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? std::optional(pixel) : std::nullopt, vertexInfos[i], memory, RegisteredFloatMode(*program.snapshot)},
         localDevice->Target(),
         {0, 0, pushOffset, (graphics.stages.mesh ? ShaderRecompiler::MeshDrawPushOffsetBytes : graphics.stages.tessellation && pushOffset < Graphics::PipelinePushSlotBytes ? ShaderRecompiler::TessellationLevelPushOffsetBytes : graphics.depthRemap.mode != 0u ? ShaderRecompiler::DepthRemapPushOffsetBytes : Graphics::PipelinePushSlotBytes) - pushOffset % Graphics::PipelinePushSlotBytes},
-        ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
+        ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}, program.binary.stage == Stage::Mesh ? meshBarycentrics : std::nullopt}
     };
     const auto waitedBefore = traceCapSync() || profile ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
     auto invocation = InvocationFor(*program.snapshot, program.codeOffset, request);

@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/RemoveTree.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "SceTypes.hpp"
 #include <array>
@@ -478,6 +479,12 @@ int main() {
     Require(sceKernelClose(made) == 0);
     Require(openat_nid_postfix(base, "made.bin", SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL, 0644) == -1 && Error() == 17);
     Require(openat_nid_postfix(base, "missing.bin", SCE_KERNEL_O_RDONLY) == -1 && Error() == 2);
+    Require(openat_nid_postfix(base, "file.txt", SCE_KERNEL_O_ACCMODE) == -1 && Error() == 22);
+    Require(openat_nid_postfix(base, "absent.bin", SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL | SCE_KERNEL_O_DIRECTORY, 0644) == -1 && Error() == 22);
+    Require(openat_nid_postfix(base, nullptr, SCE_KERNEL_O_ACCMODE) == -1 && Error() == 22);
+    Require(openat_nid_postfix(base, "", SCE_KERNEL_O_ACCMODE) == -1 && Error() == 22);
+    Require(openat_nid_postfix(9999, "", SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL | SCE_KERNEL_O_DIRECTORY, 0644) == -1 && Error() == 22);
+    Require(openat_nid_postfix(-100, nullptr, SCE_KERNEL_O_ACCMODE) == -1 && Error() == 22);
     const auto guestFile = "/" + root.filename().string() + "/file.txt";
     const int absolute = openat_nid_postfix(-1, guestFile.c_str(), SCE_KERNEL_O_RDONLY);
     Require(absolute >= 0 && sceKernelClose(absolute) == 0);
@@ -658,16 +665,6 @@ int main() {
         Require(!std::filesystem::exists(std::filesystem::symlink_status(throughLink)));
     }
 #endif
-#ifdef _WIN32
-    // std::filesystem::remove_all loops forever when the tree contains a
-    // dangling symbolic link: fs::remove reports such a link as missing and
-    // clears the error, so recursive_directory_iterator::__erase keeps
-    // retrying it. The fixture always contains dangling links here, so
-    // remove it through the shell instead.
-    const auto cleanup = L"cmd /c rd /s /q \"" + root.wstring() + L"\"";
-    Require(_wsystem(cleanup.c_str()) == 0);
-#else
-    std::filesystem::remove_all(root);
-#endif
+    RemoveTree(root);
     return 0;
 }

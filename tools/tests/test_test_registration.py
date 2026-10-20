@@ -12,6 +12,43 @@ import check_test_registration
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_literal_prefixes_cannot_expose_commands_inside_arguments(self):
+        prefixes = (r"\#", r"\(", '"prefix" ', '"" ', '"line\nprefix" ', "[[prefix]] ",
+                    "[=[prefix]=] ", "[===[line\nprefix]===] ")
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                content = (f"set(example\n{prefix}add_test(ghost /build/tests/missing_tests)\n)\n"
+                           'add_test("real" "/build/tests/real_tests")\n')
+                self.assertEqual(self.registered(content), {"real_tests"})
+
+    def test_commands_inside_literals_do_not_register_tests(self):
+        for opening, closing in (('"', '"'), ("[[", "]]"), ("[=[", "]=]"), ("[===[", "]===]")):
+            with self.subTest(opening=opening):
+                content = (f"set(example {opening}\nadd_test(ghost /build/tests/missing_tests)\n{closing})\n"
+                           'add_test("real" "/build/tests/real_tests")\n')
+                self.assertEqual(self.registered(content), {"real_tests"})
+
+    def test_properties_inside_literals_do_not_disable_a_real_test(self):
+        for opening, closing in (('"', '"'), ("[[", "]]"), ("[=[", "]=]"), ("[===[", "]===]")):
+            with self.subTest(opening=opening):
+                content = ('add_test("real" "/build/tests/real_tests")\n'
+                           f"set(example {opening}\nset_tests_properties(real PROPERTIES DISABLED TRUE)\n{closing})\n")
+                self.assertEqual(self.registered(content), {"real_tests"})
+
+    def test_subdirectories_inside_literals_are_not_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            ignored = build / "ignored"
+            ignored.mkdir()
+            (ignored / "CTestTestfile.cmake").write_text(
+                'add_test("ghost" "/build/tests/missing_tests")\n', encoding="utf-8")
+            for opening, closing in (('"', '"'), ("[[", "]]"), ("[=[", "]=]"), ("[===[", "]===]")):
+                with self.subTest(opening=opening):
+                    content = (f"set(example {opening}\nsubdirs(ignored)\n{closing})\n"
+                               'add_test("real" "/build/tests/real_tests")\n')
+                    (build / "CTestTestfile.cmake").write_text(content, encoding="utf-8")
+                    self.assertEqual(check_test_registration.registered(build), {"real_tests"})
+
     def test_disabled_property_is_local_to_each_configuration(self):
         for configurations in (("OFF", "TRUE"), ("TRUE", "OFF"), ("TRUE", "TRUE")):
             with self.subTest(configurations=configurations):

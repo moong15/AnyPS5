@@ -67,6 +67,10 @@ void Unwatch(std::uint64_t address, std::size_t bytes);
 void Rewatch(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
 bool ImportWatched(std::uint64_t address, std::size_t bytes, const std::function<bool()>& import, bool staysWatched = true);
 void SetUnwatchHook(void (*hook)(std::uint64_t address, std::size_t bytes));
+#ifdef _WIN32
+using FreshCollectHook = bool (*)(std::uintptr_t address, std::size_t bytes, void (*written)(void*, std::uintptr_t, std::uintptr_t), void* context);
+void SetFreshCollectHook(FreshCollectHook hook);
+#endif
 bool Watched(std::uint64_t address, std::size_t bytes);
 // The dirty summary: a collect walks only the blocks of its range that this thread's current
 // ordering point has not already walked clean, and a range the summary covers whole is not walked at

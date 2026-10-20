@@ -14,6 +14,9 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 struct ResourceLimit {
     std::int64_t rlim_cur;
@@ -58,12 +61,9 @@ static ResourceLimit GuestLimit(int resource) {
     return limit;
 }
 
-static void CheckOpenFileLimit() {
+#if defined(_WIN32) || defined(__APPLE__)
+static void RequireDescriptorsEndAt(const ResourceLimit& limit) {
     constexpr int GUEST_EMFILE = 24;
-    const ResourceLimit limit = GuestLimit(GUEST_RLIMIT_NOFILE);
-    Require(limit.rlim_cur == limit.rlim_max);
-#ifdef _WIN32
-    Require(limit.rlim_cur == 8192);
     std::vector<int> descriptors;
     int pair[2]{-1, -1};
     *__error_nid_postfix() = 0;
@@ -76,6 +76,11 @@ static void CheckOpenFileLimit() {
     Require(*__error_nid_postfix() == GUEST_EMFILE);
     Require(descriptors.size() + 64 >= static_cast<std::size_t>(limit.rlim_cur));
     for (const int descriptor : descriptors) Require(close_nid_postfix(descriptor) == 0);
+}
+#endif
+
+#ifdef _WIN32
+static void RequireStreamsOpen() {
     const auto path = (std::filesystem::temp_directory_path() / ("aps5-open-streams-" + std::to_string(GetCurrentProcessId()))).string();
     std::vector<void*> streams;
     for (int index = 0; index < 1024; ++index) {
@@ -85,11 +90,28 @@ static void CheckOpenFileLimit() {
     }
     for (void* stream : streams) Require(fclose_nid_postfix(stream) == 0);
     std::filesystem::remove(path);
+}
+#endif
+
+static void CheckOpenFileLimit() {
+    const ResourceLimit limit = GuestLimit(GUEST_RLIMIT_NOFILE);
+    Require(limit.rlim_cur == limit.rlim_max);
+#ifdef _WIN32
+    Require(limit.rlim_cur == 8192);
+    RequireDescriptorsEndAt(limit);
+    RequireStreamsOpen();
 #else
     rlimit host{};
     Require(getrlimit(RLIMIT_NOFILE, &host) == 0);
     Require(host.rlim_cur == host.rlim_max);
     Require(host.rlim_cur == RLIM_INFINITY ? limit.rlim_cur == GUEST_RLIM_INFINITY : limit.rlim_cur == static_cast<std::int64_t>(host.rlim_cur));
+#endif
+#ifdef __APPLE__
+    int perProcess = 0;
+    std::size_t size = sizeof(perProcess);
+    Require(sysctlbyname("kern.maxfilesperproc", &perProcess, &size, nullptr, 0) == 0);
+    Require(perProcess > 0 && limit.rlim_cur <= perProcess);
+    RequireDescriptorsEndAt(limit);
 #endif
     Require(setrlimit_nid_postfix(GUEST_RLIMIT_NOFILE, &limit) == 0);
     const ResourceLimit lowered{limit.rlim_max > 1 ? limit.rlim_max - 1 : 1, limit.rlim_max};
@@ -143,17 +165,6 @@ static void LoweredHostLimitIsReported() {
 }
 #endif
 
-static void RequireUnsupported(int resource) {
-    ResourceLimit limit{};
-    bool rejected = false;
-    try {
-        getrlimit_nid_postfix(resource, &limit);
-    } catch (const std::runtime_error&) {
-        rejected = true;
-    }
-    Require(rejected);
-}
-
 int main() {
 #ifdef _WIN32
     GuestLimit(GUEST_RLIMIT_DATA);
@@ -165,6 +176,8 @@ int main() {
              GUEST_RLIMIT_CPU,
              GUEST_RLIMIT_FSIZE,
              GUEST_RLIMIT_CORE,
+             GUEST_RLIMIT_RSS,
+             GUEST_RLIMIT_MEMLOCK,
              GUEST_RLIMIT_SBSIZE,
              GUEST_RLIMIT_AS,
              GUEST_RLIMIT_NPTS,
@@ -183,14 +196,12 @@ int main() {
     RequireError(GUEST_RLIM_NLIMITS, nullptr, GUEST_EINVAL);
     RequireError(-1, nullptr, GUEST_EINVAL);
     RequireError(GUEST_RLIMIT_DATA, nullptr, GUEST_EFAULT);
-    for (int resource : {
-             GUEST_RLIMIT_STACK,
-             GUEST_RLIMIT_RSS,
-             GUEST_RLIMIT_MEMLOCK,
-             GUEST_RLIMIT_NPROC,
-         }) {
-        RequireUnsupported(resource);
-    }
+    const ResourceLimit stack = GuestLimit(GUEST_RLIMIT_STACK);
+    Require(stack.rlim_cur == 0x200000 && stack.rlim_max == 0x200000);
+    RequireError(GUEST_RLIMIT_STACK, nullptr, GUEST_EFAULT);
+    const ResourceLimit processes = GuestLimit(GUEST_RLIMIT_NPROC);
+    Require(processes.rlim_cur == 1604 && processes.rlim_max == 1604);
+    RequireError(GUEST_RLIMIT_NPROC, nullptr, GUEST_EFAULT);
     const ResourceLimit nofile = GuestLimit(GUEST_RLIMIT_NOFILE);
     const int tableSize = getdtablesize_nid_postfix();
     std::int64_t expectedTableSize = nofile.rlim_cur;

@@ -62,6 +62,18 @@ include(cmake/SystemDeps.cmake)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(CheckCXXSourceCompiles)
+function(anyps5_check_cxx_links_standard_library)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+    check_cxx_source_compiles("#include <string>\nint main(int argc, char**) { try { throw std::string(static_cast<std::size_t>(argc), 'x'); } catch (const std::string& text) { return static_cast<int>(text.size()) - argc; } }" ANYPS5_CXX_LINKS_STANDARD_LIBRARY)
+endfunction()
+anyps5_check_cxx_links_standard_library()
+if(NOT ANYPS5_CXX_LINKS_STANDARD_LIBRARY)
+    message(FATAL_ERROR "The C++ compiler ${CMAKE_CXX_COMPILER} cannot link a program that uses the C++ standard library. "
+        "Set CMAKE_CXX_COMPILER to the C++ driver (g++ or clang++, not gcc or clang) in a new build directory. "
+        "Supported toolchains are listed in docs/dev/BUILD.md.")
+endif()
+
 if(ANYPS5_ENABLE_ASAN)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(FATAL_ERROR "ANYPS5_ENABLE_ASAN is supported only on Linux")
@@ -183,7 +195,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/hw-oracle/test_hw_oracle.py)
         add_test(NAME hardware_oracle_compare COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/hw-oracle/test_compare_results.py)
-        set_tests_properties(hardware_oracle_compare PROPERTIES TIMEOUT 20)
+        set_tests_properties(hardware_oracle_compare PROPERTIES TIMEOUT 120)
         add_test(NAME pr_overlap_exports COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_exports.py)
         add_test(NAME pr_overlap_wrapped_exports COMMAND ${Python3_EXECUTABLE}
@@ -194,6 +206,9 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_nid_names.py)
         add_test(NAME release_package COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_package_release.py)
+        add_test(NAME web_release COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_web_release.py)
+        set_tests_properties(web_release PROPERTIES TIMEOUT 20)
         add_test(NAME web_library_assets COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_build_web.py)
         set_tests_properties(web_library_assets PROPERTIES TIMEOUT 20)

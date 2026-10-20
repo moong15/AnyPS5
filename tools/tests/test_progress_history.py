@@ -27,6 +27,61 @@ def commit(root, day, message, body):
 
 
 class ProgressHistoryTests(unittest.TestCase):
+    def test_cache_reuses_immutable_commits_and_invalidates_changed_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
+            commit(root, "2026-01-01", "first", "int APS5_VABI A() { return 0; }\n")
+            cache = root / "cache" / "history.json"
+            isa = root / "isa.txt"
+            isa.write_bytes(progress.ISA.read_bytes())
+            with patch.multiple(progress, ROOT=root, PRX=root / "core/libs/prx", OPCODES=root / OPCODES, ISA=isa):
+                with patch.object(progress_history, "measure", wraps=progress_history.measure) as measure:
+                    first = progress_history.collect("HEAD", cache)
+                    self.assertEqual(measure.call_count, 1)
+                    before = cache.read_bytes()
+                    measure.reset_mock()
+                    self.assertEqual(progress_history.collect("HEAD", cache), first)
+                    measure.assert_not_called()
+                    self.assertEqual(cache.read_bytes(), before)
+                    commit(root, "2026-01-02", "second", "int APS5_VABI A() { return 0; }\nint APS5_VABI B() { return 0; }\n")
+                    measure.reset_mock()
+                    second = progress_history.collect("HEAD", cache)
+                    self.assertEqual(measure.call_count, 1)
+                    self.assertEqual(second[0], first[0])
+                    isa.write_bytes(isa.read_bytes() + b"\n# changed rules input\n")
+                    measure.reset_mock()
+                    self.assertEqual(progress_history.collect("HEAD", cache), second)
+                    self.assertEqual(measure.call_count, 2)
+                uncached = progress_history.collect("HEAD")
+                self.assertEqual(uncached, second)
+                self.assertEqual(progress_history.page(uncached), progress_history.page(second))
+            self.assertFalse(any(path.name.startswith(".history-") for path in cache.parent.iterdir()))
+
+    def test_invalid_cache_is_not_overwritten(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "history.json"
+            for contents in (b"{", b"[]", json.dumps({"schema_version": 1, "rules": progress_history.cache_signature(),
+                                                   "commits": {"a" * 40: {"libraries": {"done": True, "total": 1, "percent": 100},
+                                                                               "shaders": {"done": 0, "total": 0, "percent": 0}}}}).encode()):
+                with self.subTest(contents=contents):
+                    cache.write_bytes(contents)
+                    with patch.object(progress_history, "measure", side_effect=AssertionError("measurement started")), \
+                            self.assertRaises(ValueError):
+                        progress_history.collect("HEAD", cache)
+                    self.assertEqual(cache.read_bytes(), contents)
+
+    def test_failed_cache_publication_preserves_the_old_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "history.json"
+            cache.write_bytes(b"previous cache")
+            with patch.object(progress_history.os, "replace", side_effect=OSError("cannot publish")), \
+                    self.assertRaisesRegex(OSError, "cannot publish"):
+                progress_history.save_cache(cache, "rules", {})
+            self.assertEqual(cache.read_bytes(), b"previous cache")
+            self.assertEqual(list(cache.parent.iterdir()), [cache])
+
     def test_one_point_per_day_at_the_last_commit(self):
         stub = "static void Stub() { NotImplemented_nid_no_patch(__func__); }\n"
         with tempfile.TemporaryDirectory() as directory:
@@ -73,6 +128,7 @@ class ProgressHistoryTests(unittest.TestCase):
         svg = progress_history.chart(points)
         for label in ("Aug 3", "Aug 10", "Aug 17", "Aug 24", "Aug 31"):
             self.assertIn(f">{label}<", svg)
+
 
 
 if __name__ == "__main__":

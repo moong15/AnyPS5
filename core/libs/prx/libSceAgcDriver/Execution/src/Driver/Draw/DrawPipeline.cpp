@@ -26,8 +26,6 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point since) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - since).count());
 }
 
-// HeldReads: the read ranges the queue holds, and how often a store asked about one (hits are
-// deferred write-backs that waited for a queued index read).
 const std::vector<DrawPipeline::Range>*& committingOrderedReads() {
     struct Value { const std::vector<DrawPipeline::Range>* value = nullptr; };
     return ThreadScratch<Value, Value>().value;
@@ -217,7 +215,6 @@ void DrawPipeline::report(std::chrono::steady_clock::time_point now) {
     char reads[192];
     std::snprintf(reads, sizeof(reads), " %llu read ranges, %llu stores held, %llu held-read queries scanned the queue, %llu answered without its lock", static_cast<unsigned long long>(heldReadRanges.load(std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadHits.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadQueries.exchange(0, std::memory_order_relaxed)), static_cast<unsigned long long>(heldReadsUnlocked.exchange(0, std::memory_order_relaxed)));
     drainText += reads;
-    // The recorder's commit-wait totals are cumulative; this line reports the interval's share.
     static AgcDriver::Graphics::Recorder::CommitWaitStatistics previousWaits{0, 0.0, 0.0};
     const auto commitWaits = AgcDriver::Graphics::Recorder::CommitUnlockedWaits();
     char commitText[96];
@@ -404,12 +401,6 @@ std::uint64_t DrawPipeline::DrainRequestsByOpcode(std::uint32_t opcode) {
     return Queue0().drainRequests[std::min<std::uint32_t>(opcode, 0x100)].load(std::memory_order_relaxed);
 }
 
-// The index range of a commit that has been decoded but has not run yet is still a guest read at
-// the commit's own place in the command stream: the packets that came after it must not store into
-// those bytes first. The item is in the queue while its commit runs, so a commit's own flush of a
-// deferred write is held back too, and the image keeps its results for the consumer that follows the
-// draw. Off with APS5_NO_QUEUED_DRAW_READ_ORDER=1 (the pre-fix behaviour, write-backs overtake
-// queued index reads).
 bool DrawPipeline::HeldReads(std::uint64_t address, std::size_t bytes) {
     GuestMemory::TargetRefreshCounter inspected("held_read_ranges");
     const GuestMemory::TargetRefreshScope heldScope(GuestMemory::TargetRefreshStep::HeldReads);

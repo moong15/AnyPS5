@@ -82,6 +82,17 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertEqual(list(self.output.iterdir()), [previous])
         self.assertEqual(previous.read_bytes(), b"existing output")
 
+    def test_windows_runtime_decodes_cmake_cache_with_utf8_bom(self):
+        compiler = self.root / "custom toolchain" / "bin" / "g++.exe"
+        (self.build / "CMakeCache.txt").write_bytes(b"\xef\xbb\xbfCMAKE_CXX_COMPILER:STRING=" + compiler.as_posix().encode("utf-8") + b"\n")
+        self.assertEqual(package_release.windows_runtime(self.build), compiler.parent)
+
+    def test_tracy_runtime_decodes_cmake_cache_with_utf8_bom(self):
+        client = self.build / "core/libs/libs/libTracyClient.dll"
+        client.write_bytes(b"client")
+        (self.build / "CMakeCache.txt").write_bytes(b"\xef\xbb\xbfAPS5_ENABLE_TRACY:BOOL=ON\n")
+        self.assertEqual(package_release.tracy_runtime("windows", self.build), [client])
+
     def test_tracy_packages_include_only_the_target_platform_client(self):
         directory = self.build / "core/libs/libs"
         for platform, name in (("linux", "libTracyClient.so.0.14.1"), ("windows", "libTracyClient.dll")):
@@ -419,6 +430,39 @@ class ReleaseAssetsTests(unittest.TestCase):
                 self.assertEqual((output / name).read_bytes(), b"old " + name.encode())
 
 
+class ReleaseNoteDestinationsTests(unittest.TestCase):
+    def test_directory_body_preserves_existing_full_notes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, body, full = root / "notes.json", root / "body", root / "full.md"
+            source.write_text(json.dumps({"body": "new release notes"}), encoding="utf-8")
+            body.mkdir()
+            full.write_bytes(b"previous full notes")
+            with self.assertRaises(OSError):
+                prepare_release_notes.prepare_notes(source, body, full)
+            self.assertEqual(full.read_bytes(), b"previous full notes")
+            self.assertEqual(list(body.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows read-only output semantics")
+    def test_readonly_output_preserves_both_note_files(self):
+        for target in ("body.md", "full.md"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, body, full = root / "notes.json", root / "body.md", root / "full.md"
+                source.write_text(json.dumps({"body": "new release notes"}), encoding="utf-8")
+                body.write_bytes(b"previous body")
+                full.write_bytes(b"previous full notes")
+                readonly = root / target
+                readonly.chmod(stat.S_IREAD)
+                try:
+                    with self.assertRaises(OSError):
+                        prepare_release_notes.prepare_notes(source, body, full)
+                    self.assertEqual(body.read_bytes(), b"previous body")
+                    self.assertEqual(full.read_bytes(), b"previous full notes")
+                finally:
+                    readonly.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
 class ReleaseNotesTests(unittest.TestCase):
     def test_aliased_paths_preserve_input_and_existing_outputs(self):
         for pair in ((0, 1), (0, 2), (1, 2)):
@@ -523,9 +567,10 @@ class ReleaseNotesEdgeCaseTests(unittest.TestCase):
             directory = Path(directory)
             source_path = directory / "source.json"
             source_path.write_text(source, encoding="utf-8")
-            body_path = directory / "nested" / "body.md"
-            full_path = directory / "nested" / "full.md"
+            body_path = directory / "nested_body" / "body.md"
+            full_path = directory / "nested_full" / "full.md"
             prepare_release_notes.prepare_notes(source_path, body_path, full_path)
+            self.assertEqual(body_path.read_text(encoding="utf-8"), notes)
             self.assertEqual(full_path.read_text(encoding="utf-8"), notes)
 
     def test_body_over_limit_without_whats_changed_is_returned_unchanged(self):

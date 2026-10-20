@@ -22,6 +22,8 @@
 
 ### Functional
 
+- [sceHttpUriParse, sceHttpUriBuild, sceHttpUriMerge](../../../core/libs/prx/libSceHttp/src/Uri.cpp) - console behavior for non-ASCII scheme and hostname bytes remains unmeasured. ASCII character classification and scheme case folding follow [RFC 3986 sections 3.1 and 3.2](https://www.rfc-editor.org/rfc/rfc3986#section-3.1), independently of the host locale; parsing retains the existing C-locale rejection of those bytes.
+
 - [sceHttpUriEscape](../../../core/libs/prx/libSceHttp/src/Uri.cpp) escapes every byte except the ASCII unreserved set in [RFC 3986 section 2.3](https://www.rfc-editor.org/rfc/rfc3986#section-2.3), independently of the host locale. Console behaviour for non-ASCII input remains unmeasured.
 
 - [sceHttpAuthCacheFlush, sceHttpCookieFlush](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - the context-id signatures follow [SharpProspero](https://github.com/SvenGDK/SharpProspero/blob/main/src/SharpProspero/Interop/Net/Http.cs), and the NIDs `zzB0StvRab4` and `seCvUt91WHY` match [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/network/http.cpp). The offline backend never stores authentication credentials or cookies, so flushing a live context succeeds with empty caches. Calls return `BEFORE_INIT` (0x80431001) when no context is alive and `INVALID_ID` (0x80431100) for an unknown, deleted or non-context handle, following the existing context lifecycle checks. These error codes and their precedence have not been measured on PS5 hardware; shadPS4 only stubs these calls. Network-backed caches remain unimplemented.

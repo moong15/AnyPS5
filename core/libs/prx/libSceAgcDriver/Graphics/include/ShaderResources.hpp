@@ -45,6 +45,7 @@ struct TextureCacheUse {
     std::uint64_t sampledHostBytes = 0;
 };
 TextureCacheUse TextureCacheUsage(bool hostBytes = false);
+void OverrideCacheBudgetForTest(std::uint64_t bytes);
 std::uint64_t SampledTextureCacheBudget(const Context& context);
 std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words, VkImageViewType multisampleViewType = VK_IMAGE_VIEW_TYPE_2D);
 bool SampledTexturesShareEntry(std::span<const std::uint32_t> first, std::span<const std::uint32_t> second);
@@ -75,7 +76,7 @@ struct TableDescriptors {
     std::uint32_t binding = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
     std::vector<VkDescriptorImageInfo> images;
-    std::shared_ptr<const std::vector<std::shared_ptr<Texture>>> textures;
+    std::shared_ptr<const std::vector<std::weak_ptr<Texture>>> textures;
 };
 
 class DescriptorCache {
@@ -279,6 +280,7 @@ public:
     static bool NeverReusable(std::span<const CompiledShader> shaders);
     static std::uint64_t DepthGuardRefusals();
     const std::vector<std::shared_ptr<Texture>>& SampledTextures() const { return textures; }
+    static std::size_t LookupLogCapacity();
     bool ChecksFaults() const { return bda != nullptr; }
     void CheckFaults() const;
     // `shaders` are the stages the object was built from, in build order (a recorded draw's vertex
@@ -574,7 +576,7 @@ private:
         std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
     };
     std::array<TableWrites, 2> tableWrites;
-    std::shared_ptr<const TableDescriptors> keptTable(std::size_t set, std::shared_ptr<const std::vector<std::shared_ptr<Texture>>>& held) noexcept;
+    std::shared_ptr<const TableDescriptors> keptTable(std::size_t set, std::shared_ptr<const std::vector<std::weak_ptr<Texture>>>& held) noexcept;
     std::uint32_t setOf(const Binding& binding) const;
     std::vector<Allocation> allocations;
     std::vector<VkDescriptorBufferInfo> descriptorBuffers;

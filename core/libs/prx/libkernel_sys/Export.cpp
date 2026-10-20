@@ -447,6 +447,7 @@ int APS5_VABI openat_nid_postfix(int fd, const char* path, int flags, ...) {
         va_end(arguments);
 #endif
     }
+    if (File::InvalidOpenFlags(flags)) return static_cast<int>(Fail(GuestEinval));
     if (path == nullptr) return static_cast<int>(Fail(GuestEfault));
     if (*path == '\0') return static_cast<int>(Fail(GuestEnoent));
     if (fd == GuestAtFdcwd || *path == '/') return open_nid_postfix(path, flags, mode);

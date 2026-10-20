@@ -1,6 +1,10 @@
 import argparse
+import hashlib
 import io
 import json
+import os
+import stat
+import sys
 import subprocess
 import tarfile
 import tempfile
@@ -52,12 +56,71 @@ def measure(sha):
             for name, data in (("libraries", libraries), ("shaders", shaders))}
 
 
-def collect(ref):
-    points = []
+def cache_signature():
+    digest = hashlib.sha256(repr(sys.version_info[:3]).encode("ascii"))
+    for path in (Path(__file__), Path(progress.__file__), Path(progress.tokenizer_spec.origin), progress.ISA):
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "little"))
+        digest.update(content)
+    digest.update(repr((progress.PRX.relative_to(progress.ROOT).as_posix(),
+                        progress.OPCODES.relative_to(progress.ROOT).as_posix())).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def load_cache(path, signature):
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 1 or not isinstance(data.get("rules"), str) or not isinstance(data.get("commits"), dict):
+        raise ValueError(f"{path}: invalid history cache")
+    if data["rules"] != signature:
+        return {}
+    for sha, counts in data["commits"].items():
+        if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+            raise ValueError(f"{path}: invalid cached commit")
+        if counts is None:
+            continue
+        if not isinstance(counts, dict) or counts.keys() != {"libraries", "shaders"}:
+            raise ValueError(f"{path}: invalid cached counts for {sha}")
+        for metric in counts.values():
+            if not isinstance(metric, dict) or metric.keys() != {"done", "total", "percent"}:
+                raise ValueError(f"{path}: invalid cached metric for {sha}")
+            done, total, percent = (metric[key] for key in ("done", "total", "percent"))
+            if type(done) is not int or type(total) is not int or not 0 <= done <= total or type(percent) not in (int, float) or percent != (round(100 * done / total, 2) if total else 0):
+                raise ValueError(f"{path}: inconsistent cached metric for {sha}")
+    return data["commits"]
+
+
+def save_cache(path, signature, commits):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+                                         prefix=".history-", delete=False) as output:
+            temporary = Path(output.name)
+            json.dump({"schema_version": 1, "rules": signature, "commits": commits}, output, sort_keys=True)
+            output.write("\n")
+        if path.exists():
+            temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def collect(ref, cache=None):
+    signature = cache_signature() if cache is not None else None
+    records = load_cache(cache, signature) if cache is not None else {}
+    points, changed = [], False
     for day, sha in daily_commits(ref):
-        counts = measure(sha)
+        if sha not in records:
+            records[sha] = measure(sha)
+            changed = True
+        counts = records[sha]
         if counts:
             points.append({"date": day, "commit": sha, **counts})
+    if cache is not None and changed:
+        save_cache(cache, signature, records)
     return points
 
 
@@ -162,8 +225,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
     parser.add_argument("--ref", default="HEAD", help="branch or commit whose first-parent history is measured")
+    parser.add_argument("--cache", type=Path, help="reuse per-commit counts while the scanner, ISA list and Python version match")
     args = parser.parse_args()
-    points = collect(args.ref)
+    try:
+        if args.cache:
+            outputs = [args.output / name for name in ("history.json", "history.svg", "history.html")]
+            if any(args.cache.resolve() == path.resolve() or
+                   (args.cache.exists() and path.exists() and args.cache.samefile(path)) for path in outputs):
+                raise ValueError("history cache must differ from generated reports")
+        points = collect(args.ref, args.cache)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     if not points:
         parser.error("no commit with a measurable tree")
     args.output.mkdir(parents=True, exist_ok=True)

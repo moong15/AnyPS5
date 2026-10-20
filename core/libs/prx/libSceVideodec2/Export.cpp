@@ -306,6 +306,8 @@ struct Decoder {
     std::deque<FramePointer> ready;
     std::vector<std::uint8_t> annexB;
     std::vector<std::uint8_t> parameterSets;
+    bool lengthPrefixed = false;
+    bool shortStartCodes = false;
     bool flushing = false;
     std::array<Vp9PictureInfo, 8> vp9References{};
     Vp9PictureInfo vp9Colors{};
@@ -382,21 +384,45 @@ void OpenCodec(Decoder& decoder) {
     }
 }
 
-const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
-    if (size >= 4 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (data[2] == 0 && data[3] == 1))) {
-        decoder.annexB.assign(data, data + size);
-        return &decoder.annexB;
-    }
-    decoder.annexB.clear();
+bool TilesAsAvcc(const std::uint8_t* data, std::size_t size) {
+    if (size < 4) return false;
     for (std::size_t index = 0; index < size;) {
-        if (size - index < 4) throw std::runtime_error("Videodec2: truncated NAL length");
+        if (size - index < 4) return false;
         const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
-        if (length == 0 || length > size - index - 4) throw std::runtime_error("Videodec2: invalid NAL length");
-        static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
-        decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
-        decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+        if (length == 0 || length > size - index - 4) return false;
         index += 4 + length;
     }
+    return true;
+}
+
+bool StartsWithStartCode(const std::uint8_t* data, std::size_t size) {
+    return size >= 3 && data[0] == 0 && data[1] == 0 && (data[2] == 1 || (size >= 4 && data[2] == 0 && data[3] == 1));
+}
+
+const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
+    const bool tiles = TilesAsAvcc(data, size);
+    const bool opensWithStartCode = StartsWithStartCode(data, size);
+    if (!tiles && !opensWithStartCode) throw std::runtime_error("Videodec2: access unit is neither Annex-B nor length-prefixed");
+    const bool shortStartCode = opensWithStartCode && data[2] == 1;
+    bool lengthPrefixed = tiles;
+    if (tiles && opensWithStartCode) {
+        lengthPrefixed = shortStartCode ? !decoder.shortStartCodes : decoder.lengthPrefixed;
+    } else {
+        decoder.lengthPrefixed = tiles;
+        if (shortStartCode) decoder.shortStartCodes = true;
+    }
+    if (lengthPrefixed) {
+        decoder.annexB.clear();
+        for (std::size_t index = 0; index < size;) {
+            const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
+            static constexpr std::uint8_t startCode[4] = {0, 0, 0, 1};
+            decoder.annexB.insert(decoder.annexB.end(), startCode, startCode + 4);
+            decoder.annexB.insert(decoder.annexB.end(), data + index + 4, data + index + 4 + length);
+            index += 4 + length;
+        }
+        return &decoder.annexB;
+    }
+    decoder.annexB.assign(data, data + size);
     return &decoder.annexB;
 }
 
@@ -627,7 +653,7 @@ int APS5_VABI sceVideodec2Decode_nid_postfix(std::uint64_t handle, const InputDa
     const std::unique_ptr<AVPacket, decltype(freePacket)> packetOwner(packet, freePacket);
     if (decoder.parameterSets.size() + unit->size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) throw std::runtime_error("Videodec2: invalid access unit");
     if (av_new_packet(packet, static_cast<int>(decoder.parameterSets.size() + unit->size())) < 0) throw std::runtime_error("Videodec2: cannot allocate packet data");
-    std::memcpy(packet->data, decoder.parameterSets.data(), decoder.parameterSets.size());
+    if (!decoder.parameterSets.empty()) std::memcpy(packet->data, decoder.parameterSets.data(), decoder.parameterSets.size());
     std::memcpy(packet->data + decoder.parameterSets.size(), unit->data(), unit->size());
     decoder.parameterSets.clear();
     packet->pts = decoder.nextKey;

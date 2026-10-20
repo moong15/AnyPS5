@@ -37,6 +37,7 @@
 #include <limits>
 #include <exception>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -104,8 +105,6 @@ std::atomic<std::uint64_t> partialUploads{0}, partialUploadBytes{0}, partialWrit
 // writeBackLayers), and pending units a DCC clear -> uncompressed key flip kept as the texels
 // (Refresh).
 std::atomic<std::uint64_t> pretestSkipped{0}, unregisteredDropped{0}, keyFlipKept{0};
-// Listings held back because a queued draw commit still has to read the range from guest memory at
-// its own (earlier) place in the command stream: the store would land before that read.
 std::atomic<std::uint64_t> queuedReadHeld{0};
 // Images stored by a FlushPending after a hook skip of theirs (AccessKeptByCpu), of which by the
 // hook for the read site of the last skip; images evictStale dropped (the [hooksync] and [storage] lines).
@@ -1471,7 +1470,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         const bool layered = geometry.layers >= 2 && !geometry.thick && geometry.imageDepth == 1 && geometry.layers == geometry.imageLayers && geometry.layerBytes * geometry.layers == guestBytes && geometry.layerBytes % 65536 == 0 && descriptor.baseAddress % 65536 == 0;
         // Tile blocks divide the stamp blocks, so at an aligned base every unit is whole tile blocks
         // of its (layer, mip) slices (sliceWindows).
-        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && !geometry.thick && descriptor.tileMode != TextureTileMode::kLinear && descriptor.baseAddress % 65536 == 0;
+        blockUnits = LayerTrackingEnabled() && BlockTrackingEnabled() && TracksBlockUnits(descriptor, geometry);
         trackedLayers = blockUnits ? static_cast<std::uint32_t>((guestBytes + 65535) / 65536) : layered && LayerTrackingEnabled() ? geometry.layers : 1u;
         trackedLayerBytes = blockUnits ? 65536 : guestBytes / trackedLayers;
         layerGeneration.assign(trackedLayers, 0);
@@ -1603,6 +1602,7 @@ struct PendingWrites {
     PendingList textures;
     // Images taken out of `textures` by a FlushPending still storing them (see adjacentPendingUnchanged).
     std::vector<StorageTexture*> flushing;
+    std::atomic<std::size_t> flushingCount{0};
 };
 
 PendingWrites& Pending() {
@@ -1934,8 +1934,9 @@ VkImageView StorageTexture::AttachmentView(VkFormat format, std::uint32_t mip, s
     Require(attachable, "storage image cannot be a color attachment");
     Require(mip < descriptor.mipCount, "attachment mip exceeds the storage image");
     const bool volume = descriptor.dimension == TextureDimension::k3D;
-    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray), "attachment slice is outside the storage image");
-    Require(layer == 0 || (!volume && descriptor.dimension == TextureDimension::k2DArray && descriptor.baseArray + layer <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
+    const bool array = !volume && descriptor.dimension == TextureDimension::k2DArray;
+    Require((depthSlice == 0 && layers == 1) || (volume && mip == 0 && layers != 0 && depthSlice + layers - 1u <= descriptor.depthOrLastArray) || (array && depthSlice == 0 && layers != 0), "attachment slice is outside the storage image");
+    Require((layer == 0 && layers == 1) || (volume && layer == 0) || (array && descriptor.baseArray + layer + layers - 1u <= descriptor.depthOrLastArray), "attachment layer is outside the storage image");
     const auto found = attachmentViews.find({format, mip, depthSlice, layers, layer});
     if (found != attachmentViews.end()) return found->second;
     VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
@@ -3083,7 +3084,7 @@ std::vector<StorageTexture::ImportSegment> StorageTexture::importSegments() cons
         for (const auto& piece : pieces) {
             const auto from = std::max(piece.address, begin);
             const auto to = std::min(piece.address + piece.bytes, end);
-            const auto* import = HostImportFor(context, from, static_cast<std::size_t>(to - from));
+            const auto* import = HostImportFor(context, from, static_cast<std::size_t>(to - from), ImportRequester::Segment);
             if (import == nullptr) return {};
             if (!segments.empty() && segments.back().import == import) segments.back().end = to;
             else if (!segments.empty() && unitAligned && from % 65536 != 0) return {};
@@ -3676,14 +3677,14 @@ void StorageTexture::MarkDirty() {
     markLayersPending(0, trackedLayers);
 }
 
-void StorageTexture::MarkSliceDirty(std::uint32_t slice) {
-    if (geometry.thick || geometry.imageLayers <= 1 || slice >= geometry.imageLayers || geometry.layerBytes == 0 || trackedLayerBytes == 0 || descriptor.dccAddress != 0) {
+void StorageTexture::MarkSliceDirty(std::uint32_t slice, std::uint32_t count) {
+    if (geometry.thick || geometry.imageLayers <= 1 || count == 0 || slice >= geometry.imageLayers || count > geometry.imageLayers - slice || geometry.layerBytes == 0 || trackedLayerBytes == 0 || descriptor.dccAddress != 0) {
         MarkDirty();
         return;
     }
     const auto begin = geometry.GuestLayerOffset(slice);
     const auto first = static_cast<std::uint32_t>(begin / trackedLayerBytes);
-    const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>((begin + geometry.layerBytes + trackedLayerBytes - 1) / trackedLayerBytes, trackedLayers));
+    const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>((begin + geometry.layerBytes * count + trackedLayerBytes - 1) / trackedLayerBytes, trackedLayers));
     if (first >= last) {
         MarkDirty();
         return;
@@ -3818,11 +3819,6 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     GuestMemory::TargetRefreshCounter inspected("flush_images");
     const TargetRefreshScope targetScope(TargetRefreshStep::Flush);
     if (published != nullptr) *published = false;
-    // A queued draw commit reads its index range from guest memory at its own place in the command
-    // stream, which is earlier than anything recorded while it waits (the draw pipeline, depth 8,
-    // records the packets behind it first). Storing a deferred result into those bytes now would put
-    // it in front of that read, so the read sees the later image instead of the indices the guest
-    // had written; the image keeps its results and the consumer that follows the draw stores them.
     if (AgcDriver::DriverDetail::DrawPipeline::HeldReads(address, bytes)) {
         queuedReadHeld.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -3857,14 +3853,16 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         }
         // Still pending for the adjacency rule of writeBack until each one is stored.
         for (const auto& texture : flush) pending.flushing.push_back(texture.get());
+        pending.flushingCount.store(pending.flushing.size(), std::memory_order_release);
         if (!flush.empty()) BumpPendingSerial();
     }
     if (flush.empty()) {
+        const bool waited = WaitForFlushing(address, bytes, except);
         // Units shadowed over the range (another image's results retiled into the import's unit
         // shadow, or an earlier flush's) still reach the import as the scope asks.
         const bool units = PublishShadowsOnly(address, bytes, scope, reason);
         if (published != nullptr) *published = units;
-        return false;
+        return waited;
     }
     struct Unregister {
         const std::vector<std::shared_ptr<StorageTexture>>& flush;
@@ -3872,6 +3870,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
             auto& pending = Pending();
             const auto lock = MeasureTargetRefresh(TargetRefreshStep::PendingWait, [&] { return std::unique_lock(pending.mutex); });
             for (const auto& texture : flush) std::erase(pending.flushing, texture.get());
+            pending.flushingCount.store(pending.flushing.size(), std::memory_order_release);
             BumpPendingSerial();
         }
     } unregister{flush};
@@ -3942,6 +3941,7 @@ bool StorageTexture::FlushForHostWrite(std::uint64_t address, std::size_t bytes)
             pending.textures.remove(texture.get());
             pending.flushing.push_back(texture.get());
         }
+        pending.flushingCount.store(pending.flushing.size(), std::memory_order_release);
         if (!flush.empty()) BumpPendingSerial();
     }
     struct Unregister {
@@ -3953,6 +3953,7 @@ bool StorageTexture::FlushForHostWrite(std::uint64_t address, std::size_t bytes)
                 const auto found = std::find(pending.flushing.begin(), pending.flushing.end(), texture.get());
                 if (found != pending.flushing.end()) pending.flushing.erase(found);
             }
+            pending.flushingCount.store(pending.flushing.size(), std::memory_order_release);
             if (!flush.empty()) BumpPendingSerial();
         }
     } unregister{flush};
@@ -3968,6 +3969,20 @@ bool StorageTexture::FlushForHostWrite(std::uint64_t address, std::size_t bytes)
     flushReason = previousReason;
     const bool published = PublishShadow(address, bytes, PublishScope::Whole, PublishReasonFor("memory access")) != 0;
     return !flush.empty() || published;
+}
+
+bool StorageTexture::WaitForFlushing(std::uint64_t address, std::size_t bytes, const StorageTexture* except) {
+    auto& pending = Pending();
+    if (pending.flushingCount.load(std::memory_order_acquire) == 0 || GuestMemory::GpuMutex().HeldByThisThread()) return false;
+    const auto* exempt = Refreshing::Get();
+    for (bool waited = false;; waited = true) {
+        {
+            std::lock_guard lock(pending.mutex);
+            if (std::none_of(pending.flushing.begin(), pending.flushing.end(), [&](const StorageTexture* texture) { return texture != except && texture != exempt && texture->overlaps(address, bytes); })) return waited;
+        }
+        { std::lock_guard gpu(GuestMemory::GpuMutex()); }
+        std::this_thread::yield();
+    }
 }
 
 void StorageTexture::SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes) {

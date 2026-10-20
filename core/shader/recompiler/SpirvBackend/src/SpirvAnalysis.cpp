@@ -75,6 +75,7 @@ bool LaneSource(const IrProgram& program, const IrValue& value) {
     case IrOpcode::DataConsume:
     case IrOpcode::LoadVectorWindow:
     case IrOpcode::DataOrderedCount:
+    case IrOpcode::DataOrderedSwap:
         return true;
     case IrOpcode::GetBuiltin: {
         const auto* kind = value.Argument(0)->Resolve();

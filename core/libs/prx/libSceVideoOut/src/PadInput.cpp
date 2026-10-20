@@ -205,19 +205,19 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
         if (instanceId == event.cdevice.which) {
             closeController();
             openFirstAvailableController();
-            publish();
+            publish(window.FrameNumber());
         }
         return;
     }
     if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP ||
         event.type == SDL_CONTROLLERAXISMOTION || event.type == SDL_CONTROLLERDEVICEREMAPPED) {
-        publish();
+        publish(window.FrameNumber());
         return;
     }
     if (event.type == SDL_WINDOWEVENT) {
         if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST || event.window.event == SDL_WINDOWEVENT_CLOSE) scriptedButtons = 0;
         if (keyboardMouse.HandleEvent(event, std::chrono::steady_clock::now()).releaseMouse) setMouseMode(false);
-        publish();
+        publish(window.FrameNumber());
         return;
     }
     // APS5_NO_PAD_INPUT=1 keeps a measurement run from reacting to keys or mouse buttons that reach
@@ -232,24 +232,24 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     if (requests.toggleFullscreen && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) window.ToggleFullscreen();
     if (requests.togglePerformanceOverlay && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) AgcDriverTogglePerformanceOverlay_nid_postfix();
     if (requests.toggleMouse) setMouseMode(!keyboardMouse.MouseMode());
-    if (event.type != SDL_MOUSEMOTION) publish();
+    if (event.type != SDL_MOUSEMOTION) publish(window.FrameNumber());
 }
 
-void PadInput::Update() {
+void PadInput::Update(const DisplayWindow& window) {
     if (controller != nullptr) SDL_GameControllerUpdate();
     applyOutput();
     if (controller != nullptr) controllerState = sampleController();
     if (keyboardMouse.MouseMode() && SDL_GetKeyboardFocus() == nullptr) {
         keyboardMouse.Release();
         setMouseMode(false);
-        publish();
+        publish(window.FrameNumber());
         return;
     }
     const bool changed = keyboardMouse.Advance(std::chrono::steady_clock::now());
-    if (controller != nullptr || keyboardMouse.MouseMode() || changed) publish();
+    if (controller != nullptr || keyboardMouse.MouseMode() || changed) publish(window.FrameNumber());
 }
 
-void PadInput::SetScriptedButton(Pad::PadButton button, bool down) {
+void PadInput::SetScriptedButton(Pad::PadButton button, bool down, std::uint64_t frame) {
     const auto bit = static_cast<std::uint32_t>(button);
     if (down) {
         if (scriptedButtons == bit) return;
@@ -258,11 +258,13 @@ void PadInput::SetScriptedButton(Pad::PadButton button, bool down) {
         if ((scriptedButtons & bit) == 0) return;
         scriptedButtons &= ~bit;
     }
-    publish();
+    publish(frame);
 }
 
-void PadInput::publish() {
-    PadInputState state = controllerState;
-    state.buttons |= scriptedButtons;
-    PadPublishInput_nid_postfix(keyboardMouse.Compose(state));
+void PadInput::publish(std::uint64_t frame) {
+    PadInputState composed = controllerState;
+    composed.buttons |= scriptedButtons;
+    const auto state = keyboardMouse.Compose(composed);
+    PadPublishInput_nid_postfix(state);
+    if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr) VideoOutTelemetry::EmitPadIfChanged(*telemetry, telemetryFilter, frame, state);
 }

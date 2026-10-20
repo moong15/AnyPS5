@@ -43,9 +43,6 @@ public:
     static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
     static unsigned Committers();
 
-    // `reads` are guest ranges the commit reads at its own place in the command stream (the draw's
-    // index range, known from the packets): a write the guest ordered after the item must not be
-    // recorded into them before the item runs, or the commit reads what came later. See HeldReads.
     void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
     static bool PreciseDrains();
@@ -59,9 +56,6 @@ public:
     bool HasIncompleteWrites();
     bool Overlaps(std::uint64_t address, std::size_t bytes);
     std::optional<std::uint64_t> PendingLabel(std::uint64_t address, std::size_t bytes);
-    // Whether a queued commit, itself included, still has to read the range from guest memory. The
-    // commit's own read is the point: its commit is the first to run after the packets that came
-    // before it, so a write recorded while it waits is ordered after the read it belongs to.
     static bool HeldReads(std::uint64_t address, std::size_t bytes);
     static std::size_t QueuedReadRanges();
     void ReleaseRunningReads();
