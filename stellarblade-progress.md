@@ -863,3 +863,11 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - Next brief candidate: Packet.device_lock 19.9 s/90 s on queue 0.
 - 12:00 sb5 = cfb6207e0 (fps8 result-memo bypass kept). run291 ref 5.68 fps -> run293 7.88 fps. Relocation test regression on sb5 (passes on main) under investigation.
 - 12:40 sb5 = 93c0ee4b3 (relocation regression fixed; run295 7.77 fps, same as run293 7.88). Next: memory_wait / device_lock lead; moved_buffer test still fails on sb5.
+
+## State at 2026-10-20 ~16:05 (pre-compaction 2)
+- sb5 (perf/sb-target-scan, fork synced) = 93c0ee4b3. Best measured: run293 7.88 fps (memo bypass cfb6207e0); run295 7.77 (relocation fix 93c0ee4b3). run291 ref 5.68.
+- Unkept commits on perf/draw-link-lock (E:\AnyPS5-fps), each on the previous: 7eec9f5b0 predicate-marker keep (APS5_NO_INACTIVE_PREDICATE_KEEP; crashed run296 twice -> off in chain2), 039773d78 recorded CPU upload (APS5_NO_RECORDED_CPU_UPLOAD), bc9795d6b spanning storage import #6197 port (APS5_NO_SPANNING_STORAGE_IMPORT), 05e923ad3 vertex-table read drain (fixes unaligned-VB race).
+- Running: chain2 (task bs0m6cltu, scratchpad/chain2.sh + stage.sh): recupload run298 warm/run299, then spanimport run300 warm (PROFILE_DRAW, "cpu uploads by cause") / run301; all with bundle A = PRECISE_READ_DRAINS+PIPELINE_DISPATCH+PIPELINE_DMA + NO_INACTIVE_PREDICATE_KEEP=1. Then chain3 (task b713jccnv): vbfix run302 warm/run303 with bundle A and predicate keep ON.
+- Compare each with run295 7.77. Keep if no worse: ff sb5 to the kept commit (stack is linear, so keeping a later one keeps earlier ones; decide 7eec9f5b0 by run303), push fork, ledger.
+- NOTE: series-env BASE lacks APS5_PRECISE_READ_DRAINS (row 98 KEEP); add it to BASE once bundle A is judged.
+- Rules: Sol first for delegated work (codex exec --approve-for-me -m gpt-6.1-sol -C 'E:\AnyPS5-fps' - < brief > log), Claude subagents only when Sol limit hit; don't interrupt running agents.
