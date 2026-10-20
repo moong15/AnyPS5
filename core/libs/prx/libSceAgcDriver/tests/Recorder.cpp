@@ -5732,6 +5732,133 @@ void countUnwatchHook(std::uint64_t address, std::size_t bytes) {
     StorageTexture::SaveBeforeUnwatch(address, bytes);
 }
 
+std::uint8_t* reentryMemory = nullptr;
+std::size_t reentryBytes = 0;
+
+void reentryUnwatchHook(std::uint64_t address, std::size_t bytes) {
+    StorageTexture::SaveBeforeUnwatch(address, bytes);
+    if (reentryMemory == nullptr || address >= reinterpret_cast<std::uint64_t>(reentryMemory) + reentryBytes || address + bytes <= reinterpret_cast<std::uint64_t>(reentryMemory)) return;
+    ++unwatchHookCalls;
+    std::memset(reentryMemory, 0x31, 65536);
+    std::memset(reentryMemory + reentryBytes - 65536, 0x73, 65536);
+    reentryMemory = nullptr;
+}
+
+bool importUnwatchReentryTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: import unwatch re-entry not tested\n";
+        return false;
+    }
+    constexpr std::size_t unit = 65536;
+    constexpr std::size_t surfaceBytes = 4 * unit;
+    const auto decided = PrepareImportWatch(base);
+    struct Restore {
+        const Context& context;
+        ImportWatch watch;
+        ~Restore() {
+            reentryMemory = nullptr;
+            AgcDriver::GuestMemory::SetUnwatchHook(&StorageTexture::SaveBeforeUnwatch);
+            SetImportWatch(context, watch);
+        }
+    } restore{base, decided};
+    for (const bool refresh : {false, true}) {
+        SetImportWatch(base, ImportWatch::Watch);
+        void* block = AllocateWatched(surfaceBytes, unit);
+        if (block == nullptr) {
+            std::cout << "no write watching: import unwatch re-entry not tested\n";
+            return false;
+        }
+        const auto address = reinterpret_cast<std::uint64_t>(block);
+        auto* memory = static_cast<std::uint8_t*>(block);
+        std::memset(memory, 0x5a, surfaceBytes);
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Add(block, surfaceBytes, true, true, true);
+        }
+        struct Unregister {
+            const Context& context;
+            void* block;
+            ~Unregister() {
+                reentryMemory = nullptr;
+                AgcDriver::GuestMemory::SetUnwatchHook(&StorageTexture::SaveBeforeUnwatch);
+                {
+                    GuestAllocations::Mutation mutation;
+                    mutation.Remove(block);
+                }
+                HostImportFor(context, reinterpret_cast<std::uint64_t>(block), surfaceBytes);
+                ReleaseWatched(block, surfaceBytes);
+            }
+        } unregister{base, block};
+        TextureDetiler detiler(base);
+        auto context = base;
+        context.detiler = &detiler;
+        GuestTextureResource resource{};
+        resource.baseAddress = address;
+        resource.width = 256;
+        resource.height = 256;
+        resource.mipCount = 1;
+        resource.tileMode = TextureTileMode::kR64KBX;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = 56;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        auto image = StorageTexture::Create(context, detiler, resource, 0);
+        recorder.Keep(image);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        if (!AgcDriver::GuestMemory::Watched(address, surfaceBytes)) {
+            std::cout << "the image's host import left its memory unwatched: import unwatch re-entry not tested\n";
+            return false;
+        }
+        Require(!image->GuestSnapshotValid(), "re-entry fixture already saved guest bytes");
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Remove(block);
+        }
+        Require(HostImportFor(context, address, surfaceBytes) == nullptr, "re-entry fixture retained the old import");
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Add(block, surfaceBytes, true, true, true);
+        }
+        const auto commands = recorder.Commands();
+        const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const VkClearColorValue green{{0.0f, 1.0f, 0.0f, 1.0f}};
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &green, 1, &range);
+        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+        image->MarkDirty();
+        SetImportWatch(context, ImportWatch::Unwatch);
+        unwatchHookCalls.store(0, std::memory_order_relaxed);
+        reentryMemory = memory;
+        reentryBytes = surfaceBytes;
+        AgcDriver::GuestMemory::SetUnwatchHook(&reentryUnwatchHook);
+        {
+            std::lock_guard gpu(GpuMutex());
+            if (refresh) image->Refresh();
+            else Require(StorageTexture::FlushPending(address, 2 * unit, nullptr, "import re-entry test", PublishScope::None), "the selected pending units were not stored");
+        }
+        Require(unwatchHookCalls.load(std::memory_order_relaxed) == 1, "the operation did not re-enter through an import's unwatch hook");
+        Require(!AgcDriver::GuestMemory::Watched(address, surfaceBytes), "the import did not drop the texture's watch");
+        AgcDriver::GuestMemory::SetUnwatchHook(&StorageTexture::SaveBeforeUnwatch);
+        image->WriteBack();
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        std::vector<std::byte> actual(surfaceBytes);
+        AgcDriver::GuestMemory::Read(address, actual);
+        constexpr std::array<std::uint8_t, 4> pixel{0, 255, 0, 255};
+        for (std::size_t i = 0; i < surfaceBytes; ++i) {
+            const auto expected = i < unit ? 0x31 : i >= surfaceBytes - unit ? 0x73 : pixel[i % 4];
+            Require(std::to_integer<std::uint8_t>(actual[i]) == expected, "import re-entry write-back lost guest bytes or pending GPU results at " + std::to_string(i));
+        }
+    }
+    return true;
+}
+
 bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, bool importDropsWatch = false) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -11074,6 +11201,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--pending-after-unwatch-only") return pendingAfterLeavingWatchTests(device, recorder) ? 0 : 77;
+        if (argc == 2 && std::string_view(argv[1]) == "--import-unwatch-reentry-only") return importUnwatchReentryTests(device, recorder) ? 0 : 77;
         if (argc == 2 && std::string_view(argv[1]) == "--pending-import-unwatch-only") return pendingAfterLeavingWatchTests(device, recorder, true) ? 0 : 77;
         if (argc == 2 && std::string_view(argv[1]) == "--completion-labels-only") {
             completionCountTests(device, recorder);

@@ -640,6 +640,7 @@ private:
     bool dirty = false;
     std::uint64_t profileImageId = 0;
     std::uint64_t version = 0;
+    std::uint64_t unwatchGeneration = 0;
     // `original` holds the guest bytes; false after a GPU-side clear, which never read them.
     std::vector<bool> layerOriginal;
     std::map<std::uint64_t, std::uint64_t> keptAtUnwatch;

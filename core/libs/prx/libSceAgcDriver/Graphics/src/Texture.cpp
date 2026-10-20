@@ -2186,7 +2186,7 @@ bool StorageTexture::Refresh() {
     // guest memory and the DCC keys still match, the image content is current. Pages nobody wrote
     // since `generation` need no comparison.
     targetSample.Step(TargetRefreshStep::Collect);
-    const auto current = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+    std::uint64_t current = 0;
     targetSample.Step(TargetRefreshStep::Allocate);
     // Per tracked layer: changed since its generation (a keys change makes every layer stale).
     std::vector<bool> changed;
@@ -2205,7 +2205,22 @@ bool StorageTexture::Refresh() {
     bool cpuWrote = false;
     bool direct = false;
     DccKeys keys = uploadedKeys;
-    {
+    for (;;) {
+        const auto beforeUnwatch = unwatchGeneration;
+        current = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+        changed.clear();
+        generations.clear();
+        stampedBlocks.clear();
+        cpuBlocks.clear();
+        borrowed.clear();
+        anyBorrowed = false;
+        unchanged = true;
+        stamped = true;
+        tracked = true;
+        compared = false;
+        keysChanged = false;
+        cpuWrote = false;
+        direct = false;
         const auto equalsOriginal = [&] {
             const TargetRefreshScope compareScope(TargetRefreshStep::Compare);
             // Named for the [hooksync] attribution: the compare goes through the flush hook.
@@ -2321,6 +2336,7 @@ bool StorageTexture::Refresh() {
                 borrowedUnits.clear();
             }
         }
+        if (beforeUnwatch == unwatchGeneration) break;
     }
     if (unchanged) {
         targetSample.Outcome(stamped ? TargetRefreshOutcome::Unchanged : TargetRefreshOutcome::Compared);
@@ -2410,12 +2426,17 @@ bool StorageTexture::Refresh() {
         static std::atomic<int> reports{0};
         if (reports.fetch_add(1) < 8) std::fprintf(stderr, "[gpu] storage image 0x%llx: guest memory changed while GPU results were pending; keeping the CPU's blocks\n", static_cast<unsigned long long>(descriptor.baseAddress));
     }
+    const auto beforeStoreUnwatch = unwatchGeneration;
     if (anyStored) {
         const auto previous = std::exchange(flushReason, "refresh");
         writeBackLayers(stored);
         flushReason = previous;
     } else if (dropped) {
         reconcilePending();
+    }
+    if (beforeStoreUnwatch != unwatchGeneration) {
+        static_cast<void>(Refresh());
+        return false;
     }
     if (anyBorrowed) {
         uploadReason = "alias";
@@ -4177,12 +4198,16 @@ void StorageTexture::SaveBeforeUnwatch(std::uint64_t address, std::size_t bytes)
                 if (auto alive = texture->weak_from_this().lock(); alive && std::find(overlapping.begin(), overlapping.end(), alive) == overlapping.end()) idle.push_back(std::move(alive));
             }
         }
-        for (const auto& texture : idle) texture->saveUploadBeforeUnwatch(address, bytes);
+        for (const auto& texture : idle) {
+            ++texture->unwatchGeneration;
+            texture->saveUploadBeforeUnwatch(address, bytes);
+        }
     }
     if (overlapping.empty()) return;
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     for (const auto& texture : overlapping) {
+        ++texture->unwatchGeneration;
         texture->saveUploadBeforeUnwatch(address, bytes);
         texture->saveBeforeUnwatch();
     }
@@ -5589,26 +5614,67 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // bypasses the per-packet collect memo (a Refresh collect earlier in the same packet would
     // satisfy it); the unselected layers keep their own generations and are collected by their
     // own refreshes. One tracker lock then reads the span's stamps against the layers' generations.
-    GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored));
-    std::vector<std::uint64_t> generations(spanBlocks, 0);
-    for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
-        if (!layers[layer]) continue;
-        const auto end = layerBegin(layer) + layerBytes(layer);
-        for (auto at = layerBegin(layer) & ~(block - 1); at < end; at += block) generations[static_cast<std::size_t>((at - spanBegin) / block)] = layerGeneration[layer];
-    }
-    std::vector<std::uint8_t> changedBlocks(spanBlocks);
-    const bool tracked = GuestMemory::ChangedBlocks(firstStored, static_cast<std::size_t>(lastStored - firstStored), generations, changedBlocks);
-    std::vector<bool> compared(trackedLayers, false);
-    if (!tracked) {
-        awaitStoredSave(&layers);
-        std::vector<bool> saved(trackedLayers, false);
-        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) saved[layer] = layers[layer] && layerOriginal[layer];
-        for (const auto& [begin, end] : unitRuns(saved)) {
-            const auto from = descriptor.baseAddress + begin;
-            const auto last = descriptor.baseAddress + end - 1;
-            if (!compareUntracked(from, static_cast<std::size_t>(end - begin), std::span(changedBlocks).subspan(static_cast<std::size_t>((from - spanBegin) / block), static_cast<std::size_t>(last / block - from / block + 1)))) continue;
-            for (auto layer = static_cast<std::uint32_t>(begin / trackedLayerBytes); layer < trackedLayers && layerBegin(layer) <= last; ++layer) compared[layer] = true;
+    std::vector<ImportSegment> segments;
+    bool tracked = false;
+    bool unsavedOutsideWatch = false;
+    for (;;) {
+        const auto beforeUnwatch = unwatchGeneration;
+        keep.clear();
+        skippedLayer.assign(trackedLayers, false);
+        skippedAny = false;
+        skipped = 0;
+        GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored));
+        std::vector<std::uint64_t> generations(spanBlocks, 0);
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+            if (!layers[layer]) continue;
+            const auto end = layerBegin(layer) + layerBytes(layer);
+            for (auto at = layerBegin(layer) & ~(block - 1); at < end; at += block) generations[static_cast<std::size_t>((at - spanBegin) / block)] = layerGeneration[layer];
         }
+        std::vector<std::uint8_t> changedBlocks(spanBlocks);
+        tracked = GuestMemory::ChangedBlocks(firstStored, static_cast<std::size_t>(lastStored - firstStored), generations, changedBlocks);
+        std::vector<bool> compared(trackedLayers, false);
+        if (!tracked) {
+            awaitStoredSave(&layers);
+            std::vector<bool> saved(trackedLayers, false);
+            for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) saved[layer] = layers[layer] && layerOriginal[layer];
+            for (const auto& [begin, end] : unitRuns(saved)) {
+                const auto from = descriptor.baseAddress + begin;
+                const auto last = descriptor.baseAddress + end - 1;
+                if (!compareUntracked(from, static_cast<std::size_t>(end - begin), std::span(changedBlocks).subspan(static_cast<std::size_t>((from - spanBegin) / block), static_cast<std::size_t>(last / block - from / block + 1)))) continue;
+                for (auto layer = static_cast<std::uint32_t>(begin / trackedLayerBytes); layer < trackedLayers && layerBegin(layer) <= last; ++layer) compared[layer] = true;
+            }
+        }
+        unsavedOutsideWatch = false;
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+            if (!layers[layer]) continue;
+            const auto begin = layerBegin(layer);
+            const auto end = begin + layerBytes(layer);
+            if (tracked ? layerGeneration[layer] == 0 : !compared[layer]) {
+                unsavedOutsideWatch = unsavedOutsideWatch || !tracked;
+                keep.emplace_back(begin, end);
+                continue;
+            }
+            for (auto at = begin & ~(block - 1); at < end; at += block) {
+                const auto from = std::max(at, begin);
+                const auto to = std::min(at + block, end);
+                if (from >= to) continue;
+                const bool edge = from != at || to != at + block;
+                if (keptAtUnwatchHolds(from, layer) || (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), layerGeneration[layer])) && !unchangedSinceBaseline(from, to))) {
+                    skippedAny = true;
+                    skippedLayer[layer] = true;
+                    ++skipped;
+                    continue;
+                }
+                if (!keep.empty() && keep.back().second == from) keep.back().second = to;
+                else keep.emplace_back(from, to);
+            }
+        }
+        segments.clear();
+        if (!keep.empty()) {
+            if (const auto* import = HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) segments.push_back({import, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
+            else segments = importSegments();
+        }
+        if (beforeUnwatch == unwatchGeneration) break;
     }
     const auto forgetStored = [&] {
         for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
@@ -5617,31 +5683,6 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             cancelStoredSave(layer);
         }
     };
-    bool unsavedOutsideWatch = false;
-    for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
-        if (!layers[layer]) continue;
-        const auto begin = layerBegin(layer);
-        const auto end = begin + layerBytes(layer);
-        if (tracked ? layerGeneration[layer] == 0 : !compared[layer]) {
-            unsavedOutsideWatch = unsavedOutsideWatch || !tracked;
-            keep.emplace_back(begin, end);
-            continue;
-        }
-        for (auto at = begin & ~(block - 1); at < end; at += block) {
-            const auto from = std::max(at, begin);
-            const auto to = std::min(at + block, end);
-            if (from >= to) continue;
-            const bool edge = from != at || to != at + block;
-            if (keptAtUnwatchHolds(from, layer) || (changedBlocks[static_cast<std::size_t>((at - spanBegin) / block)] == GuestMemory::BlockWritten && (compared[layer] || !edge || GuestMemory::StoredOver(from, static_cast<std::size_t>(to - from), layerGeneration[layer])) && !unchangedSinceBaseline(from, to))) {
-                skippedAny = true;
-                skippedLayer[layer] = true;
-                ++skipped;
-                continue;
-            }
-            if (!keep.empty() && keep.back().second == from) keep.back().second = to;
-            else keep.emplace_back(from, to);
-        }
-    }
     static const bool traceLoad = std::getenv("APS5_TRACE_LOAD_WRITES") != nullptr;
     if (traceLoad) {
         const auto time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -5671,7 +5712,6 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // own stamps, so every later import writer stamps newer.
     std::vector<ShadowedRange> shadowed;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> imported;
-    std::vector<ImportSegment> segments;
     const auto markShadowed = [&](std::uint64_t generation) {
         for (const auto& segment : segments) {
             std::vector<ShadowedRange> ranges;
@@ -5710,8 +5750,6 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         settle(true);
         return;
     }
-    if (const auto* import = HostImportSpanning(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) segments.push_back({import, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
-    else segments = importSegments();
     if (!segments.empty()) {
         Require(!unsavedOutsideWatch, "storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented");
         // Outside the write watch the stored bytes are what the next store compares with.
