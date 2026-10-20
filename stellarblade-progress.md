@@ -871,3 +871,8 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - Compare each with run295 7.77. Keep if no worse: ff sb5 to the kept commit (stack is linear, so keeping a later one keeps earlier ones; decide 7eec9f5b0 by run303), push fork, ledger.
 - NOTE: series-env BASE lacks APS5_PRECISE_READ_DRAINS (row 98 KEEP); add it to BASE once bundle A is judged.
 - Rules: Sol first for delegated work (codex exec --approve-for-me -m gpt-6.1-sol -C 'E:\AnyPS5-fps' - < brief > log), Claude subagents only when Sol limit hit; don't interrupt running agents.
+
+## 2026-10-20 17:45
+- sb5 = bb1de536f, pushed to the fork. run309 = 8.16 fps (best so far on this scene with bundle A; run295 was 7.77). Contains fps9, fps10, fps11 and the VB race fix.
+- Queued: run310/311 = the load-crash fix ba0db2640 (same tree as 388f0d192; Sol adapted #7048), switch APS5_NO_PENDING_UNWATCH_SAVE.
+- Open: CPU storage uploads are still ~1466 per 10 s, all reason keys / "imported buffer region" write-backs; span import made direct only 8. That is the next target.
