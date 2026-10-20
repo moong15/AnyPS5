@@ -72,7 +72,7 @@ void Driver::deferCompletion(const Submission& submission) {
     completionDeferred() = true;
     DrawPipeline::Queue0().Enqueue([this, serial = submission.serial, received, labelWrites = submission.labelWrites] {
         completeSubmission(serial, received, labelWrites);
-    }, {});
+    }, {}, 0, {}, {}, true);
 }
 
 void Driver::submitOpenWork() {

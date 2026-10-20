@@ -411,7 +411,9 @@ void WriteCompletenessControlsIndirectDrain(bool gds) {
     using namespace AgcDriver::DriverDetail;
     ShaderRecompiler::RecompileResult program{};
     ShaderRecompiler::DescriptorBinding binding{};
-    binding.role = gds ? ShaderRecompiler::DescriptorRole::Gds : ShaderRecompiler::DescriptorRole::ShaderData;
+    binding.kind = gds ? ShaderRecompiler::DescriptorKind::StorageBuffer : ShaderRecompiler::DescriptorKind::SampledImage;
+    binding.role = gds ? ShaderRecompiler::DescriptorRole::Gds : ShaderRecompiler::DescriptorRole::GuestImages;
+    binding.count = 1;
     program.bindings.push_back(binding);
     const std::array<AgcDriver::Graphics::CompiledShader, 1> stages{{{ShaderRecompiler::ShaderStage::Vertex, &program, 0}}};
     const AgcDriver::Graphics::State graphics{};
@@ -420,7 +422,7 @@ void WriteCompletenessControlsIndirectDrain(bool gds) {
     auto writes = DrawWriteRanges(graphics, stages, ExactDrawWrites());
     const bool complete = DrawWritesComplete(graphics, stages);
     Require(!bounded, "synthetic queued draw must be unbounded by reads");
-    Require(complete == !gds, "write completeness confused shader data reads with GDS writes");
+    Require(complete == !gds, "write completeness confused unknown image reads with GDS writes");
     WrittenMemory.fill(Kept);
     LateRecords = gds ? std::array<std::uint32_t, 4>{0, 1, 0, 0} : Records;
     Blocker blocker;
@@ -632,13 +634,13 @@ void GpuSideIndirectDisjointDmaDoesNotDrain() {
         Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
         AgcDriver::Submit(&packet, 0);
         const auto start = std::chrono::steady_clock::now();
-        while (!(held = DrawPipeline::HeldReads(address, sizeof(Records))) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        while (!(held = DrawPipeline::HeldReads(address, sizeof(Records)) && DrawPipeline::Queue0().Outstanding() >= 2) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         drained = std::async(std::launch::async, [&] { return DrawPipeline::Queue0().DrainPacket(dma); });
         ready = drained.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
     }
     Finish();
     const bool requested = drained.get();
-    Require(held, "disjoint DMA control did not enqueue its GPU-side indirect draw");
+    Require(held, "disjoint DMA control did not enqueue its GPU-side indirect draw and submission completion");
     Require(ready && !requested && DrawPipeline::DrainRequestsByOpcode(0x50) == drains, "a DMA to disjoint memory drained the queued GPU-side indirect draw");
     Flush(WrittenMemory);
     SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw held across a disjoint DMA control");

@@ -668,7 +668,7 @@ void Driver::execute(const Submission& submission) {
             DrawPipeline::Queue0().Enqueue([this] {
                 submitOpenWork();
                 wakeQueueZeroForCompletions();
-            }, {});
+            }, {}, 0, {}, {}, true);
             executeRewindTail(submission);
             return;
         }
