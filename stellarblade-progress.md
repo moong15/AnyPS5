@@ -856,3 +856,8 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - Bottleneck: queue worker 0 ~98% busy, GPU ~50% idle. Draw cache 0.2% hit; ~80% of stages rebuilt per draw (user words change). shader_compile_and_link ~17-20 s, Shader.DrawStage ~10-13 s per 90 s.
 - Dropped today: #7963, user-word mask (#5656; already on sb5 anyway), #6539/#5609 relocation (broken on main's SRT tape; fix saved sol/fps7-followup-full.patch, low odds).
 - Posted: Stellar Blade evidence on #5372 (issuecomment-6282235645). #6924 rebased+force-pushed. #7457 paused. #6292 is meh7an's, not ours.
+
+## Paused for PC restart 2026-10-20 ~11:40 (frequent driver crashes)
+- run290-sb5warm (75e23384d) OK; run291-sb5 gave no-trace (load crash, retry was in progress) -> stopped. Lock released, game killed.
+- Resume order: (1) run291-sb5 measured on libs-sb5-75e23384d (deploy + verify first; reference run); (2) relocation recheck sb5 + main329 (agc_driver_draw_cache_relocation); (3) scratchpad/fps8-chain.sh minus its wait line: build cfb6207e0 in E:\AnyPS5-sb5 detached, tests, run292-fps8warm + run293-fps8 vs run291.
+- Next brief candidate: Packet.device_lock 19.9 s/90 s on queue 0.
