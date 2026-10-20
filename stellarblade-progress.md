@@ -950,3 +950,9 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
 - For each agent commit: ctest -R serially in lock with validation env, then one game run vs previous sb5 run (run317 8.62).
 - User 20:45: NEW tasks/investigations go to Sol (codex exec --approve-for-me, briefs in E:\AnyPS5-notes\sol\) until Sol's usage runs out; the 5 running Claude agents finish as they are.
 - 20:50 Sol running: sol-committer, sol-indirect-rp, sol-merge10-build (results sol\*-result.md). Claude tests what they build.
+
+## 2026-10-20 PR #7457 evidence (user: "complete PR first"; fps may not move, document what is fixed + guideline numbers)
+- PR head 778ddd84d on main 1a3a1b2e0 (agent-7457-rebase-result.md): ImportRequester pass-through, missPolicy in failedBlockImport, 4-way set-assoc memo (64x4), reserved-heap commit test, [buffers] hits/stores/evictions/resets under APS5_PROFILE_DRAW.
+- Main build E:\AnyPS5 (tmp/main-1a3a1b2e0), libs staged E:\StellarBlade\libs-main-1a3a1b2e0 (stamp ok, cmp 0). Relinker changed since 30fda0a03 (Windows load image #7740) -> relink exe with 1a3a1b2e0 relinker, backup StellarBlade.exe.bak-pre-1a3a1b2e0, restore after.
+- Evidence plan: (1) validation ctest main vs PR, pattern ^agc_(import_miss_memo|import_miss_memo_off|host_import|driver_host_import|driver_registration|sparse_run_import); (2) 6 runs M,P,M,P,M,P, 400:90, BASE APS5_PREBUILD_THREADS=16, no PROFILE; (3) diagnostic pair (not fps): APS5_SAMPLE_WORKER + APS5_PROFILE_DRAW on both, symbolized with scratchpad/symstacks.py -> share of worker time in HostImportFor/lease/refreshImports/importRun + memo hit rate (CnRJay).
+- Reply draft: pr-traces/pr7457-reply-draft.md (show user before posting).
