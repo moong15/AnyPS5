@@ -397,7 +397,7 @@ private:
     void captureGuestBytes(const std::vector<bool>* layers, bool keepWritten = false);
     bool keepWrittenSince(std::uint32_t unit);
     bool guestMatchesUpload(std::uint32_t unit) const;
-    std::array<std::uint64_t, 2> unitContentHash(std::uint32_t unit, bool flushGpuWrites) const;
+    std::array<std::uint64_t, 2> unitContentHash(std::uint32_t unit) const;
     void forgetUploadHash(std::uint32_t first, std::uint32_t count);
     bool originalHolds(std::uint64_t address, std::size_t bytes) const;
     bool compareUntracked(std::uint64_t address, std::size_t bytes, std::span<std::uint8_t> changed, bool memoize = false) const;
@@ -410,6 +410,7 @@ private:
     void writeBackLayers(const std::vector<bool>& layers);
     bool unchangedSinceBaseline(std::uint64_t from, std::uint64_t to) const;
     void saveBeforeUnwatch();
+    void saveUploadBeforeUnwatch(std::uint64_t address, std::size_t bytes);
     void forgetKeptAtUnwatch(std::uint32_t unit);
     bool keptAtUnwatchHolds(std::uint64_t from, std::uint32_t unit) const;
     // Drops the saved guest bytes of the units over [address, address + bytes) (another image's fill
@@ -573,6 +574,9 @@ private:
     mutable std::array<std::uint64_t, 5> comparedGuestBytes{};
     std::vector<std::byte> generationBaseline;
     std::vector<std::array<std::uint64_t, 2>> uploadHash;
+    std::uint64_t pendingWatchSerial = 0;
+    bool pendingWatchKnown = false;
+    bool pendingSurfaceWatched = false;
     // DCC keys the image content was uploaded under: a fast-cleared surface starts as its clear value.
     DccKeys uploadedKeys = DccKeys::Uncompressed;
     std::optional<std::pair<DccKeys, std::uint64_t>> clearContent;

@@ -5740,17 +5740,17 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
         ImportWatch decided;
         ~Restore() { SetImportWatch(context, decided); }
     } restore{base, decided};
-    enum class Write { None, AfterPending, BeforePending, UnwatchedFullClear, UnwatchedPartialWrite };
+    enum class Write { None, AfterPending, BeforePending, UnwatchedFullClear, UnwatchedPartialWrite, BeforeUnwatch };
     for (const std::uint32_t side : {256u, 1024u})
-    for (const auto write : {Write::None, Write::AfterPending, Write::BeforePending, Write::UnwatchedFullClear, Write::UnwatchedPartialWrite}) {
+    for (const auto write : {Write::None, Write::AfterPending, Write::BeforePending, Write::UnwatchedFullClear, Write::UnwatchedPartialWrite, Write::BeforeUnwatch}) {
         if (importDropsWatch && write != Write::None) continue;
         const std::size_t surfaceBytes = static_cast<std::size_t>(side) * side * 4;
         const std::size_t allocationBytes = surfaceBytes + (importDropsWatch ? unit : 0);
         const std::size_t units = surfaceBytes / unit;
         const std::size_t lastUnit = units - 1;
         const bool large = side > 256;
-        const bool unwatchedWrite = write == Write::UnwatchedFullClear || write == Write::UnwatchedPartialWrite;
-        const std::string what = std::string(large ? "1024x1024, " : "") + (write == Write::None ? "no CPU write" : write == Write::AfterPending ? "a CPU write after the results were pending again" : write == Write::BeforePending ? "a CPU write before the results were pending again" : write == Write::UnwatchedFullClear ? "a CPU write into the unwatched block before results that cover it" : "a CPU write into the unwatched block before results that cover part of it");
+        const bool unwatchedWrite = write == Write::UnwatchedFullClear || write == Write::UnwatchedPartialWrite || write == Write::BeforeUnwatch;
+        const std::string what = std::string(large ? "1024x1024, " : "") + (write == Write::None ? "no CPU write" : write == Write::AfterPending ? "a CPU write after the results were pending again" : write == Write::BeforePending ? "a CPU write before the results were pending again" : write == Write::UnwatchedFullClear ? "a CPU write into the unwatched block before results that cover it" : write == Write::BeforeUnwatch ? "a CPU write before the block leaves the watch" : "a CPU write into the unwatched block before results that cover part of it");
         void* block = AllocateWatched(allocationBytes, unit);
         if (block == nullptr) {
             std::cout << "no write watching: results pending after a block left the watch not tested\n";
@@ -5835,7 +5835,9 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
                 Require(image->GuestSnapshotValid(), "(p) the import dropped a pending image's watch without saving its bytes");
                 Require(!AgcDriver::GuestMemory::Watched(address, surfaceBytes), "(p) the failed import did not drop the surface's watch");
             } else {
+                if (write == Write::BeforeUnwatch) memory[lastUnit * unit] = 0x11;
                 AgcDriver::GuestMemory::Unwatch(address + lastUnit * unit, unit);
+                Require(!image->GuestSnapshotValid(), "(p) an idle unwatch eagerly saved guest bytes");
                 Require(!AgcDriver::GuestMemory::Watched(address, surfaceBytes) && AgcDriver::GuestMemory::Watched(address, lastUnit * unit), "(p) " + what + ": the last block did not leave the watch alone");
             }
             const auto cpuUnit = [](std::size_t i) { return i % 4 == 0 ? static_cast<std::uint8_t>(0x11) : static_cast<std::uint8_t>(i * 131u + 7u); };
@@ -5892,7 +5894,8 @@ bool pendingAfterLeavingWatchTests(const Device& device, Recorder& recorder, boo
                 }
                 throw;
             }
-            if (large && write == Write::UnwatchedPartialWrite) Require(refused, "(p) " + what + ": stored over an unwatched unit the CPU wrote, which the upload hash does not match");
+            if (large && write == Write::UnwatchedPartialWrite) Require(refused, "(p) " + what + ": stored over an unwatched unit the CPU wrote, which the transition hash does not match");
+            if (write == Write::BeforeUnwatch) Require(refused, "(p) " + what + ": accepted an idle unit without a valid generation proof at unwatch");
             if (unwatchedWrite) {
                 if (refused) {
                     std::cout << "(p) " + what + ": refused rather than stored\n";
