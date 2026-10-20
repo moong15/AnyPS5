@@ -377,6 +377,7 @@ public:
     bool Refresh();
     static std::uint64_t SinglePassMoves();
     static std::uint64_t SlabRetiles();
+    static std::uint64_t RecordedCpuUploads();
     static std::uint64_t RefreshesProved();
     static std::uint64_t UntrackedCompares();
     std::uint64_t GuestBytes() const;

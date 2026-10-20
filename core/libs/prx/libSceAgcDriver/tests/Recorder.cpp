@@ -6331,6 +6331,141 @@ void singlePassTests(const Device& device, Recorder& recorder, bool watched) {
     std::cout << "single-pass storage moves" << (watched ? " (watched)" : "") << ": ok (" << tested << " surfaces)\n";
 }
 
+bool recordedCpuUploadTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: recorded CPU uploads not compared\n";
+        return false;
+    }
+    struct Case {
+        const char* name;
+        std::uint32_t format;
+        TextureTileMode tileMode;
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t mipCount;
+    };
+    constexpr Case cases[] = {
+        {"R16 64 KiB R_X 200x150, 3 mips", 7, TextureTileMode::kR64KBX, 200, 150, 3},
+        {"RGBA8 64 KiB R_X 520x260, 6 mips", 56, TextureTileMode::kR64KBX, 520, 260, 6},
+        {"RGBA16F 4 KiB S 100x70, 2 mips", 71, TextureTileMode::kStandard4KB, 100, 70, 2},
+    };
+    const bool recording = std::getenv("APS5_NO_RECORDED_CPU_UPLOAD") == nullptr;
+    std::string failures;
+    std::size_t tested = 0;
+    for (const auto& test : cases) {
+        if (!StorageFormatAvailable(base, test.format)) continue;
+        GuestTextureResource resource{};
+        resource.width = test.width;
+        resource.height = test.height;
+        resource.mipCount = test.mipCount;
+        resource.tileMode = test.tileMode;
+        resource.dimension = TextureDimension::k2D;
+        resource.format = test.format;
+        resource.dstSelX = 4;
+        resource.dstSelY = 5;
+        resource.dstSelZ = 6;
+        resource.dstSelW = 7;
+        const auto geometry = DescribeSurface(resource);
+        const auto elementBytes = BytesPerElement(test.format);
+        const auto bytes = (static_cast<std::size_t>(geometry.guestBytes) + 65535) / 65536 * 65536 + 65536;
+#ifdef _WIN32
+        void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+        void* block = std::aligned_alloc(65536, bytes);
+#endif
+        Require(block != nullptr, "recorded CPU upload test memory");
+        auto* memory = static_cast<std::uint8_t*>(block);
+        std::uint32_t seed = 0x2468ace1u;
+        for (std::size_t i = 0; i < bytes; ++i) {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            memory[i] = static_cast<std::uint8_t>(seed >> 9);
+        }
+        const auto address = reinterpret_cast<std::uint64_t>(block);
+        {
+            GuestAllocations::Mutation mutation;
+            mutation.Add(block, bytes, true, true, true);
+        }
+        struct Unregister {
+            const Context& context;
+            void* block;
+            std::uint64_t address;
+            std::size_t bytes;
+            ~Unregister() {
+                {
+                    GuestAllocations::Mutation mutation;
+                    mutation.Remove(block);
+                }
+                HostImportFor(context, address, bytes);
+#ifdef _WIN32
+                VirtualFree(block, 0, MEM_RELEASE);
+#else
+                std::free(block);
+#endif
+            }
+        } unregister{base, block, address, bytes};
+        if (HostImportFor(base, address, bytes) == nullptr) {
+            std::cout << "host import refused: recorded CPU upload of " << test.name << " not compared\n";
+            continue;
+        }
+        TextureDetiler detiler(base);
+        auto imported = base;
+        imported.detiler = &detiler;
+        auto copied = base;
+        copied.detiler = &detiler;
+        copied.hostImportAlignment = 0;
+        resource.baseAddress = address;
+        std::size_t linearBytes = 0;
+        for (const auto& mip : geometry.mips) linearBytes += static_cast<std::size_t>(mip.width) * mip.height * elementBytes;
+        const auto readImage = [&](const StorageTexture& image) {
+            Buffer readback(base, linearBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            const auto commands = recorder.Commands();
+            RecordMemoryBarrier(base, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            std::vector<VkBufferImageCopy> copies;
+            std::size_t at = 0;
+            for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = at;
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+                copy.imageExtent = {geometry.mips[level].width, geometry.mips[level].height, 1};
+                copies.push_back(copy);
+                at += static_cast<std::size_t>(geometry.mips[level].width) * geometry.mips[level].height * elementBytes;
+            }
+            base.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image.Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+            RecordMemoryBarrier(base, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+            recorder.Submit();
+            device.WaitQueue();
+            recorder.Sync();
+            const auto read = readback.Bytes();
+            return std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(read.data()), reinterpret_cast<const std::uint8_t*>(read.data()) + linearBytes);
+        };
+        {
+            const auto before = StorageTexture::RecordedCpuUploads();
+            auto fromCopy = StorageTexture::Create(copied, detiler, resource, 0);
+            recorder.Keep(fromCopy);
+            const auto recorded = StorageTexture::RecordedCpuUploads() - before;
+            const auto copiedTexels = readImage(*fromCopy);
+            auto fromImport = StorageTexture::Create(imported, detiler, resource, 0);
+            recorder.Keep(fromImport);
+            const auto importedTexels = readImage(*fromImport);
+            if (copiedTexels != importedTexels) {
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < copiedTexels.size(); ++i) differ += copiedTexels[i] != importedTexels[i];
+                failures += std::string(test.name) + ": the CPU upload differs from the import upload in " + std::to_string(differ) + " bytes\n";
+            }
+            if (recording ? recorded == 0 : recorded != 0) failures += std::string(test.name) + ": " + std::to_string(recorded) + " CPU uploads recorded into the open batch, want " + (recording ? "at least 1" : "0") + "\n";
+        }
+        recorder.Sync();
+        ++tested;
+    }
+    if (!failures.empty()) throw std::runtime_error("recorded CPU uploads:\n" + failures);
+    if (tested == 0) return false;
+    std::cout << "recorded CPU uploads" << (recording ? "" : " (waited batches)") << ": ok (" << tested << " surfaces)\n";
+    return true;
+}
+
 class StorageUploadProbe {
 public:
     StorageUploadProbe(Context& context, bool failView) : context(context), resolver(context.deviceProc), failView(failView) {
@@ -10228,6 +10363,9 @@ int main(int argc, char** argv) {
         std::cout << "host imports " << (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch ? "are compared" : "stay watched") << '\n';
         Recorder recorder(device.GetContext());
         recorder.Activate();
+        if (argc == 2 && std::string_view(argv[1]) == "--recorded-cpu-upload-only") {
+            return recordedCpuUploadTests(device, recorder) ? 0 : 77;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--storage-clear-fast-path-only") {
             return storageClearFastPathTests(device, recorder) ? 0 : 77;
         }
