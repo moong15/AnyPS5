@@ -1558,9 +1558,11 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_storage_writeback_blocks COMMAND agc_driver_recorder_tests --writeback-blocks-only)
-    set_tests_properties(agc_storage_writeback_blocks PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 ENVIRONMENT "APS5_PIN_WAIT_MS=3000")
+    add_test(NAME agc_storage_writeback_blocks_spanning_off COMMAND agc_driver_recorder_tests --writeback-blocks-only)
+    set_tests_properties(agc_storage_writeback_blocks agc_storage_writeback_blocks_spanning_off PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 ENVIRONMENT "APS5_PIN_WAIT_MS=3000")
+    set_property(TEST agc_storage_writeback_blocks_spanning_off APPEND PROPERTY ENVIRONMENT "APS5_NO_SPANNING_STORAGE_IMPORT=1")
     if(WIN32)
-        set_tests_properties(agc_storage_writeback_blocks PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_storage_writeback_blocks agc_storage_writeback_blocks_spanning_off PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_recorder_read_list COMMAND agc_driver_recorder_tests --read-list-only)

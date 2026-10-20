@@ -6048,7 +6048,7 @@ void writeBackBlockTests(const Device& device, Recorder& recorder) {
     };
     const Case cases[] = {
         {"a 4 MiB image over 64 adjacent 64 KiB pieces", 0, 4u << 20u, false, true, 1},
-        {"a 4 MiB image at 64 KiB over 66 adjacent 64 KiB pieces", piece, (4u << 20u) + 2 * piece, false, true, 2},
+        {"a 4 MiB image at 64 KiB over 66 adjacent 64 KiB pieces", piece, (4u << 20u) + 2 * piece, false, true, HostImportSpanningEnabled() ? std::size_t{1} : std::size_t{2}},
         {"a 4 MiB image over 64 KiB pieces of which every other one is not GPU mapped", 0, 4u << 20u, true, false, 0},
     };
     SetHostImportWindow(window);
