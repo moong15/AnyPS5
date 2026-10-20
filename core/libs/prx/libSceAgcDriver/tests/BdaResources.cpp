@@ -473,6 +473,7 @@ void importJoinTests(const Context& context) {
     constexpr std::size_t piece = 65536;
     constexpr std::size_t window = 2 * piece;
     constexpr std::size_t large = 3 * piece;
+    SetPartialImportJoins(false);
     void* block = ::operator new(3 * large + 5 * piece, std::align_val_t{window});
     auto* guest = static_cast<std::uint8_t*>(block);
     std::memset(guest, 0x11, 3 * large);
@@ -547,6 +548,65 @@ void importJoinTests(const Context& context) {
     change(guest, large, false);
     change(guest + 2 * large, large, false);
     Require(HostImportFor(importing, first, 16) == nullptr && HostImportFor(importing, third, 16) == nullptr, "the host imports outlived their ranges");
+    SetHostImportWindow(0);
+    SetPartialImportJoins(true);
+    ::operator delete(block, std::align_val_t{window});
+}
+
+void partialImportJoinTests(const Context& context) {
+    constexpr std::size_t piece = 65536;
+    constexpr std::size_t window = 2 * piece;
+    void* block = ::operator new(4 * window, std::align_val_t{window});
+    auto* guest = static_cast<std::uint8_t*>(block);
+    std::memset(guest, 0x27, 4 * window);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    SetHostImportWindow(window);
+    const auto change = [&](std::uint8_t* range, bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, false, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, range);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    const auto bind = [&](std::uintptr_t address, std::size_t bytes = 32) {
+        GuestBufferMemory plain(importing);
+        plain.AddReadable(address, bytes);
+        plain.Upload(false);
+        std::uint32_t adjustment = 0;
+        const auto view = plain.Descriptor(address, bytes, adjustment);
+        const auto copied = plain.CopiedBytes();
+        plain.WriteBack();
+        return std::pair{view.buffer, copied};
+    };
+    auto* low = guest + piece;
+    auto* middle = guest + 2 * piece;
+    auto* high = guest + 3 * piece;
+    const auto lowBase = reinterpret_cast<std::uintptr_t>(low);
+    const auto middleBase = reinterpret_cast<std::uintptr_t>(middle);
+    const auto highBase = reinterpret_cast<std::uintptr_t>(high);
+    change(low, true);
+    change(middle, true);
+    SetPartialImportJoins(false);
+    Require(bind(lowBase, piece + 16).second != 0 && HostImportFor(importing, lowBase, piece + 16) == nullptr, "with partial joins off, a buffer bound from one piece into the next was joined");
+    SetPartialImportJoins(true);
+    const auto [intoBuffer, intoCopied] = bind(lowBase, piece + 16);
+    const auto* into = HostImportFor(importing, lowBase, piece + 16);
+    Require(into != nullptr && into->base == lowBase && into->bytes == 2 * piece && intoBuffer == into->buffer && intoCopied == 0, "a buffer bound from one piece into the next, both no larger than the import window, was not imported over both pieces");
+    const auto [acrossBuffer, acrossCopied] = bind(middleBase - 16);
+    Require(acrossBuffer == intoBuffer && acrossCopied == 0, "a later bind across the joined pieces did not use their import");
+    change(high, true);
+    const auto [upperBuffer, upperCopied] = bind(highBase - 16);
+    const auto* upper = HostImportFor(importing, highBase - 16, 32);
+    Require(upper != nullptr && upper->base == middleBase && upper->bytes == window && upperBuffer == upper->buffer && upperCopied == 0, "a bind across a window the pieces fill was not bound in place from the window's import");
+    for (int round = 0; round < 3; ++round) {
+        const auto [lowerBuffer, lowerCopied] = bind(middleBase - 16);
+        const auto [higherBuffer, higherCopied] = bind(highBase - 16);
+        Require(lowerCopied != 0 && higherBuffer == upperBuffer && higherCopied == 0 && HostImportFor(importing, highBase - 16, 32)->buffer == upperBuffer, "a join wider than the import window was made, or retired the import it would have widened over");
+    }
+    change(middle, false);
+    Require(HostImportFor(importing, middleBase - 16, 32) == nullptr, "an import outlived a range it covered");
+    change(low, false);
+    change(high, false);
     SetHostImportWindow(0);
     ::operator delete(block, std::align_val_t{window});
 }
@@ -990,7 +1050,7 @@ void spaceReadAcrossImportsTests(const Context& context, const BdaTestAccess& ac
     SetHostImportWindow(window);
     const auto change = [&](std::uint8_t* range, bool add) {
         auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
-        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, false, true);
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, range == guest + 2 * piece, true);
         else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, range);
         GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
     };
@@ -1030,7 +1090,7 @@ void spaceReadAcrossImportsWrittenTests(const Context& context) {
     SetHostImportWindow(window);
     const auto change = [&](std::uint8_t* range, bool add) {
         auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
-        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, false, true);
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, range == guest + 2 * piece, true);
         else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, range);
         GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
     };
@@ -2485,6 +2545,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     spaceWriteMergedPastImportTests(context, access);
     spaceReadOverWritableImportTableTests(context);
     importJoinTests(context);
+    partialImportJoinTests(context);
     importCoverageHintBudgetTests(context, access);
     failedImportJoinProbeBudgetTests(context, access);
     importWholeRangeOverWindowTests(context);

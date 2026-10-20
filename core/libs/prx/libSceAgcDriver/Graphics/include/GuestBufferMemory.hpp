@@ -125,6 +125,7 @@ struct HostImportLookupCache {
 };
 const HostImport* HostImportForCached(const Context& context, std::uint64_t address, std::size_t bytes, HostImportLookupCache& cache);
 void SetHostImportWindow(std::uint64_t bytes);
+void SetPartialImportJoins(bool enabled);
 // Tests: the window of one large registered range (64 MiB) and the import budget (0: the configured one).
 void SetHostImportRangeWindow(std::uint64_t bytes);
 void SetHostImportBudget(std::uint64_t bytes);

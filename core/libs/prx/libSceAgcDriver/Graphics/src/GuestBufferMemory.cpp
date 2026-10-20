@@ -1299,6 +1299,7 @@ std::size_t leasedIndexContaining(const GuestAllocations::Lease& lease, std::uin
 }
 
 std::atomic<std::uint64_t> importWindow{0};
+std::atomic<bool> partialImportJoins{std::getenv("APS5_NO_PARTIAL_IMPORT_JOIN") == nullptr};
 
 ImportRun importRun(const GuestAllocations::Lease& lease, std::uint64_t address) {
     const auto index = leasedIndexContaining(lease, address);
@@ -1362,6 +1363,7 @@ ImportRun joinedRun(const GuestAllocations::Lease& lease, std::uint64_t begin, s
     if (run.ranges.empty()) return run;
     if (std::all_of(run.ranges.begin(), run.ranges.end(), [window](const auto& range) { return range->bytes > window; })) return run;
     if (begin == run.base && end == run.base + run.bytes) return run;
+    if (run.bytes <= window && partialImportJoins.load(std::memory_order_relaxed)) return run;
     return {};
 }
 
@@ -1559,8 +1561,9 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
 
 template<bool Diagnose = false>
 const HostImport* importJoined(const Context& context, HostImports& state, std::uint64_t begin, std::uint64_t end, const GuestAllocations::Lease& lease, ImportRejection* rejection = nullptr) {
-    if (const auto* low = peekImport(state, begin, begin + 1); low != nullptr && low->joined) begin = low->base;
-    if (const auto* high = peekImport(state, end - 1, end); high != nullptr && high->joined) end = high->base + high->bytes;
+    const bool partial = partialImportJoins.load(std::memory_order_relaxed);
+    if (const auto* low = peekImport(state, begin, begin + 1); low != nullptr && (low->joined || partial)) begin = low->base;
+    if (const auto* high = peekImport(state, end - 1, end); high != nullptr && (high->joined || partial)) end = high->base + high->bytes;
     auto run = joinedRun(lease, begin, end);
     if (run.ranges.empty()) {
         if constexpr (Diagnose) {
@@ -3272,6 +3275,10 @@ void SetHostImportWindow(std::uint64_t bytes) {
     auto& state = Imports();
     std::lock_guard lock(state.mutex);
     if (importWindow.exchange(bytes, std::memory_order_relaxed) != bytes) ++state.missPolicy;
+}
+
+void SetPartialImportJoins(bool enabled) {
+    partialImportJoins.store(enabled, std::memory_order_relaxed);
 }
 
 void SetHostImportRangeWindow(std::uint64_t bytes) {
