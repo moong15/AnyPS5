@@ -861,3 +861,4 @@ Known: perf-pair.sh takes RUN_TICKS/PRESS_SECONDS env; press-enter.ps1 presses R
 - run290-sb5warm (75e23384d) OK; run291-sb5 gave no-trace (load crash, retry was in progress) -> stopped. Lock released, game killed.
 - Resume order: (1) run291-sb5 measured on libs-sb5-75e23384d (deploy + verify first; reference run); (2) relocation recheck sb5 + main329 (agc_driver_draw_cache_relocation); (3) scratchpad/fps8-chain.sh minus its wait line: build cfb6207e0 in E:\AnyPS5-sb5 detached, tests, run292-fps8warm + run293-fps8 vs run291.
 - Next brief candidate: Packet.device_lock 19.9 s/90 s on queue 0.
+- 12:00 sb5 = cfb6207e0 (fps8 result-memo bypass kept). run291 ref 5.68 fps -> run293 7.88 fps. Relocation test regression on sb5 (passes on main) under investigation.
