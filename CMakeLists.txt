@@ -44,6 +44,9 @@ if(BUILD_TESTING)
         get_filename_component(testCompilerDirectory "${CMAKE_CXX_COMPILER}" DIRECTORY)
         foreach(runtimeName IN ITEMS libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll)
             if(NOT EXISTS "${testCompilerDirectory}/${runtimeName}")
+                if(ANYPS5_RELINKER_ONLY)
+                    continue()
+                endif()
                 message(FATAL_ERROR "Cannot locate MinGW runtime: ${runtimeName}")
             endif()
             file(COPY "${testCompilerDirectory}/${runtimeName}" DESTINATION "${ANYPS5_TEST_OUTPUT_DIRECTORY}")
@@ -167,6 +170,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_wrapped_declarations.py)
         add_test(NAME conventions_ci_gate COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_ci_gate.py)
+        add_test(NAME conventions_git_errors COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_git.py)
         add_test(NAME conventions_doc_links COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_doc_links.py)
         add_test(NAME conventions_unknown_nids COMMAND ${Python3_EXECUTABLE}
@@ -184,7 +189,13 @@ if(BUILD_TESTING)
         add_test(NAME check_main_sync COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_main_sync.py)
         add_test(NAME configure_seed COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_configure_seed.py)
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_configure_seed.py ConfigureSeedTests)
+        add_test(NAME configure_seed_paths COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_configure_seed.py ConfigureSeedPathTests)
+        add_test(NAME configure_seed_round_trips COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_configure_seed.py ConfigureSeedRoundTripTests)
+        add_test(NAME configure_seed_parsing COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_configure_seed.py ChecksParsingTests)
         add_test(NAME stubgen COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_stubgen.py)
         add_test(NAME debt_split COMMAND ${Python3_EXECUTABLE}
@@ -202,6 +213,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_wrapped_exports.py)
         add_test(NAME pr_overlap_own_branch COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_own_branch.py)
+        add_test(NAME pr_overlap_errors COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_errors.py)
         add_test(NAME nid_database_cache COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_nid_names.py)
         add_test(NAME release_package COMMAND ${Python3_EXECUTABLE}

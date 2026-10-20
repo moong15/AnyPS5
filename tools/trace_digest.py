@@ -72,7 +72,7 @@ class Trace:
 
 def load_trace(path):
     opener = gzip.open if str(path).endswith(".gz") else open
-    with opener(path, "rt", encoding="utf-8") as handle:
+    with opener(path, "rt", encoding="utf-8-sig") as handle:
         return Trace(json.load(handle))
 
 

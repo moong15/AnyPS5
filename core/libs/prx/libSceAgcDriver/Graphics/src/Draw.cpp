@@ -2257,6 +2257,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         Require(!draw.indirect && !state.primitiveRestart && !state.rectList && !state.quadList && !state.stages.mesh && !state.stages.tessellation && state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, "stencil replay supports direct triangle lists without restart, mesh or tessellation");
         Require(!state.depthBiasPerFace && !ShadersWriteMemory(shaders), "stencil replay refuses face splits and shader memory writes");
         Require(std::ranges::all_of(shaders, [](const CompiledShader& shader) { return shader.program != nullptr && shader.program->stencilReplaySafe && (shader.stage == ShaderRecompiler::ShaderStage::Vertex || shader.stage == ShaderRecompiler::ShaderStage::Fragment); }), "stencil replay refuses stages with side effects, clocks, subgroup dependencies or primitive ID inputs");
+        if (stencilReferences.size() == 256u) {
+            static std::once_flag unbounded;
+            std::call_once(unbounded, [] { APS5_LOG_CHARS_OUT("Stencil replay: a draw replays all 256 stencil reference values because its pixel shader's export is not bounded, recording 256 passes per triangle and instance"); });
+        }
         for (const auto& shader : shaders) {
             if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) continue;
             Require((shader.program->hostSubgroupSize == 1u || shader.program->hostSubgroupSize == context.subgroup.subgroupSize) && shader.program->spirv.size() >= 5u && shader.program->spirv[1] >= 0x00010000u && shader.program->spirv[1] < 0x00010600u, "stencil replay vertex subgroup contract differs from the physical device");

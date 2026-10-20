@@ -693,7 +693,7 @@ int APS5_VABI sceSaveDataSaveIconByPath(const SaveDataMountPoint* mount_point, c
 
 static int setParam(const SaveDataMountPoint* mount_point, uint32_t param_type, const void* param_buf, size_t param_buf_size) {
     if (mount_point == nullptr || param_buf == nullptr) {
-        throw std::runtime_error("sceSaveDataSetParam: null argument");
+        return SAVE_DATA_ERROR_PARAMETER;
     }
     std::lock_guard lock(g_slots_mutex);
     const int slot = find_slot_by_mount_point(mount_point->data);
@@ -993,6 +993,51 @@ int APS5_VABI sceSaveDataDirNameSearch2(const SaveDataDirNameSearchCond* cond, S
 }
 
 int APS5_VABI sceSaveDataPrepareForTransferring() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataCheckIpmiIfSize() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebug() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugCheckBackupData() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugCleanMount() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugCompiledSdkVersion() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugCreateSaveDataRoot() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugProspero() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugRemoveSaveDataRoot() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceSaveDataDebugTarget() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

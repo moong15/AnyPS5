@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_compile
@@ -65,6 +66,43 @@ class CheckCompileTests(unittest.TestCase):
         self.assertFalse((self.build / "unit.o").exists())
         self.assertFalse((self.build / "unit.o.d").exists())
         self.assertFalse((self.build / "unit.o.rsp").exists())
+
+    def test_ninja_commands_in_a_non_ascii_build_directory_are_found(self):
+        compiler = shutil.which("clang") or shutil.which("gcc")
+        if compiler is None or shutil.which("ninja") is None:
+            self.skipTest("needs Ninja and a C compiler")
+        name = "ação"
+        build = self.root / name
+        if os.name == "nt":
+            try:
+                str(build).encode("mbcs", "strict")
+            except UnicodeEncodeError:
+                self.skipTest("the ANSI code page cannot represent the build directory")
+        build.mkdir()
+        self.source("unit.c")
+        command = subprocess.list2cmdline([compiler]) if os.name == "nt" else '"' + compiler + '"'
+        (build / "build.ninja").write_text(
+            "rule cc\n  command = " + command + " -c $in -o $out\nbuild unit.o: cc ../unit.c\n", encoding="utf-8")
+        result = self.tool("--build", name, "unit.c")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 translation units compile", result.stdout)
+
+    def test_windows_ninja_output_is_decoded_in_its_declared_build_file_encoding(self):
+        cases = (("Build file encoding: UTF-8\n", 0, "utf-8"), ("Build file encoding: ANSI\n", 0, "mbcs"),
+                 ("Build file encoding: OEM\n", 0, None), ("", 1, None))
+        for declared, status, expected in cases:
+            with self.subTest(declared=declared, status=status):
+                result = subprocess.CompletedProcess([], status, declared, "ninja: error: unknown tool" if status else "")
+                with patch.object(check_compile.sys, "platform", "win32"), \
+                        patch.object(check_compile, "capture", return_value=result):
+                    if expected is None:
+                        with self.assertRaises(ValueError):
+                            check_compile.ninja_encoding("ninja")
+                    else:
+                        self.assertEqual(check_compile.ninja_encoding("ninja"), expected)
+        with patch.object(check_compile.sys, "platform", "linux"), \
+                patch.object(check_compile, "capture", side_effect=AssertionError("queried Ninja")):
+            self.assertEqual(check_compile.ninja_encoding("ninja"), "utf-8")
 
     def test_syntax_check_preserves_existing_clang_compilation_fragment(self):
         compiler = shutil.which("clang")
@@ -361,14 +399,17 @@ class CheckCompileTests(unittest.TestCase):
         bin = self.root / "bin"
         bin.mkdir()
         stub = bin / "ninja_stub.py"
-        stub.write_text("import json\nprint(json.dumps(%r))\n" % [entry], encoding="utf-8")
+        stub.write_text("import json\nimport sys\n"
+                        "if sys.argv[1:] == ['-t', 'wincodepage']:\n    print('Build file encoding: UTF-8')\n"
+                        "else:\n    print(json.dumps(%r))\n" % [entry], encoding="utf-8")
         if os.name == "nt":
-            (bin / "ninja.cmd").write_text(f'@"{sys.executable}" "{stub}"\n', encoding="utf-8")
+            (bin / "ninja.cmd").write_text('@"%NINJA_STUB_PYTHON%" "%~dp0ninja_stub.py" %*\n', encoding="ascii")
         else:
             ninja = bin / "ninja"
             ninja.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stub}"\n', encoding="utf-8")
             ninja.chmod(0o755)
-        result = self.tool("unit.cpp", env={"PATH": f"{bin}{os.pathsep}{os.environ['PATH']}"})
+        result = self.tool("unit.cpp", env={"PATH": f"{bin}{os.pathsep}{os.environ['PATH']}",
+                                            "NINJA_STUB_PYTHON": sys.executable})
         self.assertEqual(result.returncode, 0)
         self.assertIn("1 translation units compile", result.stdout)
 

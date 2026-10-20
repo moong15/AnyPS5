@@ -1,5 +1,8 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/General.hpp"
+#ifdef _WIN32
+#include "prx/libc/include/PreciseWait.hpp"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -363,11 +366,16 @@ int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* target, Xtime*) {
             --remaining.tv_sec;
         }
         remaining.tv_sec = std::min<time_t>(remaining.tv_sec, longestSleepSeconds);
+#ifdef _WIN32
+        PreciseSleepHundredNanos(static_cast<unsigned long long>(remaining.tv_sec) * 10000000ULL +
+            (static_cast<unsigned long long>(remaining.tv_nsec) + 99ULL) / 100ULL);
+#else
         if (nanosleep(&remaining, nullptr) != 0) {
             if (errno == EINTR)
                 continue;
             throw std::runtime_error("_Thrd_sleep: nanosleep failed");
         }
+#endif
     }
 }
 

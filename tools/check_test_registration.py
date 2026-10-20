@@ -130,8 +130,11 @@ if __name__ == "__main__":
     parser.add_argument("build", type=Path, nargs="?", default=Path("build"), help="configured build directory")
     parser.add_argument("--list", action="store_true", help="print every test executable and whether ctest runs it")
     args = parser.parse_args()
-    every = sorted(built(args.build))
-    run = registered(args.build)
+    try:
+        every = sorted(built(args.build))
+        run = registered(args.build)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        parser.error(str(error))
     if args.list:
         for name in every:
             print(f"{'run' if name in run else 'NOT RUN'}  {name}")

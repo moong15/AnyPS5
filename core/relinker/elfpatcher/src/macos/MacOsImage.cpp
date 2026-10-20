@@ -383,7 +383,7 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
     const auto& headers = *input.Headers;
     const auto imageBase = image.GetImageBase();
     const auto tls = ScanTls(*input.Source, headers, image);
-    const bool hasTls = tls.Tls != nullptr && tls.Tls->MemorySize != 0;
+    const bool hasTls = tls.Tls != nullptr && (tls.Tls->MemorySize != 0 || !tls.Accesses.empty());
     if (!hasTls && !tls.Accesses.empty()) throw Domain::RelinkerException("Guest TLS access without a non-empty PT_TLS");
     if (!hasTls && !input.TlsModuleSlots.empty()) throw Domain::RelinkerException("Guest TLS module relocation without a non-empty PT_TLS");
 

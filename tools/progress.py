@@ -473,7 +473,13 @@ def main(argv=None):
         if args.compare:
             if args.module or args.json:
                 parser.error("--compare does not combine with --module or --json")
-            base, head = (json.loads(path.read_text(encoding="utf-8")) for path in args.compare)
+            snapshots = []
+            for path in args.compare:
+                try:
+                    snapshots.append(json.loads(path.read_text(encoding="utf-8")))
+                except (OSError, ValueError) as error:
+                    parser.error(f"{path}: {error}")
+            base, head = snapshots
             print(report(base, head), end="")
             return 0
         if not args.output and not (args.module or args.json):

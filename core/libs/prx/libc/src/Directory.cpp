@@ -117,7 +117,11 @@ void* APS5_VABI opendir_nid_postfix(const char* path) {
         if (const int error = ResolvePathError_nid_no_patch(path, directory->path)) { errno = error; return nullptr; }
         AppArchiveRefuseMergedListing_nid_no_patch(directory->path, path);
         directory->native = OpenNative(directory->path);
-        if (!directory->native) { errno = DirectoryError(errno); return nullptr; }
+        if (!directory->native) {
+            errno = DirectoryError(errno);
+            if (errno == 2) errno = NotFoundError_nid_no_patch(directory->path);
+            return nullptr;
+        }
         return directory.release();
     } catch (const std::bad_alloc&) { errno = 12; return nullptr; }
       catch (const std::filesystem::filesystem_error&) { errno = 5; return nullptr; }

@@ -262,4 +262,19 @@ int APS5_VABI scePlayGoTerminate(void) {
     return 0;
 }
 
+int APS5_VABI scePlayGoRequestNextChunk() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI scePlayGoSetLanguageMask(std::uint32_t handle, std::uint64_t languageMask) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI scePlayGoSnapshot() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

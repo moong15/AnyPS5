@@ -84,6 +84,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `ANYPS5_REQUIRE_DESCRIPTOR_BINDING_FLAGS` | presence | `core/libs/prx/libSceAgcDriver/tests/ComputePipelineReplay.cpp` |  | fails the replay test instead of accepting a device that refuses descriptor binding flags |
 | `ANYPS5_REQUIRE_ROBUST2` | presence | `core/libs/prx/libSceAgcDriver/tests/execution/LdsMixedWidthAtomics.cpp` |  | fails the LDS lock-budget test when the device does not enable robustBufferAccess2, instead of only printing it |
 | `ANYPS5_REQUIRE_VULKAN` | presence | `core/libs/prx/libSceAgcDriver/tests/BdaDevice.cpp` |  | fails a test instead of skipping when no usable Vulkan device is present |
+| `ANYPS5_SCREENSHOTS` | string | `core/libs/prx/libSceAgcDriver/Execution/src/Screenshot.cpp` |  | directory the screenshot key saves its PNG files to, defaulting to anyps5-screenshots beside the executable |
 | `APS5_ADDRESS_COPY_MAX_MIB` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` | 64 | upper bound in MiB on the guest memory one address-based build copies; exceeding it aborts |
 | `APS5_ALL_BUFFERS_WRITTEN` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | notes every shader buffer element as written, as before bufferWritten existed |
 | `APS5_ASSERT_GPU_LOCK` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | aborts when a guarded path is reached without holding GuestMemory::GpuMutex |
@@ -432,6 +433,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_THREAD_RTTIME_US` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/ThreadPriority.cpp` | 200000 | hard RLIMIT_RTTIME the realtime plan lowers to, in microseconds |
 | `APS5_TOLERATE_OVERSIZED_DESCRIPTOR` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/ShaderResources.cpp` |  | allows the oversized descriptor fallback |
 | `APS5_TRACE_BARRIERS` | integer | `core/libs/prx/libSceAgcDriver/Graphics/src/Recorder.cpp` |  | prints that many simulated hazard barriers before stopping |
+| `APS5_TRACE_BENCH` | string | `core/libs/prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp` |  | `1` with `APS5_TRACE_SUMMARY_EVERY` also rewrites `aps5-bench-<commit>-<pid>.json.gz` with every interval's frame times; any other value fails the first present |
 | `APS5_TRACE_BIGBUF` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | lists every copied guest region of at least 1 MiB |
 | `APS5_TRACE_CAPSYNC` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Memory/WriteEvidence.cpp` |  | prints every unlocked hook wait |
 | `APS5_TRACE_CONTEXT_STATE` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Pm4.cpp` |  | logs context-state operations and the context registers written |

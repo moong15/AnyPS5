@@ -128,6 +128,41 @@ class TraceDigestTests(unittest.TestCase):
         return trace_digest.digest(trace_digest.load_trace(self.trace), trace_digest.load_summary(None, self.trace),
                                    trace_digest.load_stacks(self.stacks), worst=2, top=3)
 
+    def json_output(self, trace, *arguments):
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(trace), "--json", *arguments],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_utf8_bom_plain_and_compressed_traces_preserve_the_digest(self):
+        events = [dict(event, args={"name": "worker \u03a9"}) if event["name"] == "thread_name" and event["tid"] == 1
+                  else event for event in EVENTS]
+        text = json.dumps({"traceEvents": events}, ensure_ascii=False)
+        self.trace.write_bytes(gzip.compress(text.encode("utf-8")))
+        expected = self.json_output(self.trace)
+        for trace in (self.trace, self.trace.with_suffix("")):
+            for encoding in ("utf-8", "utf-8-sig"):
+                with self.subTest(trace=trace.name, encoding=encoding):
+                    data = text.encode(encoding)
+                    trace.write_bytes(gzip.compress(data) if trace.suffix == ".gz" else data)
+                    self.assertEqual(self.json_output(trace), expected)
+
+    def test_utf8_bom_summary_preserves_the_digest(self):
+        expected = self.json_output(self.trace)
+        summary = self.trace.with_name("aps5-summary.jsonl")
+        summary.write_text(summary.read_text(encoding="utf-8"), encoding="utf-8-sig")
+        self.assertEqual(self.json_output(self.trace), expected)
+
+    def test_utf8_bom_stacks_preserve_comments_and_frame_names(self):
+        for text in (STACKS, "root;module\u03a9+0x1 2\n"):
+            with self.subTest(comments=text.startswith("#")):
+                self.stacks.write_text(text, encoding="utf-8")
+                expected = self.json_output(self.trace, "--stacks", str(self.stacks))
+                expected_stacks = trace_digest.load_stacks(self.stacks)
+                self.stacks.write_text(text, encoding="utf-8-sig")
+                self.assertEqual(self.json_output(self.trace, "--stacks", str(self.stacks)), expected)
+                self.assertEqual(trace_digest.load_stacks(self.stacks), expected_stacks)
+
     def test_summary_is_the_line_of_this_trace(self):
         self.assertEqual(self.result()["summary"]["trace"], "aps5-trace-abc-7.json.gz")
 
@@ -540,6 +575,14 @@ class IntervalDigestTests(unittest.TestCase):
 
     def test_window_lines_are_skipped(self):
         self.assertEqual(len(trace_digest.load_intervals(self.path)), 4)
+
+    def test_utf8_bom_intervals_preserve_the_command_line_digest(self):
+        expected = trace_digest.digest_intervals(trace_digest.load_intervals(self.path))
+        self.path.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8-sig")
+        result = subprocess.run([sys.executable, trace_digest.__file__, str(self.path), "--json"],
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), expected)
 
     def test_rows(self):
         result = trace_digest.digest_intervals(trace_digest.load_intervals(self.path))

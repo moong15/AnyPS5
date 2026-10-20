@@ -39,6 +39,7 @@
 #include "VertexRangeProducer_frag_spv.h"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "BdaAbi.hpp"
+#include "ShaderCacheSourceVersion.hpp"
 #include <SDL_loadso.h>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -9198,6 +9199,70 @@ void singleCubeTests(const Device& device, Recorder& recorder) {
     }
 }
 
+void cubeExtraSliceTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    SampleProgram program(context, recorder, SAMPLE_ARRAY_SPV);
+    const VkComponentMapping identity{};
+    std::array<std::uint32_t, 8> words{0x1000u, (56u << 20u) | (3u << 30u), 15u | (63u << 14u), 0xb0000facu, 6u, 0, 0, 0};
+    auto resource = DecodeTextureResource(words);
+    const auto geometry = DescribeSurface(resource);
+    Require(geometry.imageLayers == 7u, "a cube with a slice past its last whole cube does not allocate it");
+    std::vector<std::byte> memory(static_cast<std::size_t>(geometry.guestBytes) + 256);
+    auto* surface = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(memory.data()) + 255) & ~std::uintptr_t{255});
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        std::memset(surface + geometry.GuestLayerOffset(layer), 16 * (layer + 1), static_cast<std::size_t>(geometry.layerBytes));
+    }
+    resource.baseAddress = reinterpret_cast<std::uint64_t>(surface);
+    const std::span<const std::byte> snapshot(surface, static_cast<std::size_t>(geometry.guestBytes));
+    Texture texture(context, detiler, resource, identity, snapshot);
+    auto storage = StorageTexture::Create(context, detiler, resource, 0);
+    recorder.Keep(storage);
+    Texture storageView(context, storage, resource, identity);
+    const auto wordCube = [&words](std::vector<std::byte>& backing, std::uint32_t format, const std::function<std::uint32_t(std::uint32_t)>& word) {
+        auto cubeWords = words;
+        cubeWords[1] = (format << 20u) | (3u << 30u);
+        auto described = DecodeTextureResource(cubeWords);
+        const auto layout = DescribeSurface(described);
+        backing.assign(static_cast<std::size_t>(layout.guestBytes) + 256, std::byte{});
+        auto* base = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(backing.data()) + 255) & ~std::uintptr_t{255});
+        for (std::uint32_t layer = 0; layer < layout.imageLayers; ++layer) {
+            const auto value = word(layer);
+            for (std::uint64_t offset = 0; offset < layout.layerBytes; offset += sizeof(value)) std::memcpy(base + layout.GuestLayerOffset(layer) + offset, &value, sizeof(value));
+        }
+        described.baseAddress = reinterpret_cast<std::uint64_t>(base);
+        return described;
+    };
+    std::vector<std::byte> depthMemory;
+    const auto depth = wordCube(depthMemory, 22u, [](std::uint32_t layer) {
+        const float value = static_cast<float>(layer + 1) / 8.0f;
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    });
+    auto depthStorage = StorageTexture::Create(context, detiler, depth, 0);
+    recorder.Keep(depthStorage);
+    Require(Texture::CanDepthCopyFrom(*depthStorage, depth), "a cube with a slice past its last whole cube cannot take a depth copy");
+    Texture depthCopy(context, depthStorage, depth, identity, Texture::DepthCopyTag{});
+    depthCopy.RefreshDepthCopy();
+    constexpr std::array<std::uint32_t, 7> unsignedFloats{960u, 1024u, 1056u, 1088u, 1104u, 1120u, 1136u};
+    std::vector<std::byte> repackMemory;
+    const auto repacked = wordCube(repackMemory, 43u, [&unsignedFloats](std::uint32_t layer) { return unsignedFloats[layer] << 21u; });
+    auto repackStorage = StorageTexture::Create(context, detiler, repacked, 0);
+    recorder.Keep(repackStorage);
+    Require(Texture::CanRepackCopyFrom(*repackStorage, repacked), "a cube with a slice past its last whole cube cannot take a repacked copy");
+    Texture repackCopy(context, repackStorage, repacked, identity, Texture::RepackCopyTag{});
+    repackCopy.RefreshDepthCopy();
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        const auto expected = 16.0f * (layer + 1) / 255.0f;
+        expectRed(program.Red(texture.View(), texture.Layout(), 0, static_cast<float>(layer)), expected, "a cube snapshot with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(storageView.View(), storageView.Layout(), 0, static_cast<float>(layer)), expected, "a cube storage view with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(depthCopy.View(), depthCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1) / 8.0f, "a cube depth copy with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(repackCopy.View(), repackCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1), "a cube repacked copy with a slice past its last whole cube sampled the wrong slice");
+    }
+}
+
 struct SampledViewProbe {
     Context& context;
     PFN_vkGetDeviceProcAddr resolver;
@@ -9773,9 +9838,14 @@ int pipelineCacheFileTests(const Device& device) {
         return after < before + footprints[index] / 2;
     };
     const auto cacheFile = [&] {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) Require(entry.is_directory(), "a pipeline cache file lives in the shader cache root");
+        char version[17];
+        std::snprintf(version, sizeof(version), "%016llx", static_cast<unsigned long long>(ShaderRecompiler::ShaderDiskCache::Generated::SourceVersion));
+        const auto versionDirectory = directory / version;
+        Require(std::filesystem::is_directory(versionDirectory), "the current shader cache version has no directory");
         std::vector<std::filesystem::path> found;
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) found.push_back(entry.path());
-        Require(found.size() == 1 && found.front().filename().string().starts_with("vk-pipelines-"), "the pipeline cache directory does not hold exactly one cache file");
+        for (const auto& entry : std::filesystem::directory_iterator(versionDirectory)) found.push_back(entry.path());
+        Require(found.size() == 1 && found.front().filename().string().starts_with("vk-pipelines-"), "the current shader cache version's directory does not hold exactly one pipeline cache file");
         return found.front();
     };
     const auto contents = [](const std::filesystem::path& path) {
@@ -10554,6 +10624,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
             singleCubeTests(device, recorder);
+            cubeExtraSliceTests(device, recorder);
             std::cout << "Single cube snapshot and storage sampling tests passed\n";
             return 0;
         }
@@ -10848,6 +10919,7 @@ int main(int argc, char** argv) {
         firstLayerViewTests(device, recorder);
         sampledStorageBaseLevelUsageTests(device, recorder);
         singleCubeTests(device, recorder);
+        cubeExtraSliceTests(device, recorder);
         atomicViewTests(device, recorder);
         metadataPassTests(device, recorder);
         cmaskPassTests(device, recorder);

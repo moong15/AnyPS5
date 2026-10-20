@@ -565,4 +565,43 @@ int APS5_VABI puts_nid_postfix(const char* s) {
     return std::puts(s);
 }
 
+extern FileStream* __stdinp_nid_postfix;
+
+int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
+    if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    auto* native = GetNativeStream(stream);
+#ifdef _WIN32
+    const int result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
+#else
+    RejectGuestWideScan(format);
+    std::va_list copy;
+    va_copy(copy, *reinterpret_cast<std::va_list*>(args));
+    const int result = HostVfscanf(native, format, copy);
+    va_end(copy);
+#endif
+    stream->SyncStatus();
+    return result;
+}
+
+int APS5_VABI vscanf_nid_postfix(const char* format, VaList* args) {
+    return vfscanf_nid_postfix(__stdinp_nid_postfix, format, args);
+}
+
+int APS5_VABI scanf_nid_postfix(const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfscanf_nid_postfix(__stdinp_nid_postfix, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
+}
+
 }

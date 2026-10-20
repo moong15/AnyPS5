@@ -564,8 +564,15 @@ private:
     Journal() {
         const char* off = std::getenv("APS5_NO_PIPELINE_JOURNAL");
         if ((off != nullptr && std::strcmp(off, "0") != 0) || !ShaderRecompiler::ShaderDiskCache::Enabled()) return;
-        path = ShaderRecompiler::ShaderDiskCache::EntryDirectory() / "pipelines.journal";
-        lockPath = ShaderRecompiler::ShaderDiskCache::EntryDirectory() / "pipelines.journal.lock";
+        auto directory = ShaderRecompiler::ShaderDiskCache::EntryDirectory();
+#ifdef _WIN32
+        std::error_code error;
+        const auto native = ShaderRecompiler::NativeCachePath_nid_no_patch(directory, error);
+        if (error) throw std::filesystem::filesystem_error("cannot resolve the pipeline journal directory", directory, error);
+        directory = native;
+#endif
+        path = directory / "pipelines.journal";
+        lockPath = directory / "pipelines.journal.lock";
         maxBytes = configured("APS5_PIPELINE_JOURNAL_MAX_MIB", 1024u) << 20u;
         std::thread([this] { run(); }).detach();
     }

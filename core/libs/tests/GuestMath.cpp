@@ -317,42 +317,136 @@ static bool ExtendedBits(long double value, std::uint64_t mantissa, std::uint16_
 }
 
 static void CheckNanConversions() {
-    const struct { const char* text; std::size_t consumed; bool negative; } cases[] = {
-        {"nan(0x123)", 10, false}, {" -NaN(1)!", 8, true}, {"nan(0x800000)", 13, false},
-        {"nan(0x10000000000000)", 21, false}, {"nan(0x8000000000000000)", 23, false},
+    struct MeasuredNan {
+        const char* text;
+        std::uint64_t bits;
+        std::size_t used;
+        std::size_t sequenceUsed;
+        bool extendedMeasured;
+        bool wideDoubleMeasured;
+        bool wideOtherMeasured;
+    };
+    static constexpr MeasuredNan cases[] = {
+        {"nan", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"NAN", 0x7ff8000000000000ull, 3, 3, false, false, false},
+        {"nan()", 0x7ff8000000000000ull, 5, 5, false, false, false},
+        {"nan(1)", 0x7ff8000000000001ull, 6, 6, true, true, true},
+        {"nan(0x10)", 0x7ff8000000000010ull, 9, 9, false, false, false},
+        {"nan(abc)", 0x7ff8000000000abcull, 8, 8, false, false, false},
+        {"nan(", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"-nan", 0xfff8000000000000ull, 4, 4, true, true, true},
+        {"+nan(5)", 0x7ff8000000000005ull, 7, 7, false, false, false},
+        {"nan(10)", 0x7ff8000000000010ull, 7, 7, false, false, false},
+        {"nan(xyz)", 0x7ff8000000000000ull, 8, 8, false, false, false},
+        {"nan(_)", 0x7ff8000000000000ull, 6, 6, false, false, false},
+        {"nan(12", 0x7ff8000000000012ull, 3, 3, false, false, false},
+        {"-nan(5)", 0xfff8000000000005ull, 7, 7, false, false, false},
+        {"nan(0x8000000000000)", 0x7ff8000000000000ull, 20, 20, false, false, false},
+        {"nan(0x10000000000000)", 0x7ff8000000000001ull, 21, 21, true, true, false},
+        {"nan(0x400000)", 0x7ff8000000400000ull, 13, 13, false, false, false},
+        {"NaN(0X1F)", 0x7ff800000000001full, 9, 9, false, false, false},
+        {"nan(0x)", 0x7ff8000000000000ull, 7, 7, false, false, false},
+        {"nan(123abc)", 0x7ff8000000123abcull, 11, 11, true, true, false},
+        {"nan(1x2)", 0x7ff8000000000000ull, 8, 8, true, true, false},
+        {"nan(0x1g)", 0x7ff8000000000000ull, 9, 9, true, true, false},
+        {"nan(g1)", 0x7ff8000000000000ull, 7, 7, true, true, false},
+        {"nan(0x0x1)", 0x7ff8000000000000ull, 10, 10, true, true, false},
+        {"nan(fffffffffffff)", 0x7fffffffffffffffull, 18, 18, true, true, false},
+        {"nan(1fffffffffffff)", 0x7fffffffffffffffull, 19, 19, true, true, false},
+        {"nan(10000000000000)", 0x7ff8000000000001ull, 19, 19, true, true, false},
+        {"nan(20000000000000)", 0x7ff8000000000001ull, 19, 19, true, true, false},
+        {"nan(0x20000000000000)", 0x7ff8000000000001ull, 21, 21, true, true, false},
+        {"nan(ffffffffffffffff)", 0x7fffffffffffffffull, 21, 21, true, true, false},
+        {"nan(10000000000000000)", 0x7ff8000000000001ull, 22, 22, true, true, false},
+        {"nan(0X)", 0x7ff8000000000000ull, 7, 7, true, true, false},
+        {"nan(-1)", 0x7ff8000000000000ull, 7, 3, true, true, false},
+        {"nan(+1)", 0x7ff8000000000000ull, 7, 3, true, true, false},
+        {"nan( 1)", 0x7ff8000000000001ull, 7, 3, true, true, false},
+        {"nan(1 )", 0x7ff8000100000000ull, 7, 3, true, true, false},
+        {"nan(0)", 0x7ff8000000000001ull, 6, 6, true, true, false},
+        {"nan(00001)", 0x7ff8000000000001ull, 10, 10, true, true, false},
+        {"nan(0x0001)", 0x7ff8000000000001ull, 11, 11, true, true, false},
+        {"nan(8000000000000)", 0x7ff8000000000000ull, 18, 18, true, true, false},
+        {"nan(7ffffffffffff)", 0x7fffffffffffffffull, 18, 18, true, true, false},
+        {"nan(123", 0x7ff8000000000123ull, 3, 3, true, true, false},
+        {"nan(1)x", 0x7ff8000000000001ull, 6, 6, true, true, false},
+        {"-nan(1)", 0xfff8000000000001ull, 7, 7, true, true, false},
+        {"nan(abcdefABCDEF)", 0x7ff8abcdefabcdefull, 17, 17, true, true, false},
+        {"nan(0xABCDEF)", 0x7ff8000000abcdefull, 13, 13, true, true, false},
+        {"nan(9)", 0x7ff8000000000009ull, 6, 6, true, true, false},
+        {"nan(1_2)", 0x7ff8000000000000ull, 8, 8, true, true, false},
+        {"nan(_1)", 0x7ff8000000000000ull, 7, 7, true, true, false},
+        {"nan(1)(2)", 0x7ff8000000000001ull, 6, 6, true, true, false},
+        {"+nan", 0x7ff8000000000000ull, 4, 4, true, true, true},
+        {"NaN", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"-NAN(5)", 0xfff8000000000005ull, 7, 7, true, true, true},
+        {"nan(5)", 0x7ff8000000000005ull, 6, 6, true, true, true},
+        {"-nan(abc)", 0xfff8000000000abcull, 9, 9, true, true, true},
+        {"  -nan", 0xfff8000000000000ull, 6, 6, true, true, true},
+        {"nan(12 x", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"nan(12x", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"nan(1", 0x7ff8000000000001ull, 3, 3, true, true, true},
+        {"nan(a b)", 0x7ff8000a0000000bull, 8, 3, true, true, true},
+        {"nan(ab)", 0x7ff80000000000abull, 7, 7, true, true, true},
+        {"nanx", 0x7ff8000000000000ull, 3, 3, true, true, true},
+        {"-nan()", 0xfff8000000000000ull, 6, 6, true, true, true},
+        {"nan(0x8000000000001)", 0x7ff8000000000001ull, 20, 20, true, true, true},
     };
     bool correct = true;
     for (const auto& test : cases) {
-        const char* expectedEnd = test.text + test.consumed;
-        const std::uint64_t expectedDouble = test.negative ? 0xfff8000000000000ull : 0x7ff8000000000000ull;
         char* end = nullptr;
         const auto value = std::bit_cast<std::uint64_t>(strtod_nid_postfix(test.text, &end));
-        if (value != expectedDouble || end != expectedEnd) {
+        if (value != test.bits || end != test.text + test.used) {
             std::fprintf(stderr, "strtod(\"%s\") = 0x%016llx\n", test.text, static_cast<unsigned long long>(value));
             correct = false;
         }
-        const auto ascii = std::bit_cast<std::uint64_t>(atof_nid_postfix(test.text));
-        if (ascii != expectedDouble) {
-            std::fprintf(stderr, "atof(\"%s\") = 0x%016llx\n", test.text, static_cast<unsigned long long>(ascii));
+        if (std::bit_cast<std::uint64_t>(atof_nid_postfix(test.text)) != test.bits) {
+            std::fprintf(stderr, "atof(\"%s\")\n", test.text);
             correct = false;
         }
         const auto single = std::bit_cast<std::uint32_t>(strtof_nid_postfix(test.text, &end));
-        if (single != (test.negative ? 0xffc00000u : 0x7fc00000u) || end != expectedEnd) {
+        if (single != 0x7fc00000u || end != test.text + test.sequenceUsed) {
             std::fprintf(stderr, "strtof(\"%s\") = 0x%08x\n", test.text, static_cast<unsigned>(single));
             correct = false;
         }
-        const long double extended = strtold_nid_postfix(test.text, &end);
-        if (!ExtendedBits(extended, 0xc000000000000000ull, test.negative ? 0xffff : 0x7fff) || end != expectedEnd) {
-            std::uint64_t significand = 0;
-            std::uint16_t signExponent = 0;
-            std::memcpy(&significand, &extended, sizeof(significand));
-            std::memcpy(&signExponent, reinterpret_cast<const unsigned char*>(&extended) + sizeof(significand), sizeof(signExponent));
-            std::fprintf(stderr, "strtold(\"%s\") = 0x%04x'%016llx\n", test.text, static_cast<unsigned>(signExponent),
-                static_cast<unsigned long long>(significand));
-            correct = false;
+        if (test.extendedMeasured) {
+            const long double extended = strtold_nid_postfix(test.text, &end);
+            if (!ExtendedBits(extended, 0xc000000000000000ull, 0x7fff) || end != test.text + test.sequenceUsed) {
+                std::fprintf(stderr, "strtold(\"%s\")\n", test.text);
+                correct = false;
+            }
+        }
+        char16_t wide[64] = {};
+        for (std::size_t i = 0; test.text[i] != 0; ++i) wide[i] = static_cast<unsigned char>(test.text[i]);
+        char16_t* wideEnd = nullptr;
+        if (test.wideDoubleMeasured) {
+            const auto wideValue = std::bit_cast<std::uint64_t>(wcstod_nid_postfix(wide, &wideEnd));
+            if (wideValue != test.bits || wideEnd != wide + test.used) {
+                std::fprintf(stderr, "wcstod(\"%s\") = 0x%016llx\n", test.text, static_cast<unsigned long long>(wideValue));
+                correct = false;
+            }
+        }
+        if (test.wideOtherMeasured) {
+            const auto wideSingle = std::bit_cast<std::uint32_t>(wcstof_nid_postfix(wide, &wideEnd));
+            const bool singleOk = wideSingle == 0x7fc00000u && wideEnd == wide + test.sequenceUsed;
+            const long double wideExtended = wcstold_nid_postfix(wide, &wideEnd);
+            if (!singleOk || !ExtendedBits(wideExtended, 0xc000000000000000ull, 0x7fff) || wideEnd != wide + test.sequenceUsed) {
+                std::fprintf(stderr, "wcstof/wcstold(\"%s\")\n", test.text);
+                correct = false;
+            }
         }
     }
     Require(correct);
+    for (const char* text : {"nan(1 ", "nan(12 \t"}) {
+        bool threw = false;
+        try { strtod_nid_postfix(text, nullptr); } catch (...) { threw = true; }
+        Require(threw);
+    }
+    struct PlainNan { const char* text; std::uint64_t bits; std::size_t used; };
+    for (const PlainNan& plain : {PlainNan{"nan(1 2)", 0x7ff8000100000002ull, 8}, PlainNan{"nan( \0)", 0x7ff8000000000000ull, 3}}) {
+        char* end = nullptr;
+        Require(std::bit_cast<std::uint64_t>(strtod_nid_postfix(plain.text, &end)) == plain.bits && end == plain.text + plain.used);
+    }
 }
 
 static void CheckHypotSpecialValue() {

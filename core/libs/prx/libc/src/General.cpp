@@ -31,6 +31,7 @@
 #include <unistd.h>
 #endif
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libc/include/AppArchive.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 
@@ -598,7 +599,7 @@ extern "C" int APS5_VABI chdir_nid_postfix(const char* path) {
         const auto resolved = Resolve(state, path, false, true);
         AppArchiveRefuseOnly_nid_no_patch(resolved, path, "changing the working directory to");
         const int error = SetWorkingDirectory(state, resolved);
-        if (error) { errno = error; return -1; }
+        if (error) { errno = error == 2 ? NotFoundError_nid_no_patch(resolved) : error; return -1; }
         return 0;
     } catch (const std::bad_alloc&) { errno = 12; return -1; }
       catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return -1; }

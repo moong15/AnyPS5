@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -272,6 +273,26 @@ class RegistrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsupported Ninja build-file encoding"):
                     check_test_registration.built(build)
                 run.assert_called_once()
+
+    def run_tool(self, build):
+        return subprocess.run([sys.executable, "-I", str(Path(check_test_registration.__file__)), str(build)],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_missing_build_directory_is_reported_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_tool(Path(directory) / "no build")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("error:", result.stderr)
+        self.assertIn("CMakeCache.txt", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_unsupported_generator_is_reported_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "CMakeCache.txt").write_text("CMAKE_GENERATOR:INTERNAL=Unix Makefiles\n", encoding="utf-8")
+            result = self.run_tool(directory)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires a Ninja generator", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

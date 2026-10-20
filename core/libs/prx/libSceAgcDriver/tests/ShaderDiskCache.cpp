@@ -988,6 +988,62 @@ void verifyPersist() {
     requireSameArtifact(variant.artifact, persisted->artifact, "a persisted entry whose file was replaced and removed");
 }
 
+#ifdef _WIN32
+void verifyLongHostPaths() {
+    using namespace ShaderRecompiler::ShaderDiskCache;
+    auto directory = std::filesystem::temp_directory_path() / ("aps5-cache-long-" + std::to_string(std::random_device{}()));
+    require(directory.native().size() < 224, "temporary path is too long for the cache control");
+    directory /= std::wstring(224 - directory.native().size(), L'd');
+    const auto extended = [](const auto& path) { return std::filesystem::path(L"\\\\?\\" + path.native()); };
+    std::filesystem::create_directories(extended(directory));
+    setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+    setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
+    std::vector<std::filesystem::path> files;
+    std::filesystem::path entries;
+    struct Cleanup {
+        const std::filesystem::path& directory;
+        const std::vector<std::filesystem::path>& files;
+        const std::filesystem::path& entries;
+        ~Cleanup() {
+            ShaderRecompiler::ShaderDiskCache::Shutdown();
+            std::error_code error;
+            for (const auto& file : files) std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + file.native()), error);
+            if (!entries.empty()) std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + entries.native()), error);
+            std::filesystem::remove(std::filesystem::path(L"\\\\?\\" + directory.native()), error);
+        }
+    } cleanup{directory, files, entries};
+    SampleRequest sample;
+    const auto key = sample.Key();
+    const auto variant = sampleVariant();
+    entries = ShaderDiskCache::EntryDirectory();
+    files.push_back(entries / EntryName(key));
+    files.push_back(entries / "last-used");
+    require(files.front().native().size() >= MAX_PATH, "the cache persistence control did not cross MAX_PATH");
+    const auto persisted = ShaderDiskCache::Persist(key, variant);
+    std::vector<std::byte> published;
+    require(ReadWholeFile(files.front(), published) && published == EncodeEntry(key, variant),
+            "the long-path cache entry was not correctly published before mapping");
+    require(persisted != nullptr, "a long-path cache entry was not persisted and mapped");
+    MEMORY_BASIC_INFORMATION region{};
+    require(VirtualQuery(persisted->artifact.spirv.data(), &region, sizeof(region)) == sizeof(region) && region.Type == MEM_MAPPED,
+            "long-path persisted SPIR-V is not mapped");
+    requireSameVariant(variant, *persisted, "long-path persist round trip");
+    CompiledVariant loaded;
+    require(ShaderDiskCache::Load(key, loaded), "a long-path persisted cache entry did not load");
+    requireSameVariant(variant, loaded, "long-path load round trip");
+    const auto packPath = directory / (std::wstring(75, L'p') + L".pack");
+    files.push_back(packPath);
+    require(WriteFileAtomically(packPath, packBytes({{key, EncodeEntry(key, variant)}})), "cannot publish the long-path cache pack");
+    CachePack pack(packPath);
+    require(pack.Valid(), "a long-path cache pack was rejected: " + pack.Error());
+    PackLoadTimings timings;
+    CompiledVariant decoded;
+    require(pack.Load(key, decoded, timings) == LoadStatus::Loaded, "a long-path cache pack entry did not load");
+    requireSameVariant(variant, decoded, "long-path cache pack round trip");
+    std::cout << "long-path shader cache persistence and pack tests passed\n";
+}
+#endif
+
 struct ComputeRequest {
     std::vector<std::uint32_t> code{0xe0700000u, 0x80000000u, 0xbf810000u};
     std::array<std::uint32_t, 4> userData{0x10000000u, 0x00000000u, 0x40u, 0x00027facu};
@@ -3101,6 +3157,12 @@ int main(int argc, char** argv) {
             std::cout << "artifact codec tests passed\n";
             return 0;
         }
+#ifdef _WIN32
+        if (argc == 2 && std::string_view(argv[1]) == "--long-host-paths") {
+            verifyLongHostPaths();
+            return 0;
+        }
+#endif
         if (argc == 2 && std::string_view(argv[1]) == "--large-file") return runLargeFileWrite();
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         if (argc == 2 && std::string_view(argv[1]) == "--load-prebuilt") return runPrebuiltLoadingProcess();

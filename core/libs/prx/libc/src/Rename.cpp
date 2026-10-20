@@ -102,7 +102,11 @@ extern "C" int RenameGuestPath_nid_no_patch(const char* from, const char* to) {
     try {
         const auto source = ResolvePath_nid_no_patch(from);
         const auto destination = ResolvePath_nid_no_patch(to);
-        const int error = RenamePath_nid_no_patch(source, destination);
+        int error = RenamePath_nid_no_patch(source, destination);
+        if (error == 2) {
+            std::error_code status;
+            if (HasNonDirectoryPrefix_nid_no_patch(source) || (std::filesystem::exists(source, status) && HasNonDirectoryPrefix_nid_no_patch(destination))) error = 20;
+        }
         if (error) { errno = error; return -1; }
         RecordWrittenPath_nid_no_patch(source);
         RecordWrittenPath_nid_no_patch(destination);

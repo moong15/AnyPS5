@@ -337,7 +337,8 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
             if (!path.empty() && parsed->writes) RecordWrittenPath_nid_no_patch(path);
             return stream;
         }
-        const int error = OpenFailure(path, parsed->writes, errno);
+        int error = OpenFailure(path, parsed->writes, errno);
+        if (error == 2) error = NotFoundError_nid_no_patch(path);
         if (stream->IsDynamic()) delete stream;
         errno = error;
         return nullptr;
@@ -370,6 +371,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
     if (!handle) {
         errno = OpenFailure(fpath, parsed->writes, errno);
+        if (errno == 2) errno = NotFoundError_nid_no_patch(fpath);
         return nullptr;
     }
     // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());

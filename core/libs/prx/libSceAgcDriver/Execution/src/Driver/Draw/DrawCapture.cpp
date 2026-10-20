@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 
@@ -287,10 +288,12 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     auto& stageCapture = stageCaptures[i];
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
-    const auto named = [&](const std::exception& error) {
+    const auto named = [&](const std::exception& error, std::span<const ShaderRecompiler::MemoryRegion> regions) {
         std::string dump;
         try {
-            dump = dumpRequest(program.binary.codeAddress, request);
+            auto failed = request;
+            failed.context.memory = regions;
+            dump = dumpRequest(program.binary.codeAddress, failed, "_failed");
         } catch (...) {}
         std::ostringstream where;
         where << "shader 0x" << std::hex << program.binary.codeAddress << " stage " << std::dec << static_cast<unsigned>(program.binary.stage);
@@ -303,9 +306,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         try {
             return CaptureInvocation(shaderMemory, *program.snapshot, program.codeOffset, request, invocation);
         } catch (const std::exception& error) {
-            memory = shaderMemory.Regions();
-            request.context.memory = memory;
-            throw named(error);
+            throw named(error, shaderMemory.Regions());
         }
     }();
 
@@ -357,7 +358,7 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     try {
         stageCapture.compiled = invocation.Materialize(*capture);
     } catch (const std::exception& error) {
-        throw named(error);
+        throw named(error, request.context.memory);
     }
     stageCapture.capture = capture;
     timing.Mark("materialize");

@@ -48,9 +48,8 @@ int APS5_VABI sceHmd2ReprojectionGetStatus() {
     return 0;
 }
 
-int APS5_VABI sceHmd2ReprojectionQuerySeeThroughBufferSizeAlign() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+Hmd2::SizeAlign APS5_VABI sceHmd2ReprojectionQuerySeeThroughBufferSizeAlign() {
+    return {0x1106000, 0x100};
 }
 
 std::int32_t APS5_VABI sceHmd2Initialize(const void* param) {
@@ -149,14 +148,12 @@ int APS5_VABI sceHmd2ReprojectionEnableVrMode() {
     return 0;
 }
 
-int APS5_VABI sceHmd2ReprojectionGetMirroringDisplayBufferSizeAlign() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+Hmd2::SizeAlign APS5_VABI sceHmd2ReprojectionGetMirroringDisplayBufferSizeAlign() {
+    return {0x5FA0000, 0x10000};
 }
 
-int APS5_VABI sceHmd2ReprojectionGetMirroringWorkMemorySizeAlign() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+Hmd2::SizeAlign APS5_VABI sceHmd2ReprojectionGetMirroringWorkMemorySizeAlign() {
+    return {0x4000, 0x100};
 }
 
 int APS5_VABI sceHmd2ReprojectionGetPredictedDisplayTime() {
@@ -174,9 +171,8 @@ int APS5_VABI sceHmd2ReprojectionQueryBufferSizeAlign() {
     return 0;
 }
 
-int APS5_VABI sceHmd2ReprojectionQueryDisplayBufferSizeAlign() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+Hmd2::SizeAlign APS5_VABI sceHmd2ReprojectionQueryDisplayBufferSizeAlign() {
+    return {0x6000000, 0x10000};
 }
 
 int APS5_VABI sceHmd2ReprojectionSetAllowPositionalReprojection() {

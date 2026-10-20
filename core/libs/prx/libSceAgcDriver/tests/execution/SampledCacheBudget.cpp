@@ -17,7 +17,9 @@
 #endif
 #include <windows.h>
 #endif
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -26,8 +28,11 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -47,6 +52,67 @@ constexpr std::size_t RegistrationGapBytes = 65536;
 constexpr std::size_t AllocationBytes = BlockBytes + RegistrationGapBytes;
 constexpr std::uint64_t Budget = 1ull << 20u;
 constexpr std::uint64_t Ceiling = Budget + Budget / 4u;
+
+std::optional<std::size_t> selectDevice(std::span<const VkPhysicalDeviceProperties> devices, std::string_view request) {
+    const auto rankDeviceType = [](VkPhysicalDeviceType type) {
+        switch (type) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+            default: return 0;
+        }
+    };
+    std::optional<std::size_t> selected;
+    int selectedRank = -1;
+    for (std::size_t index = 0; index < devices.size(); ++index) {
+        const auto& candidate = devices[index];
+        if (candidate.apiVersion < VK_API_VERSION_1_1) continue;
+        const std::string_view name(candidate.deviceName);
+        if (!request.empty() && std::search(name.begin(), name.end(), request.begin(), request.end(), [](char left, char right) {
+            return std::tolower(static_cast<unsigned char>(left)) == std::tolower(static_cast<unsigned char>(right));
+        }) == name.end()) continue;
+        const int rank = request.empty() ? rankDeviceType(candidate.deviceType) : 4;
+        if (rank <= selectedRank) continue;
+        selected = index;
+        selectedRank = rank;
+    }
+    return selected;
+}
+
+void deviceSelectionTests() {
+    const auto properties = [](const char* name, VkPhysicalDeviceType type) {
+        VkPhysicalDeviceProperties result{};
+        result.apiVersion = VK_API_VERSION_1_1;
+        result.deviceType = type;
+        std::memcpy(result.deviceName, name, std::strlen(name) + 1u);
+        return result;
+    };
+    std::array devices{
+        properties("AMD Radeon Graphics", VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU),
+        properties("NVIDIA GeForce RTX 5080", VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU),
+        properties("Virtual GPU", VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU),
+        properties("CPU", VK_PHYSICAL_DEVICE_TYPE_CPU),
+    };
+    Require(!selectDevice({}, {}).has_value(), "an empty device list selected a device");
+    Require(selectDevice(devices, {}) == 1u, "default selection did not prefer the discrete GPU");
+    Require(selectDevice(devices, "AMD") == 0u, "the AMD request did not select the integrated GPU");
+    Require(selectDevice(devices, "NVIDIA") == 1u, "the NVIDIA request did not select the discrete GPU");
+    Require(selectDevice(devices, "aMd rAdEoN") == 0u, "a requested integrated GPU lost to an unrelated discrete GPU");
+    Require(selectDevice(devices, "rtx 5080") == 1u, "a partial GPU name did not match without regard to case");
+    Require(selectDevice(devices, "Virtual") == 2u, "a requested virtual GPU was not selected");
+    Require(selectDevice(devices, "cpu") == 3u, "a requested CPU device was not selected");
+    Require(!selectDevice(devices, "missing").has_value(), "an unmatched request selected another GPU");
+    Require(!selectDevice(devices, "NVIDIA GeForce RTX 5080 with a longer name").has_value(), "a request longer than the device name matched");
+    Require(selectDevice(std::span(devices).subspan(2), {}) == 0u, "default selection did not prefer the virtual GPU to the CPU");
+    devices[1].apiVersion = VK_API_VERSION_1_0;
+    Require(selectDevice(devices, {}) == 0u, "default selection did not prefer the integrated GPU to the virtual GPU");
+    Require(!selectDevice(devices, "NVIDIA").has_value(), "a requested device without Vulkan 1.1 was selected");
+    devices[1] = devices[0];
+    Require(selectDevice(devices, {}) == 0u && selectDevice(devices, "AMD") == 0u, "equally ranked matches did not retain enumeration order");
+    for (auto& device : devices) device.apiVersion = VK_API_VERSION_1_0;
+    Require(!selectDevice(devices, {}).has_value(), "a list without Vulkan 1.1 selected a device");
+    std::puts("sampled-cache device selection CPU tests passed");
+}
 
 class Device {
 public:
@@ -71,7 +137,13 @@ public:
             Require(count != 0, "no Vulkan device");
             std::vector<VkPhysicalDevice> devices(count);
             Check(enumerate(instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
-            context.physical = devices.front();
+            const auto physicalProperties = function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+            std::vector<VkPhysicalDeviceProperties> deviceProperties(devices.size());
+            for (std::size_t index = 0; index < devices.size(); ++index) physicalProperties(devices[index], &deviceProperties[index]);
+            const char* requestedName = std::getenv("ANYPS5_GPU");
+            const auto selectedIndex = selectDevice(deviceProperties, requestedName != nullptr ? requestedName : "");
+            Require(selectedIndex.has_value(), requestedName != nullptr && *requestedName != '\0' ? std::string("no Vulkan 1.1 device matching ANYPS5_GPU=\"") + requestedName + "\"" : "no Vulkan 1.1 device");
+            context.physical = devices[*selectedIndex];
             const auto extensions = function<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
             Check(extensions(context.physical, nullptr, &count, nullptr), "vkEnumerateDeviceExtensionProperties");
             std::vector<VkExtensionProperties> available(count);
@@ -122,6 +194,7 @@ public:
             function<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(context.physical, &context.memory);
             VkPhysicalDeviceProperties properties{};
             function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(context.physical, &properties);
+            std::printf("sampled-cache fixture Vulkan device: %s vendor=0x%04x device=0x%04x\n", properties.deviceName, properties.vendorID, properties.deviceID);
             context.limits = properties.limits;
             context.bufferDeviceAddress = true;
             context.formatProperties = function<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
@@ -140,6 +213,14 @@ public:
 
     ~Device() { release(); }
     const Context& GetContext() const { return context; }
+
+    void VerifySelection() const {
+        VkPhysicalDeviceProperties properties{};
+        function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(context.physical, &properties);
+        const char* request = std::getenv("ANYPS5_GPU");
+        Require(selectDevice(std::span(&properties, 1), request != nullptr ? request : "").has_value(), "the sampled-cache fixture physical device does not match ANYPS5_GPU");
+        std::puts("sampled-cache fixture physical device selection verified");
+    }
 
 private:
     template<typename TFunction>
@@ -822,6 +903,10 @@ int main(int argc, char** argv) {
     try {
         const bool memory = argc > 1 && std::string(argv[1]) == "memory";
         const std::string mode = argc > 1 ? argv[1] : "";
+        if (mode == "device-selection-cpu") {
+            deviceSelectionTests();
+            return 0;
+        }
         const bool resources = mode == "resource-admission" || mode == "resource-oversized" || mode == "resource-clear";
         const bool disableStorageImageMultisample = mode == "without-storage-image-multisample";
 #ifdef _WIN32
@@ -833,9 +918,14 @@ int main(int argc, char** argv) {
         try {
             device = std::make_unique<Device>(!disableStorageImageMultisample);
         } catch (const std::exception& error) {
-            if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
+            const char* requestedName = std::getenv("ANYPS5_GPU");
+            if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr || (requestedName != nullptr && *requestedName != '\0')) throw;
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return VulkanTestSkipped;
+        }
+        if (mode == "device-selection") {
+            device->VerifySelection();
+            return 0;
         }
         auto context = device->GetContext();
         if (disableStorageImageMultisample) {

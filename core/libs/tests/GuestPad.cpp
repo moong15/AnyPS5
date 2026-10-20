@@ -243,6 +243,10 @@ static void CheckReadStateHandle(int handle) {
     Require(scePadReadState(handle + 1, &data) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadRead_nid_postfix(0, &data, 1) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadReadState(handle, &data) == PAD_OK);
+    Require(scePadRead_nid_postfix(handle, nullptr, 1) == PAD_ERROR_INVALID_ARG);
+    Require(scePadRead_nid_postfix(handle, &data, 0) == PAD_ERROR_INVALID_ARG);
+    Require(scePadRead_nid_postfix(handle, &data, -1) == PAD_ERROR_INVALID_ARG);
+    Require(scePadReadState(handle, nullptr) == PAD_ERROR_INVALID_ARG);
 }
 
 static void CheckRemoteController(int handle) {

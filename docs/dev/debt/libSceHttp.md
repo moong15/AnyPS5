@@ -19,6 +19,55 @@
 - [sceHttpSetAuthInfoCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - signature and callback type follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/network/http.h) (PS4); no PS5 reference has them. The `id` is not checked, as in the other libSceHttp setters
 - [sceHttpWaitRequest](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - the timeout is assumed to be in microseconds and a negative timeout to wait without limit; the invalid-value error for a null handle or event array or a non-positive event count is assumed, not measured. No request is ever pending, so a wait returns 0 events when its timeout passes
 - [sceHttpUriCopy](../../../core/libs/prx/libSceHttp/src/Uri.cpp) (libSceHttp) - read from the disassembly of libSceHttp.sprx on firmware 13.60, not measured on a console and not compared with other emulators. The arguments are (out, src, pool, prepare, require), `prepare` before `require`, the reverse of `sceHttpUriParse`. A null source returns `ERROR_INVALID_URL`; without an output or a pool, a null `require` returns `ERROR_INVALID_VALUE`, otherwise the size is only reported. Only the scheme, hostname, path, username and password are copied, in that order, each with its terminator (a missing one becomes an empty string and takes one byte), and the port; the query, the fragment and the opaque flag stay 0. A pool that is too small clears the output and the pool and returns `ERROR_OUT_OF_MEMORY` (0x80431022, the console's out-of-size error)
+- [sceHttpAuthCacheImport](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpAuthCacheExport](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgEnableProfile](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgSetPrintf](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgShowStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetMemoryPoolStats](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgShowConnectionStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgShowRequestStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgShowMemoryPoolStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgGetConnectionStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpDbgGetRequestStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpAbortRequestForce](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpAddRequestHeaderRaw](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpRemoveRequestHeader](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetAuthEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetAutoRedirect](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpTrySetNonblock](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetNonblock](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpTryGetNonblock](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetEpollId](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetEpollId](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetEpoll](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetCookie](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetCookieEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpAddCookie](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetCookieSendCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpCookieExport](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpCookieImport](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetCookieTotalMaxSize](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetCookieMaxSize](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetCookieMaxNum](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetCookieMaxNumPerDomain](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetCookieStats](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpsEnableOptionPrivate](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpsDisableOptionPrivate](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetPriorityOption](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetPolicyOption](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpRequestGetAllHeaders](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetAcceptEncodingGZIPEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetAcceptEncodingGZIPEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetDefaultAcceptEncodingGZIPEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetProxy](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetSocketCreationCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetHttp09Enabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetRegisteredCtxIds](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpGetConnectionStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpAddQuery](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpSetDelayBuildRequestEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
+- [sceHttpCacheRedirectedConnectionEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 
 ### Functional
 

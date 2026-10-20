@@ -1044,6 +1044,37 @@ void CheckImportWindowZeroPages() {
     Require(changed[4] == BlockWritten && WrittenSince(base + 4 * Block, Block, synced), "a store of new bytes after the zero pages of an import window was missed");
 }
 
+void CheckImportWindowOverUnwatchedBlock() {
+    void* memory = AllocateWatched(4 * Block);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    auto* bytes = static_cast<volatile std::uint8_t*>(memory);
+    std::memset(memory, 0x11, 4 * Block);
+    Unwatch(base + Block, Block);
+    const auto synced = CollectWritesUncached(base + 2 * Block, 2 * Block);
+    const auto syncedFirst = CollectWritesUncached(base, Block);
+    Require(synced != 0 && syncedFirst != 0, "the watched blocks around the unwatched one are not collected");
+    bytes[0x500] = 0x44;
+    Require(ImportWatched(base, 4 * Block, [&] {
+        bytes[0x100] = 0x11;
+        bytes[2 * Block + 0x100] = 0x11;
+        bytes[3 * Block + 0x2000] = 0x22;
+        return true;
+    }), "the import over an unwatched block failed");
+    Require(!Watched(base + Block, Block), "an import window made an unwatched block watched");
+    Require(Watched(base, Block) && Watched(base + 2 * Block, 2 * Block), "an import window over an unwatched block took the watched blocks out of the write watch");
+    const std::array<std::uint64_t, 2> generations{synced, synced};
+    std::array<std::uint8_t, 2> changed{};
+    std::array<std::uint8_t, 2> cpu{};
+    Require(ChangedBlocks(base + 2 * Block, 2 * Block, generations, changed, cpu), "the watched blocks after an unwatched block are not tracked");
+    Require(changed[0] == BlockUnchanged && UnchangedSince(base + 2 * Block, Block, synced), "a page an import window over an unwatched block resolved without changing its bytes reads as written");
+    Require(changed[1] == BlockWritten && WrittenSince(base + 3 * Block, Block, synced), "a store of new bytes within an import window over an unwatched block was missed");
+    Require(WrittenSince(base, Block, syncedFirst), "a store before an import window over an unwatched block was missed");
+    const auto after = CollectWritesUncached(base, Block);
+    bytes[0x100] = 0x33;
+    static_cast<void>(CollectWritesUncached(base, Block));
+    Require(after != 0 && !UnchangedSince(base, Block, after), "a store after an import window over an unwatched block was missed");
+}
+
 void ProtectPage(std::uint64_t address, bool readable) {
 #ifdef _WIN32
     DWORD previous = 0;
@@ -1397,6 +1428,7 @@ int main() {
         CheckImportWindow();
         CheckImportWindowZeroPages();
         CheckImportWindowOtherThread();
+        CheckImportWindowOverUnwatchedBlock();
         CheckStoreAcrossImports();
         CheckUnwatchedImport();
         CheckCommittedRanges();

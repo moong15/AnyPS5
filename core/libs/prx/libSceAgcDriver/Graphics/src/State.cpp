@@ -53,6 +53,12 @@ float readFloat(const Registers& registers, std::uint32_t offset) {
     return value;
 }
 
+float readDepthBound(const Registers& registers, std::uint32_t offset) {
+    const auto value = std::bit_cast<float>(read(registers, offset));
+    if (std::isnan(value)) Require(false, "NaN depth bound at DWORD " + std::to_string(offset));
+    return value;
+}
+
 std::string zeroMessage(std::uint32_t offset, std::uint32_t value, const char* name) {
     char detail[64];
     std::snprintf(detail, sizeof(detail), " (register 0x%x = 0x%08x)", offset, value);
@@ -361,8 +367,8 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, bool testValEx
     result.depthBoundsTest = (depthControl & 8u) != 0;
     if (result.depthBoundsTest) {
         Require(zFormat != 0, "depth bounds without a depth plane");
-        result.minDepthBounds = readFloat(cx, 0x008);
-        result.maxDepthBounds = readFloat(cx, 0x009);
+        result.minDepthBounds = readDepthBound(cx, 0x008);
+        result.maxDepthBounds = readDepthBound(cx, 0x009);
     }
     if (depthClear) {
         result.depthTest = true;
@@ -1337,9 +1343,8 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     } else {
         const auto screenBottomRight = read(cx, 0xd);
         APS5_LOG_OUT_DEBUG("No color target, screen BR register=0x%x", screenBottomRight);
-        result.renderExtent = {screenBottomRight & 0xffffu, screenBottomRight >> 16u};
+        result.renderExtent = {std::max(screenBottomRight & 0xffffu, 1u), std::max(screenBottomRight >> 16u, 1u)};
         APS5_LOG_OUT_DEBUG("Render extent from screen=%ux%u", result.renderExtent.width, result.renderExtent.height);
-        Require(result.renderExtent.width != 0 && result.renderExtent.height != 0, "empty framebuffer extent for a draw without color writes");
     }
     result.quadSampleMask = decodeQuadSampleMask(cx, result.samples);
     result.pixelEarlyZ = !PixelProgramSkipped(queue) && PixelEarlyZ(read(cx, 0x203));

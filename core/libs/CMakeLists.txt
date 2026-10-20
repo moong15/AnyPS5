@@ -354,6 +354,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVoice>")
     endif()
 
+    add_test_executable(guest_move_tests tests/GuestMove.cpp)
+    target_include_directories(guest_move_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_move_tests PRIVATE libSceMove libc)
+    configure_windows_unwind(guest_move_tests)
+    add_test(NAME guest_move COMMAND guest_move_tests)
+    if(WIN32)
+        set_tests_properties(guest_move PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceMove>")
+    endif()
+
     add_test_executable(guest_offline_imports_tests tests/GuestOfflineImports.cpp)
     target_include_directories(guest_offline_imports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_offline_imports_tests PRIVATE libSceHttp libSceNpEntitlementAccess libSceRudp libc)
@@ -396,6 +406,16 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_game_live_streaming PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceGameLiveStreaming>")
+    endif()
+
+    add_test_executable(guest_netctl_ap_tests tests/GuestNetCtlAp.cpp)
+    target_include_directories(guest_netctl_ap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_netctl_ap_tests PRIVATE libSceNetCtlAp libc)
+    configure_windows_unwind(guest_netctl_ap_tests)
+    add_test(NAME guest_netctl_ap COMMAND guest_netctl_ap_tests)
+    if(WIN32)
+        set_tests_properties(guest_netctl_ap PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNetCtlAp>")
     endif()
 
     add_test_executable(guest_netctl_ap_dialog_tests tests/GuestNetCtlApDialog.cpp)
@@ -455,6 +475,16 @@ if(BUILD_TESTING)
     add_test(NAME guest_rudp_context_lifecycle COMMAND guest_rudp_context_lifecycle_tests)
     if(WIN32)
         set_tests_properties(guest_rudp_context_lifecycle PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_rudp_poll_tests tests/GuestRudpPoll.cpp)
+    target_include_directories(guest_rudp_poll_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_poll_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_poll_tests)
+    add_test(NAME guest_rudp_poll COMMAND guest_rudp_poll_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_poll PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
     endif()
 
