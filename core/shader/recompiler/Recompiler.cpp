@@ -472,6 +472,9 @@ struct SourceEntry : std::enable_shared_from_this<SourceEntry> {
     std::uint64_t memoClock = 0;
     std::size_t memoIdentityBytes = 0;
     ResultMemoEntry* memoLast = nullptr;
+    std::uint32_t memoProbeLookups = 0;
+    std::uint32_t memoProbeHits = 0;
+    std::uint32_t memoBypassLeft = 0;
 };
 
 namespace {
@@ -1622,7 +1625,15 @@ bool ResultMemo() {
     return resultMemo;
 }
 
+bool ResultMemoBypass() {
+    static const bool bypass = std::getenv("APS5_NO_RESULT_MEMO_BYPASS") == nullptr;
+    return bypass;
+}
+
 constexpr std::size_t ResultMemoIdentityBytes = 16u * 1024u * 1024u;
+constexpr std::uint32_t ResultMemoProbeWindow = 64u;
+constexpr std::uint32_t ResultMemoProbeMinimumHits = ResultMemoProbeWindow / 16u;
+constexpr std::uint32_t ResultMemoBypassMaterializations = 1024u;
 
 std::size_t memoIdentityBytes(const ResultMemoEntry& entry) {
     auto bytes = entry.identity.size() * sizeof(std::uint64_t) + entry.userData.size() * sizeof(std::uint32_t) + entry.tableColumns.size() * sizeof(ImageTableColumnSnapshot);
@@ -1638,7 +1649,7 @@ ResultMemoEntry* memoSet(SourceEntry& source, std::uint64_t index) {
 }
 
 struct ResultMemoCounters {
-    std::atomic<std::uint64_t> hits{0}, misses{0}, evictions{0}, populateNanoseconds{0};
+    std::atomic<std::uint64_t> hits{0}, misses{0}, evictions{0}, populateNanoseconds{0}, bypassed{0};
     std::array<std::atomic<std::uint64_t>, 64> changedUserWords{};
     std::atomic<std::uint64_t> forwardedUserChanges{0}, otherUserChanges{0};
     std::atomic<std::uint64_t> identityCollisions{0};
@@ -1666,7 +1677,8 @@ void reportResultMemo() {
     const auto misses = counters.misses.exchange(0, std::memory_order_relaxed);
     const auto evictions = counters.evictions.exchange(0, std::memory_order_relaxed);
     const auto populate = counters.populateNanoseconds.exchange(0, std::memory_order_relaxed);
-    std::fprintf(stderr, "[recompile] result memo (10 s): %llu hits, %llu misses (%.1f%% hits), Populate %.1f us per miss / %.1f ms in total, %llu evictions\n", static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses), hits + misses != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0, misses != 0 ? static_cast<double>(populate) / 1000.0 / static_cast<double>(misses) : 0.0, static_cast<double>(populate) / 1e6, static_cast<unsigned long long>(evictions));
+    const auto bypassed = counters.bypassed.exchange(0, std::memory_order_relaxed);
+    std::fprintf(stderr, "[recompile] result memo (10 s): %llu hits, %llu misses (%.1f%% hits), Populate %.1f us per miss / %.1f ms in total, %llu evictions; %llu materializations bypassed the memo (source hit under %u of %u lookups)\n", static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses), hits + misses != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0, misses != 0 ? static_cast<double>(populate) / 1000.0 / static_cast<double>(misses) : 0.0, static_cast<double>(populate) / 1e6, static_cast<unsigned long long>(evictions), static_cast<unsigned long long>(bypassed), ResultMemoProbeMinimumHits, ResultMemoProbeWindow);
     const auto take = [](auto& value) { return static_cast<unsigned long long>(value.exchange(0, std::memory_order_relaxed)); };
     std::fprintf(stderr, "[recompile] memo identity (10 s): %llu patched hits, %llu hash/index collisions refused; misses versus last same-variant entry changed: user data %llu, descriptors %llu, flattened SRT %llu, tables/fill %llu, request/poison %llu\n", take(counters.patchedHits), take(counters.collisions), take(counters.userChanges), take(counters.descriptorChanges), take(counters.flatChanges), take(counters.tableChanges), take(counters.stateChanges));
     std::string words;
@@ -1802,11 +1814,37 @@ std::shared_ptr<const RecompileResult> patchMemoUserData(const CompiledVariant& 
     return result;
 }
 
+void noteMemoProbe(SourceEntry& source, bool hit) {
+    if (!ResultMemoBypass()) return;
+    source.memoProbeHits += hit ? 1u : 0u;
+    if (++source.memoProbeLookups < ResultMemoProbeWindow) return;
+    if (source.memoProbeHits < ResultMemoProbeMinimumHits) source.memoBypassLeft = ResultMemoBypassMaterializations;
+    source.memoProbeLookups = 0;
+    source.memoProbeHits = 0;
+}
+
 // The memo'd result of `source`'s variant for the snapshot (design13 R5): a hit returns the shared
 // object, a miss materializes outside the source mutex and inserts (a concurrent miss's object is
 // as good). `memoHit` reports the hit.
 std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (ResultMemoBypass()) {
+        bool bypass = false;
+        {
+            std::lock_guard lock(source.mutex);
+            if (source.memoBypassLeft != 0) {
+                --source.memoBypassLeft;
+                bypass = true;
+            }
+        }
+        if (bypass) {
+            resultMemoCounters().bypassed.fetch_add(1, std::memory_order_relaxed);
+            auto result = std::make_shared<RecompileResult>(materializeResult(*variant, request, snapshot));
+            result->cacheHit = cacheHit;
+            reportResultMemo();
+            return result;
+        }
+    }
     struct MemoIdentityStorage {};
     auto& identity = HostThreadLocal<std::vector<std::uint64_t>, MemoIdentityStorage>();
     std::array<std::size_t, 4> sections{};
@@ -1838,6 +1876,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
                 source.memoLast = &entry;
                 entry.used = ++source.memoClock;
                 counters.hits.fetch_add(1, std::memory_order_relaxed);
+                noteMemoProbe(source, true);
                 if (memoHit != nullptr) *memoHit = true;
                 reportResultMemo();
                 auto result = patchMemoUserData(*variant, entry.result, snapshot);
@@ -1845,6 +1884,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
                 return result;
             }
         }
+        noteMemoProbe(source, false);
         if (profile && source.memoLast != nullptr && source.memoLast->variantId == variant->artifact.variantId) {
             const auto& previous = *source.memoLast;
             if (!std::ranges::equal(previous.userData, snapshot.userData)) counters.userChanges.fetch_add(1, std::memory_order_relaxed);

@@ -46,6 +46,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_NO_PROGRAM_DIAGNOSTICS` | presence | `core/shader/recompiler/Recompiler.cpp` |  | disables program diagnostics and selected program dumps |
 | `APS5_NO_RELEASE_UNDRAWN_PLANS` | presence | `core/shader/recompiler/Recompiler.cpp` |  | keeps registered resource plans resident after preparation |
 | `APS5_NO_RESULT_MEMO` | presence | `core/shader/recompiler/Recompiler.cpp` |  | materializes a fresh result for every recompile instead of reusing the result memo |
+| `APS5_NO_RESULT_MEMO_BYPASS` | presence | `core/shader/recompiler/Recompiler.cpp` |  | keeps hashing and inserting every materialization into the result memo of a shader whose last 64 lookups hit fewer than 4 times, instead of skipping the memo for its next 1024 materializations |
 | `APS5_NO_RESULT_MEMO_USER_DATA` | presence | `core/shader/recompiler/Recompiler.cpp` |  | disables reusing result memo entries across changed user data |
 | `APS5_NO_SPECIALIZED_DISK_CACHE` | presence | `core/shader/recompiler/ShaderDiskCache.cpp` |  | disables the disk cache of runtime-specialized shader modules |
 | `APS5_NO_SRT_TAPE` | presence | `core/shader/recompiler/Optimization/src/SrtWalker/SrtTape.cpp` |  | runs the runtime-source walk of a plan in the IR evaluator instead of the compiled tape |

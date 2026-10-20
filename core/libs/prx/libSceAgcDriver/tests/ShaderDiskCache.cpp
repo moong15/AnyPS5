@@ -2527,6 +2527,45 @@ void verifyResultMemo(bool benchmark = false) {
     std::cout << "Result memo push/storage refresh, invalidation, collision refusal and concurrency passed\n";
 }
 
+void verifyResultMemoBypass() {
+    const bool memo = std::getenv("APS5_NO_RESULT_MEMO") == nullptr;
+    const bool bypass = memo && std::getenv("APS5_NO_RESULT_MEMO_BYPASS") == nullptr;
+    PlanFixture fixture;
+    fixture.codeAddress = 0x980000u;
+    fixture.code = {0xf4000100u, 0xfa000000u, 0xbf8cc07fu, 0x7e020204u, 0x34040082u, 0xe0701000u, 0x80020102u, 0xbf810000u};
+    fixture.userData = {0x100000u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0x200000u, 0u, 256u, 0x31016facu};
+    fixture.regions = {{0x100000u, {0x12345678u}}};
+    auto request = fixture.Request(true);
+    request.layout.pushConstantSizeBytes = 128u;
+    auto uncached = request;
+    uncached.useCache = false;
+    RequestMemoryView view(request.context.memory);
+    const auto base = CaptureResources(request, view.MakeRuntime(request.context.userData, request.shader.codeAddress));
+    require(!base->snapshot.buffers.empty(), "memo bypass fixture has no buffer descriptor");
+    const auto invoke = [&](const ResourceCapture& input, bool compare, const char* label) {
+        bool memoHit = true;
+        const auto result = Recompile(request, input, &memoHit);
+        if (compare) requireSameResult(*Recompile(uncached, input), *result, label);
+        return memoHit;
+    };
+    const auto distinct = [&](std::uint32_t lookup) {
+        auto capture = *base;
+        capture.snapshot.buffers.at(0).dwords[0] += (lookup + 1u) * 0x2000u;
+        return capture;
+    };
+    for (std::uint32_t lookup = 0; lookup < 63u; ++lookup) {
+        require(!invoke(distinct(lookup), lookup == 0u, "distinct descriptor"), "a distinct descriptor hit the memo");
+    }
+    const auto input = distinct(63u);
+    require(!invoke(input, true, "last distinct descriptor"), "the last distinct descriptor hit the memo");
+    const bool repeatHits = memo && !bypass;
+    for (std::uint32_t call = 0; call < 1024u; ++call) {
+        require(invoke(input, call == 0u, "repeat after a missing window") == repeatHits, "a repeated snapshot after 64 misses did not follow the bypass policy");
+    }
+    require(invoke(input, true, "repeat after the bypass") == memo, "the memo was not probed again after the bypass ran out");
+    std::cout << "Result memo bypass: " << (bypass ? "a source that missed 64 lookups skipped the memo for 1024 materializations, then probed it again" : memo ? "switched off; every repeat hit the memo" : "memo disabled; no repeat hit") << '\n';
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -3043,6 +3082,10 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && (std::string_view(argv[1]) == "--result-memo" || std::string_view(argv[1]) == "--result-memo-bench")) {
             verifyResultMemo(std::string_view(argv[1]) == "--result-memo-bench");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--result-memo-bypass") {
+            verifyResultMemoBypass();
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--resource-plan-codec") {
