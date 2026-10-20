@@ -749,7 +749,17 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         }
         localDevice->PrewarmDrawPipeline(graphics, stages);
     }
-    if (pipelined && (!drawParameters.indirect || (pipelinedIndirect && !graphics.rectList)) && deferredLabels().labels.empty()) {
+    const bool indirectNeedsInline = pipelined && drawParameters.indirect && [&] {
+        const auto& indirect = *drawParameters.indirect;
+        auto& pipeline = DrawPipeline::Queue0();
+        if (pipeline.HasIncompleteWrites()) return true;
+        const auto overlaps = [&](std::uint64_t address, std::size_t bytes) {
+            const std::array<DrawPipeline::Range, 1> ranges{{{address, address + bytes}}};
+            return pipeline.NonStoreOverlaps(address, bytes) || Graphics::StorageTexture::AnyPendingOverlaps(ranges);
+        };
+        return overlaps(indirect.arguments, static_cast<std::size_t>(std::max<std::uint64_t>(indirect.RangeBytes(), indirect.recordBytes))) || (indirect.countIndirect && overlaps(indirect.countAddress, 4));
+    }();
+    if (pipelined && (!drawParameters.indirect || (pipelinedIndirect && !graphics.rectList && !indirectNeedsInline)) && deferredLabels().labels.empty()) {
         phaseTiming.Phase(DrawRowVectors);
         auto writes = drawWriteRanges(graphics, stages);
         const bool writesComplete = DrawWritesComplete(graphics, stages);
@@ -775,7 +785,7 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
             }
         };
         auto held = std::make_shared<decltype(commit)>(std::move(commit));
-        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded, false, writesComplete);
+        DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes), 0, {}, std::move(reads), bounded, drawParameters.indirect.has_value(), writesComplete);
         phaseTiming.Phase(DrawRowLockWait);
         timing.Mark("draw_enqueued");
         return drawn();

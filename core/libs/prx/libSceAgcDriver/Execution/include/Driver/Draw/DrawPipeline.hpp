@@ -43,7 +43,7 @@ public:
     static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
     static unsigned Committers();
 
-    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true);
+    void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true, bool storeOnly = false);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
     static bool PreciseDrains();
     static bool PreciseReadDrains();
@@ -55,6 +55,7 @@ public:
     std::size_t Outstanding() const { return outstanding.load(std::memory_order_acquire); }
     bool HasIncompleteWrites();
     bool Overlaps(std::uint64_t address, std::size_t bytes);
+    bool NonStoreOverlaps(std::uint64_t address, std::size_t bytes);
     std::optional<std::uint64_t> PendingLabel(std::uint64_t address, std::size_t bytes);
     static bool HeldReads(std::uint64_t address, std::size_t bytes);
     static std::size_t QueuedReadRanges();
@@ -70,6 +71,7 @@ private:
         bool bounded = false;
         bool orderedReads = false;
         bool writesComplete = true;
+        bool storeOnly = false;
     };
     DrawPipeline() = default;
     void drain(DrainReason reason, std::uint32_t opcode);

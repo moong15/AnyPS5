@@ -341,7 +341,7 @@ void IndirectDrawWaitsForQueuedDma() {
     SameAsDirect(WrittenMemory, DirectMemory, "indirect records written by queued DMA");
 }
 
-void HeldImageArgumentsDrainBeforeRead() {
+void HeldImageArgumentsDrainBeforeRead(bool gpuSide = false) {
     ImageArgumentMemory.fill(std::byte{0});
     std::memcpy(ImageArgumentMemory.data(), Records.data(), sizeof(Records));
     GuestAllocations::Mutation().Add(ImageArgumentMemory.data(), ImageArgumentMemory.size(), true, true, true);
@@ -358,26 +358,45 @@ void HeldImageArgumentsDrainBeforeRead() {
     AgcDriverWaitIdle_nid_postfix();
     const std::array<DrawPipeline::Range, 1> range{{{address, address + sizeof(Records)}}};
     Require(AgcDriver::Graphics::StorageTexture::AnyPendingOverlaps(range), "argument fixture has no pending image");
+    std::uint32_t staleCount = 0;
+    std::memcpy(&staleCount, ImageArgumentMemory.data(), sizeof(staleCount));
+    Require(staleCount == Records[0], "argument fixture already published its GPU results");
     WrittenMemory.fill(Kept);
     Blocker blocker;
     DrawPipeline::Queue0().Enqueue([&] {
         while (!blocker.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }, {}, 0, {}, {{0, std::numeric_limits<std::uint64_t>::max()}}, true);
-    Require(DrawPipeline::HeldReads(address, sizeof(Records)), "dispatch-miss read hold was not registered");
-    Require(!AgcDriver::Graphics::StorageTexture::FlushPending(address, sizeof(Records)), "pending image flush ignored held reads");
+    }, {}, 0, {}, gpuSide ? std::vector<DrawPipeline::Range>{} : std::vector<DrawPipeline::Range>{{0, std::numeric_limits<std::uint64_t>::max()}}, true);
+    if (!gpuSide) {
+        Require(DrawPipeline::HeldReads(address, sizeof(Records)), "dispatch-miss read hold was not registered");
+        Require(!AgcDriver::Graphics::StorageTexture::FlushPending(address, sizeof(Records)), "pending image flush ignored held reads");
+    }
+    const auto pendingImages = AgcDriver::Graphics::IndirectDrawCounts()[static_cast<std::size_t>(AgcDriver::Graphics::IndirectDrawPath::PendingImage)];
     std::vector<std::uint32_t> commands;
     AppendState(commands);
     AppendRecords(commands, ImageArgumentMemory.data());
-    AppendTarget(commands, WrittenMemory, Clipped);
-    AppendIndirect(commands);
+    AppendTarget(commands, WrittenMemory, gpuSide ? 0 : Clipped);
+    if (gpuSide) {
+        AppendGpuSideIndirect(commands);
+        AppendGpuSideIndirect(commands);
+    } else {
+        AppendIndirect(commands);
+    }
+    const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
     Packet indirect{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
     Require(sceAgcDriverSubmitDcb(&indirect) == 0, "pending argument indirect submission failed");
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto start = std::chrono::steady_clock::now();
+    while (DrawPipeline::DrainRequestsByOpcode(0x100) == drains && DrawPipeline::Queue0().Outstanding() < (gpuSide ? 3u : 2u) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool requestedDrain = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
     const auto outstanding = DrawPipeline::Queue0().Outstanding();
     blocker.release = true;
     Finish();
     Flush(WrittenMemory);
+    Require(requestedDrain, "pending image argument read did not request an inline drain");
     Require(outstanding == 1, "pending image argument read did not drain its read hold");
+    if (gpuSide) {
+        Require(AgcDriver::Graphics::IndirectDrawCounts()[static_cast<std::size_t>(AgcDriver::Graphics::IndirectDrawPath::PendingImage)] > pendingImages, "GPU-side indirect draw did not flush its pending argument image");
+        Require(!AgcDriver::Graphics::StorageTexture::AnyPendingOverlaps(range), "GPU-side indirect draw left its argument image pending");
+    }
     AgcDriver::GuestMemory::FlushGpuWrites(address, sizeof(Records));
     std::array<std::uint32_t, 4> actual{};
     std::memcpy(actual.data(), ImageArgumentMemory.data(), sizeof(actual));
@@ -591,9 +610,40 @@ void GpuSideIndirectCountQueuesBehindItsStore() {
     SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw whose count a queued label wrote");
 }
 
+void GpuSideIndirectDisjointDmaDoesNotDrain() {
+    WrittenMemory.fill(Kept);
+    std::vector<std::uint32_t> commands;
+    AppendState(commands);
+    AppendRecords(commands, Records.data());
+    AppendTarget(commands, WrittenMemory, 0);
+    AppendGpuSideIndirect(commands);
+    std::vector<std::uint32_t> dma;
+    AppendDma(dma, ZeroRecords.data(), RewrittenRecords.data(), sizeof(RewrittenRecords));
+    const auto address = reinterpret_cast<std::uintptr_t>(Records.data());
+    bool held = false;
+    bool ready = false;
+    std::future<bool> drained;
+    const auto drains = DrawPipeline::DrainRequestsByOpcode(0x50);
+    {
+        std::unique_lock gpuLock(AgcDriver::GuestMemory::GpuMutex());
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        AgcDriver::Submit(&packet, 0);
+        const auto start = std::chrono::steady_clock::now();
+        while (!(held = DrawPipeline::HeldReads(address, sizeof(Records))) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        drained = std::async(std::launch::async, [&] { return DrawPipeline::Queue0().DrainPacket(dma); });
+        ready = drained.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    }
+    Finish();
+    const bool requested = drained.get();
+    Require(held, "disjoint DMA control did not enqueue its GPU-side indirect draw");
+    Require(ready && !requested && DrawPipeline::DrainRequestsByOpcode(0x50) == drains, "a DMA to disjoint memory drained the queued GPU-side indirect draw");
+    Flush(WrittenMemory);
+    SameAsDirect(WrittenMemory, DirectMemory, "the GPU-side indirect draw held across a disjoint DMA control");
 }
 
-int main() {
+}
+
+int main(int argc, char** argv) {
 #ifdef _WIN32
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
     _putenv_s("APS5_PIPELINE_DMA", "1");
@@ -602,13 +652,30 @@ int main() {
     setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
+        const bool countOnly = argc == 2 && std::string(argv[1]) == "--count";
+        const bool pendingImageOnly = argc == 2 && std::string(argv[1]) == "--pending-image";
+        const bool disjointDmaOnly = argc == 2 && std::string(argv[1]) == "--disjoint-dma";
         {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
+            if (countOnly) {
+                const auto support = device->DrawIndirectSupport();
+                if (!support.count || !support.multi) {
+                    std::puts("pipelined indirect count requires indirect-count and multi-draw support");
+                    return VulkanTestSkipped;
+                }
+            }
         }
         Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
         Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
         DrawDirectReference();
+        if (countOnly || pendingImageOnly || disjointDmaOnly) {
+            if (countOnly) GpuSideIndirectCountQueuesBehindItsStore();
+            if (pendingImageOnly) HeldImageArgumentsDrainBeforeRead(true);
+            if (disjointDmaOnly) GpuSideIndirectDisjointDmaDoesNotDrain();
+            AgcDriverShutdown_nid_postfix();
+            return 0;
+        }
         DrawIndexedDirectReference();
         IndirectDrawsQueueBehindTheCommitter();
         IndirectDrawWaitsForItsQueuedRecordWrite();
@@ -621,7 +688,6 @@ int main() {
         GpuSideIndirectDrawsQueueBehindTheCommitter();
         GpuSideIndirectDrawQueuesBehindTheStoreOfItsArguments();
         GpuSideIndirectArgumentsRewrittenAfterEnqueue();
-        GpuSideIndirectCountQueuesBehindItsStore();
         AgcDriverShutdown_nid_postfix();
         std::puts("pipelined indirect draw tests passed");
         return 0;
