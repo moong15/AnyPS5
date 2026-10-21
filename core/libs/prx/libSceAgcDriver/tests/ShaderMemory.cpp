@@ -6270,12 +6270,14 @@ void verifyNullVolumeUnnormalizedSampler() {
         return allocation.bindings.back();
     };
     const auto nullOnly = populate({volume}, {nullDescriptor});
-    require(nullOnly.samplerUnnormalized == std::vector<bool>{false} && nullOnly.samplerCoordinatesIgnored == std::vector<bool>{true}, "unnormalized samplers: an S# paired only with a null 3D T# was refused or kept its unnormalized coordinates");
+    require(nullOnly.samplerUnnormalized == std::vector<bool>{true} && nullOnly.samplerCoordinatesIgnored == std::vector<bool>{false}, "unnormalized samplers: a null 3D T# did not retain the supported emulated sampler");
     const DescriptorValue zeroSwizzle{{0x00003000u, 0x00100000u, 0u, 0xa0000000u, 0u, 0u, 0u, 0u}, 8u};
     const auto constantAndNull = populate({volume, volume}, {zeroSwizzle, nullDescriptor});
-    require(constantAndNull.samplerUnnormalized == std::vector<bool>{false} && constantAndNull.samplerCoordinatesIgnored == std::vector<bool>{true}, "unnormalized samplers: an S# paired with a null 3D T# and a 3D T# whose channels all select constants was refused or kept its unnormalized coordinates");
-    expectFailure([&] { static_cast<void>(populate({volume}, {volumeDescriptor})); }, "samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: a 3D T# was accepted");
-    expectFailure([&] { static_cast<void>(populate({volume, plane}, {nullDescriptor, planeDescriptor})); }, "samples a 1D-array, 2D-array, 3D, cube or multisampled image", "unnormalized samplers: an S# shared by a null 3D T# and a 2D T# was accepted");
+    require(constantAndNull.samplerUnnormalized == std::vector<bool>{true} && constantAndNull.samplerCoordinatesIgnored == std::vector<bool>{false}, "unnormalized samplers: constant and null 3D T#s did not retain the supported emulated sampler");
+    const auto liveVolume = populate({volume}, {volumeDescriptor});
+    require(liveVolume.samplerUnnormalized == std::vector<bool>{true} && liveVolume.samplerCoordinatesIgnored == std::vector<bool>{false}, "unnormalized samplers: a live 3D T# did not retain the supported emulated sampler");
+    const auto sharedVolumePlane = populate({volume, plane}, {nullDescriptor, planeDescriptor});
+    require(sharedVolumePlane.samplerUnnormalized == std::vector<bool>{true} && sharedVolumePlane.samplerCoordinatesIgnored == std::vector<bool>{false}, "unnormalized samplers: a sampler shared by a null 3D T# and a 2D T# was not emulated");
 }
 
 void verifyUnusedUnnormalizedSampler() {
