@@ -2455,6 +2455,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
         APS5_LOG_OUT_DEBUG("Creating color target %zu address=0x%llx bytes=%llu extent=%ux%u", index, static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height);
         const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes);
+        static_cast<void>(FlushDepthPlanes(color.address, colorLayout.Bytes()));
         RetireDepthSurfaces(context.device, color.address, colorLayout.Bytes());
         constexpr VkBufferUsageFlags copies = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         timer.phase(PhaseSetup);
@@ -2534,7 +2535,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         binding.target = std::make_unique<RenderTarget>(context, color, state.blends.at(color.exportIndex).blendEnable != 0);
         targetViews.push_back(binding.target->View());
     }
-    if (state.depth) targetViews.push_back(DepthSurfaceView(context, *state.depth));
+    if (state.depth) targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite));
     timer.phase(PhasePrepare);
     const bool recordDraws = RecordDraws();
     auto* recorder = Recorder::Active();
@@ -3091,7 +3092,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     }
     if (recipe.hasDepth) {
         timer.phase(PhaseSetup);
-        const auto depthView = DepthSurfaceView(context, *state.depth);
+        const auto depthView = DepthSurfaceView(context, *state.depth, state.depthWrite);
         timer.phase(PhaseReadTarget);
         if (recipe.targetViews.back() != depthView) return miss(DrawRecipeMiss::TargetGone);
     }

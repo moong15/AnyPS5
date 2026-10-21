@@ -183,7 +183,9 @@ TFloat ParseFloat(const char* text, char** end, TFloat (*parse)(const char*, cha
         return value;
     }
     char* parsedEnd = nullptr;
+    const int saved = errno;
     const TFloat value = parse(text, &parsedEnd);
+    if (errno == ERANGE && value != 0 && (value < 0 ? -value : value) < std::numeric_limits<TFloat>::min()) errno = saved;
     if (end != nullptr) *end = parsedEnd;
     return parsedEnd == text ? TFloat{0} : value;
 }
@@ -227,6 +229,32 @@ void* APS5_VABI memrchr_nid_postfix(const void* s, int c, size_t n) {
     while (n != 0) {
         --n;
         if (bytes[n] == value) return const_cast<unsigned char*>(bytes + n);
+    }
+    return nullptr;
+}
+
+void* APS5_VABI memccpy_nid_postfix(void* dest, const void* src, int c, size_t n) {
+    auto* d = static_cast<unsigned char*>(dest);
+    const auto* s = static_cast<const unsigned char*>(src);
+    const auto target = static_cast<unsigned char>(c);
+    for (size_t i = 0; i < n; ++i) {
+        d[i] = s[i];
+        if (s[i] == target) return d + i + 1;
+    }
+    return nullptr;
+}
+
+void* APS5_VABI memmem_nid_postfix(const void* haystack, size_t haystacklen, const void* needle, size_t needlelen) {
+    if (needlelen == 0) return const_cast<void*>(haystack);
+    if (haystacklen < needlelen) return nullptr;
+    const auto* h = static_cast<const unsigned char*>(haystack);
+    const auto* n = static_cast<const unsigned char*>(needle);
+    const unsigned char first = n[0];
+    const size_t limit = haystacklen - needlelen;
+    for (size_t i = 0; i <= limit; ++i) {
+        if (h[i] == first && std::memcmp(h + i, n, needlelen) == 0) {
+            return const_cast<unsigned char*>(h + i);
+        }
     }
     return nullptr;
 }

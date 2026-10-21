@@ -193,9 +193,12 @@ std::uint32_t CoordF32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access
         x = CubeAxis(ctx.state, x);
         y = CubeAxis(ctx.state, y);
     }
+    if (!gradient && access.image.depthCompare && (access.image.remappedDepth1D || access.mem.imageDimension == RdnaImageDimension::Dim1D || access.mem.imageDimension == RdnaImageDimension::Dim1DArray)) {
+        y = ConstantF32(ctx.state, 0x3f000000u);
+    }
     const auto result = ctx.state.module.AllocateId();
     if (components == 3u) {
-        auto z = component(2u);
+        auto z = (access.image.depthCompare && (access.mem.imageDimension == RdnaImageDimension::Dim1DArray || (access.image.remappedDepth1D && access.image.dimension == RdnaImageDimension::Dim2DArray))) ? component(1u) : component(2u);
         if (cube) {
             z = CubeLayer(ctx.state, z);
         }
@@ -466,6 +469,9 @@ std::uint32_t PackedOffset(SpirvValueEmitContext& ctx, const ImageEmitAccess& ac
     for (std::uint32_t index = 0; index < components; index++) {
         values[index] = state.module.AllocateId();
         state.module.AddFunction(spv::OpBitFieldSExtract, TypeI32(state), values[index], packed, ConstantU32(state, index * 8u), ConstantU32(state, 6));
+    }
+    if (access.image.remappedDepth1D && components >= 2u) {
+        values[1] = ConstantI32(state, 0);
     }
     if (components == 1u) {
         return values[0];
@@ -1259,8 +1265,8 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     if (setup.dref && (access.image.emulatedCompare & EmulatedCompare::Enabled) != 0u) {
         ctx.Fail(access.inst, "is a comparison gather of a color texture, which is not implemented");
     }
-    if (dimension == RdnaImageDimension::Dim1D || dimension == RdnaImageDimension::Dim1DArray) {
-        if (setup.dref || !HasFlag(mem, RdnaImageSampleFlagLevelZero) || HasFlag(mem, RdnaImageSampleFlagGatherHorizontal)) {
+    if (dimension == RdnaImageDimension::Dim1D || dimension == RdnaImageDimension::Dim1DArray || access.image.remappedDepth1D) {
+        if (setup.dref || !HasFlag(mem, RdnaImageSampleFlagLevelZero) || HasFlag(mem, RdnaImageSampleFlagGatherHorizontal) || access.image.remappedDepth1D) {
             ctx.Fail(access.inst, "has an unsupported 1D gather variant");
         }
         const auto sample = EmitOneDimensionalGatherLz(ctx, access, setup);
@@ -1544,6 +1550,9 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
         for (std::uint32_t index = 0; index < setup.dimensionInfo.spatialComponents; index++) {
             const auto field = (bits >> (index * 8u)) & 0x3fu;
             values[index] = ConstantI32(state, static_cast<std::int32_t>(field ^ 0x20u) - 0x20);
+        }
+        if (access.image.remappedDepth1D && setup.dimensionInfo.spatialComponents >= 2u) {
+            values[1] = ConstantI32(state, 0);
         }
         const auto count = setup.dimensionInfo.spatialComponents;
         const auto offset = count == 1u ? values[0] : count == 2u

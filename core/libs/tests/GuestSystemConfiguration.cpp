@@ -61,13 +61,6 @@ static void CheckProcessorCountSysctl() {
     Require(sysctl_nid_postfix(nullptr, 2, &value, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 14);
     Require(sysctlbyname_nid_postfix(nullptr, &value, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 14);
     bool threw = false;
-    try {
-        sysctlbyname_nid_postfix("kern.osreldate", &value, &length, nullptr, 0);
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-    Require(threw);
-    threw = false;
     const int unknown[] = {6, 99};
     try {
         sysctl_nid_postfix(unknown, 2, &value, &length, nullptr, 0);
@@ -353,8 +346,45 @@ static void CheckSystemStringNames() {
         Require(mib[0] == entry.mib[0] && mib[1] == entry.mib[1] && mib[2] == 0x5a5a5a5a);
     }
 }
+static void CheckOsReleaseDateSysctl() {
+    const int mib[] = {1, 24};
+    constexpr std::int32_t expected = 1104001;
+    *__error_nid_postfix() = 13;
+    std::size_t length = 0;
+    Require(sysctl_nid_postfix(mib, 2, nullptr, &length, nullptr, 0) == 0 && length == sizeof(expected));
+    std::int32_t value = 0;
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(mib, 2, &value, &length, nullptr, 0) == 0 && value == expected && length == sizeof(value));
+    Require(*__error_nid_postfix() == 13);
+
+    value = 0;
+    length = sizeof(value);
+    Require(sysctlbyname_nid_postfix("kern.osreldate", &value, &length, nullptr, 0) == 0 && value == expected && length == sizeof(value));
+    Require(*__error_nid_postfix() == 13);
+
+    int namedMib[3] = {0x5a5a5a5a, 0x5a5a5a5a, 0x5a5a5a5a};
+    std::size_t mibLength = 3;
+    Require(sysctlnametomib_nid_postfix("kern.osreldate", namedMib, &mibLength) == 0 && mibLength == 2);
+    Require(namedMib[0] == mib[0] && namedMib[1] == mib[1] && namedMib[2] == 0x5a5a5a5a);
+    value = 0;
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(namedMib, static_cast<std::uint32_t>(mibLength), &value, &length, nullptr, 0) == 0 && value == expected);
+
+    unsigned char truncated[4] = {0xaa, 0xaa, 0xaa, 0xaa};
+    length = 2;
+    Require(sysctlbyname_nid_postfix("kern.osreldate", truncated, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12);
+    Require(length == 2 && truncated[0] == static_cast<unsigned char>(expected) && truncated[1] == static_cast<unsigned char>(expected >> 8) && truncated[2] == 0xaa && truncated[3] == 0xaa);
+
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(mib, 2, &value, &length, &value, sizeof(value)) == -1 && *__error_nid_postfix() == 1);
+    Require(sysctlbyname_nid_postfix("kern.osreldate", &value, &length, &value, sizeof(value)) == -1 && *__error_nid_postfix() == 1);
+
+    const int deeper[] = {1, 24, 0};
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(deeper, 3, &value, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 20);
+}
 static void CheckLeafWithTrailingComponent() {
-    const int leaves[][2] = {{6, 3}, {6, 2}, {6, 5}, {6, 7}, {1, 37}, {1, 50}};
+    const int leaves[][2] = {{6, 3}, {6, 2}, {6, 5}, {6, 7}, {1, 24}, {1, 37}, {1, 50}};
     for (const auto& leaf : leaves) {
         const int mib[] = {leaf[0], leaf[1], 0};
         char buffer[8] = {};
@@ -763,6 +793,7 @@ int main() {
     CheckPathnameSysctl();
     CheckSystemStringSysctl();
     CheckSystemStringNames();
+    CheckOsReleaseDateSysctl();
     CheckLeafWithTrailingComponent();
     CheckMeasuredAbsentSysctlMibs();
     CheckSystemSwVersion();

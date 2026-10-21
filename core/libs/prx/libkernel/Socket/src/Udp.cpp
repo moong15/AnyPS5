@@ -68,6 +68,7 @@ using NativeSocket = int;
 constexpr auto Invalid = -1;
 #endif
 int Fail(int error) { *__error_nid_postfix() = error; return -1; }
+constexpr int GuestSocketDescriptorLimit = 1024;
 constexpr int GuestPeek = 0x2;
 constexpr int GuestDontWait = 0x80;
 constexpr int GuestNoSignal = 0x20000;
@@ -109,7 +110,7 @@ int SendError(int type) {
 #endif
     return NativeError();
 }
-struct Socket {
+struct Socket : KernelSocketPoll::NativeOwner {
     NativeSocket value;
     int family;
     int type;
@@ -181,9 +182,14 @@ int ReserveNumber(NativeSocket) {
         ::CloseHandle(placeholder);
         return Fail(24);
     }
+    if (number >= GuestSocketDescriptorLimit) {
+        ::_close(number);
+        return Fail(24);
+    }
     return number;
 }
 int CopyNumber(int number, int minimum = 0) {
+    if (minimum >= GuestSocketDescriptorLimit) return Fail(24);
     std::vector<int> below;
     int copy = -1;
     int error = 0;
@@ -196,9 +202,15 @@ int CopyNumber(int number, int minimum = 0) {
         error = 12;
     }
     for (const int temporary : below) ::_close(temporary);
-    return copy < 0 ? Fail(error) : copy;
+    if (copy < 0) return Fail(error);
+    if (copy >= GuestSocketDescriptorLimit) {
+        ::_close(copy);
+        return Fail(24);
+    }
+    return copy;
 }
 int CopyNumberTo(int number, int target) {
+    if (target >= GuestSocketDescriptorLimit) return Fail(24);
     return ::_dup2(number, target) != 0 ? Fail(errno == EMFILE ? 24 : 9) : 0;
 }
 void ReleaseNumber(int number) {
@@ -207,13 +219,25 @@ void ReleaseNumber(int number) {
 #else
 int ReserveNumber(NativeSocket native) {
     const int number = ::fcntl(native, F_DUPFD_CLOEXEC, 0);
-    return number < 0 ? Fail(NativeError()) : number;
+    if (number < 0) return Fail(NativeError());
+    if (number >= GuestSocketDescriptorLimit) {
+        ::close(number);
+        return Fail(24);
+    }
+    return number;
 }
 int CopyNumber(int number, int minimum = 0) {
+    if (minimum >= GuestSocketDescriptorLimit) return Fail(24);
     const int copy = ::fcntl(number, F_DUPFD_CLOEXEC, minimum);
-    return copy < 0 ? Fail(NativeError()) : copy;
+    if (copy < 0) return Fail(NativeError());
+    if (copy >= GuestSocketDescriptorLimit) {
+        ::close(copy);
+        return Fail(24);
+    }
+    return copy;
 }
 int CopyNumberTo(int number, int target) {
+    if (target >= GuestSocketDescriptorLimit) return Fail(24);
     return ::dup2(number, target) < 0 ? Fail(NativeError()) : 0;
 }
 void ReleaseNumber(int number) {
@@ -939,7 +963,7 @@ int GuestSockets::Poll(KernelSocketPoll::Entry* entries, int count, int timeoutM
 extern "C" bool KernelLookupSocketNative_nid_no_patch(int descriptor, std::shared_ptr<void>* owner, std::uintptr_t* native) {
     if (auto socket = Find(descriptor)) {
         *native = static_cast<std::uintptr_t>(socket->value);
-        *owner = std::move(socket);
+        *owner = std::static_pointer_cast<KernelSocketPoll::NativeOwner>(std::move(socket));
         return true;
     }
     return KernelFindSocketNative_nid_no_patch(descriptor, owner, native);

@@ -522,6 +522,12 @@ void stateTests() {
     queue.shader[0x008] = 0;
     Require(AgcDriver::Graphics::PixelProgramSkipped(queue), "a zero pixel program address was not read as unset");
     Require(AgcDriver::Graphics::DrawRejection(queue, true).find("writes color") != std::string::npos, "a draw without a pixel program that writes color was accepted");
+    auto colorDisabled = queue;
+    colorDisabled.context[0x202] = colorDisabled.context.at(0x202) & ~0x70u;
+    Require(AgcDriver::Graphics::DrawRejection(colorDisabled, true).empty(), "a draw without a pixel program was rejected while CB_COLOR_CONTROL disables color");
+    Require(!AgcDriver::Graphics::DecodeState(colorDisabled).hasColorTarget, "a draw with CB_COLOR_CONTROL disabling color decoded a color target");
+    colorDisabled.context.erase(0x202);
+    Require(AgcDriver::Graphics::DrawRejection(colorDisabled, true).find("writes color") != std::string::npos, "a draw without a pixel program and an unwritten CB_COLOR_CONTROL was accepted");
     queue.shader.erase(0x008);
     queue.shader.erase(0x009);
     Require(AgcDriver::Graphics::PixelProgramSkipped(queue), "an unwritten pixel program address was not read as unset");
@@ -4201,7 +4207,7 @@ void DepthClipTests() {
     collapsedQueue.context[0x10f] = std::bit_cast<std::uint32_t>(-1.0f);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(collapsedQueue); }, "unsupported viewport transform");
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
-        if (bit == 19 || bit == 24 || bit == 26 || bit == 27) continue;
+        if (bit == 16 || bit == 19 || bit == 24 || bit == 26 || bit == 27) continue;
         for (const auto linearBit : {0u, 0x01000000u}) {
             queue.context[0x204] = (1u << bit) | linearBit;
             expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
@@ -4214,10 +4220,12 @@ void DepthClipTests() {
     for (const auto clip : {0x00080000u, 0x00000000u, 0x0c080000u, 0x04000000u}) {
         queue.context[0x204] = clip;
         const auto plain = AgcDriver::Graphics::DecodeState(queue);
-        queue.context[0x204] = clip | 0x01000000u;
-        const auto linearClip = AgcDriver::Graphics::DecodeState(queue);
-        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected DX_LINEAR_ATTR_CLIP_ENA");
-        Require(linearClip.negativeOneToOne == plain.negativeOneToOne && linearClip.depthClamp == plain.depthClamp && linearClip.viewport.minDepth == plain.viewport.minDepth && linearClip.viewport.maxDepth == plain.viewport.maxDepth, "DX_LINEAR_ATTR_CLIP_ENA changed the clip space, depth clamping or depth range");
+        for (const auto extraBit : {0x00010000u, 0x01000000u, 0x01010000u}) {
+            queue.context[0x204] = clip | extraBit;
+            const auto decoded = AgcDriver::Graphics::DecodeState(queue);
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected CLIP_DISABLE or DX_LINEAR_ATTR_CLIP_ENA");
+            Require(decoded.negativeOneToOne == plain.negativeOneToOne && decoded.depthClamp == plain.depthClamp && decoded.viewport.minDepth == plain.viewport.minDepth && decoded.viewport.maxDepth == plain.viewport.maxDepth, "CLIP_DISABLE or DX_LINEAR_ATTR_CLIP_ENA changed the clip space, depth clamping or depth range");
+        }
     }
 }
 
@@ -8486,6 +8494,25 @@ void LineStripTests() {
     Require(rejection.empty(), "the draw precheck rejected an indexed line strip with primitive restart: " + rejection);
 }
 
+std::uint32_t keyedGenerator = 0;
+std::size_t keyedWords = 0;
+
+VKAPI_ATTR VkResult VKAPI_CALL keyedCreateShaderModule(VkDevice, const VkShaderModuleCreateInfo* info, const VkAllocationCallbacks*, VkShaderModule* module) {
+    keyedWords = info->codeSize / sizeof(std::uint32_t);
+    keyedGenerator = info->pCode[2];
+    *module = makeHandle<VkShaderModule>();
+    return VK_SUCCESS;
+}
+
+void ShaderModuleKeyTests() {
+    const std::array<std::uint32_t, 5> code{0x07230203u, 0x00010300u, 0x00080001u, 8u, 0u};
+    static_cast<void>(AgcDriver::Graphics::CreateShaderModule(keyedCreateShaderModule, VK_NULL_HANDLE, true, code.data(), sizeof(code), "keyed module"));
+    Require(keyedWords == code.size() && keyedGenerator == 0x00080001u, "a shader module with graphics pipeline libraries changed its generator word");
+    static_cast<void>(AgcDriver::Graphics::CreateShaderModule(keyedCreateShaderModule, VK_NULL_HANDLE, false, code.data(), sizeof(code), "keyed module"));
+    Require(keyedWords == code.size() && keyedGenerator == (0x00080001u ^ 0x8000u), "a shader module without graphics pipeline libraries kept the generator word of the other mode");
+    Require(code[2] == 0x00080001u, "keying a shader module changed its source words");
+}
+
 void ProvokingVertexTests() {
     using namespace AgcDriver::Graphics;
     constexpr std::uint32_t lastVertex = 1u << 19u;
@@ -9599,6 +9626,24 @@ void highestDrawIndexTests() {
     Require(HighestDrawIndex(bytesOf(restartOnly), 2, false) == 0xffff, "a 16-bit all-ones index without restart was skipped");
     Require(HighestDrawIndex(bytesOf(narrow).first(4), 2, true) == 7 && HighestDrawIndex(bytesOf(narrow).first(2), 2, true) == 0, "the scan read past its index range");
     expectFailure([&] { HighestDrawIndex(bytesOf(narrow), 1, false); }, "unsupported index size");
+    Require(!HighestDrawIndex({}, 2, false).has_value() && !HighestDrawIndex({}, 4, true).has_value(), "an empty index range reached a vertex");
+    std::vector<std::uint16_t> long16(1027, 0xffff);
+    long16[1026] = 0;
+    Require(HighestDrawIndex(std::as_bytes(std::span(long16)), 2, true) == 0, "index 0 after many restart indices was not reached");
+    long16[513] = 4000;
+    Require(HighestDrawIndex(std::as_bytes(std::span(long16)), 2, true) == 4000, "a 16-bit index inside a long range was missed");
+    std::vector<std::uint32_t> long32(1029);
+    for (std::size_t i = 0; i < long32.size(); ++i) long32[i] = static_cast<std::uint32_t>(i * 7u % 1000u);
+    long32[1028] = 0x80000001u;
+    Require(HighestDrawIndex(std::as_bytes(std::span(long32)), 4, true) == 0x80000001u, "a 32-bit index above 2^31 in the tail was missed");
+    long32[1028] = 0xffffffffu;
+    Require(HighestDrawIndex(std::as_bytes(std::span(long32)), 4, true) == 999u && HighestDrawIndex(std::as_bytes(std::span(long32)), 4, false) == 0xffffffffu, "a 32-bit restart index at the end of a long range");
+    std::vector<std::byte> shifted(2 * 1000 + 3);
+    for (std::size_t i = 0; i < 1000; ++i) {
+        const auto value = static_cast<std::uint16_t>(i == 777 ? 0x8001u : i % 300u);
+        std::memcpy(shifted.data() + 1 + 2 * i, &value, sizeof(value));
+    }
+    Require(HighestDrawIndex(std::span<const std::byte>(shifted).subspan(1, 2 * 1000 + 1), 2, false) == 0x8001u, "an unaligned 16-bit range with a trailing byte");
 }
 
 void storeAtFlipTests() {
@@ -10484,6 +10529,7 @@ int main(int argc, char** argv) {
         stencilReferenceUnusedTests();
         aliasedBufferViewTests();
         LineStripTests();
+        ShaderModuleKeyTests();
         ProvokingVertexTests();
         ProvokingVertexRenderPassTests();
         ConservativeRasterizationTests();

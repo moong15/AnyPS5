@@ -16,6 +16,7 @@
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DeviceFault.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FragmentBarycentric.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Float32FlushControl.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PipelineLinkOptimization.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawInputsInPlace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/RobustBufferAccess.hpp"
@@ -640,6 +641,7 @@ struct VulkanDevice::State {
     bool float16DenormPreserve = false;
     bool float32FlushToZeroCandidate = false;
     bool float32FlushToZero = false;
+    bool float32DenormPreserve = false;
     bool probingFloatControls = false;
     bool demoteToHelperInvocation = false;
     bool earlyFragmentSampleMaskTestBeforeSampleCounting = false;
@@ -1248,10 +1250,7 @@ ComputePipelineReplayResult VulkanDevice::ReplayComputePipeline(const ComputePip
     check(state->DeviceFunction<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(state->device, &cacheInfo, nullptr, &replay.cache), "vkCreatePipelineCache replay");
     result.cacheMilliseconds = elapsed(phase);
     phase = std::chrono::steady_clock::now();
-    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    moduleInfo.codeSize = capture.spirv.size() * sizeof(std::uint32_t);
-    moduleInfo.pCode = capture.spirv.data();
-    check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &objects.module), "vkCreateShaderModule replay");
+    objects.module = Graphics::CreateShaderModule(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule"), state->device, state->graphicsPipelineLibrary, capture.spirv.data(), capture.spirv.size() * sizeof(std::uint32_t), "vkCreateShaderModule replay");
     result.moduleMilliseconds = elapsed(phase);
     phase = std::chrono::steady_clock::now();
     std::array<std::array<std::uint64_t, 4>, 2> descriptorCounts{};
@@ -1495,10 +1494,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
     check(enumerateDeviceExtensions(selected, nullptr, &extensionCount, availableExtensions.data()), "vkEnumerateDeviceExtensionProperties");
     const auto hasExtension = [&](const char* name) { return std::any_of(availableExtensions.begin(), availableExtensions.end(), [&](const auto& item) { return std::strcmp(item.extensionName, name) == 0; }); };
+    VkDriverId driverId{};
     if (hasExtension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME)) {
         VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceProperties2 driverProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &driver};
         state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &driverProperties);
+        driverId = driver.driverID;
         state->driverInfo = std::string(driver.driverName) + " " + driver.driverInfo;
         state->individuallyFreeDescriptorSets = driver.driverID == VK_DRIVER_ID_MESA_LLVMPIPE;
     }
@@ -1660,9 +1661,11 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     }
     state->float16DenormPreserve = floatControls.shaderDenormPreserveFloat16 == VK_TRUE &&
         floatControls.denormBehaviorIndependence == VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
-    state->float32FlushToZeroCandidate = floatControls.shaderDenormFlushToZeroFloat32 == VK_TRUE && floatControls.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE && std::getenv("APS5_NO_HW_F32_FLUSH") == nullptr;
-    if (state->float32FlushToZeroCandidate) state->capabilities.push_back(spv::CapabilityDenormFlushToZero);
-    if (state->float16DenormPreserve && std::find(state->capabilities.begin(), state->capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityDenormPreserve)) == state->capabilities.end()) state->capabilities.push_back(spv::CapabilityDenormPreserve);
+    const auto float32Flush = Float32FlushControlFor(driverId, floatControls.shaderDenormFlushToZeroFloat32, floatControls.denormBehaviorIndependence);
+    state->float32FlushToZeroCandidate = float32Flush.probe && std::getenv("APS5_NO_HW_F32_FLUSH") == nullptr;
+    if (state->float32FlushToZeroCandidate && float32Flush.declared) state->capabilities.push_back(spv::CapabilityDenormFlushToZero);
+    state->float32DenormPreserve = floatControls.shaderDenormPreserveFloat32 == VK_TRUE && floatControls.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE && std::getenv("APS5_NO_HW_F32_PRESERVE") == nullptr;
+    if ((state->float16DenormPreserve || state->float32DenormPreserve) && std::find(state->capabilities.begin(), state->capabilities.end(), static_cast<std::uint32_t>(spv::CapabilityDenormPreserve)) == state->capabilities.end()) state->capabilities.push_back(spv::CapabilityDenormPreserve);
     deviceExtensions.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
     deviceExtensions.push_back(VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
     state->capabilities.push_back(4448);
@@ -2458,6 +2461,10 @@ bool VulkanDevice::ComputeFullSubgroups() const {
 void VulkanDevice::WaitForPipelineJournalReplay() {
     startJournalReplay();
     if (state->journalReplay != nullptr) state->journalReplay->Wait();
+}
+
+void VulkanDevice::SavePipelineCache() {
+    if (state->pipelineCache) state->pipelineCache->SaveNow();
 }
 
 std::uint64_t VulkanDevice::ComputePipelinesCreated() const {
@@ -4002,6 +4009,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     require(state->shaderProfile != nullptr, "shader device profile is unavailable");
     auto target = state->shaderProfile->Target();
     target.float32FlushToZero = state->float32FlushToZero;
+    target.float32DenormPreserve = state->float32DenormPreserve;
     return target;
 }
 
@@ -4727,6 +4735,8 @@ struct RecordedDispatch {
     std::shared_ptr<Graphics::ShaderResources::DrawBindings> bindings{};
     std::uint64_t cpuArguments = 0;
     int cpuReason = 0;
+    std::array<std::uint32_t, 3> threadGroup{};
+    std::array<std::uint32_t, 3> threadLimit{};
 };
 
 VkDevice VulkanDevice::Device() const {
@@ -4984,8 +4994,8 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     static_cast<void>(dispatch(shader, x, y, z, 0, snapshots, programAddress, std::move(prepared), recipe));
 }
 
-VulkanDevice::IndirectOutcome VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe) {
-    return dispatch(shader, 0, 0, 0, arguments, snapshots, programAddress, std::move(prepared), recipe);
+VulkanDevice::IndirectOutcome VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe, const std::array<std::uint32_t, 3>& threadGroup) {
+    return dispatch(shader, 0, 0, 0, arguments, snapshots, programAddress, std::move(prepared), recipe, threadGroup);
 }
 
 void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& outcome, char* groupsText) {
@@ -4993,6 +5003,7 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
     auto& timer = *record.timer;
     const auto& context = *record.context;
     const auto arguments = record.arguments;
+    const bool threadDimensions = record.threadGroup != std::array<std::uint32_t, 3>{};
     // Decided here, after the resource build (which may retire imports and wait for recorded
     // work) and before the dispatch itself is recorded, so the import cannot be dropped before
     // the record. The build already recorded the copy-ins of its misaligned and staged regions
@@ -5019,7 +5030,8 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
         outcome.cpuReason = 8;
     } else if (labelPending() || state->CopiedWriterOverlaps(arguments, 12)) {
         outcome.cpuReason = 2;
-    } else if ((record.argumentImport = Graphics::HostImportFor(context, arguments, 12)) == nullptr) {
+    } else if ((record.argumentImport = Graphics::HostImportFor(context, arguments, 12)) == nullptr || (threadDimensions && record.argumentImport->address == 0)) {
+        record.argumentImport = nullptr;
         // Valid until the next refreshImports, which only runs under GuestMemory::GpuMutex (held
         // here, by every Dispatch caller) and Keeps a retired VkBuffer while the recorder is busy.
         outcome.cpuReason = 3;
@@ -5036,6 +5048,10 @@ void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& out
     Graphics::FinishLeaseWork();
     std::array<std::uint32_t, 3> groups{};
     GuestMemory::Read(arguments, std::as_writable_bytes(std::span(groups)), 4);
+    if (threadDimensions) {
+        record.threadLimit = groups;
+        for (std::size_t axis = 0; axis < groups.size(); ++axis) groups[axis] = groups[axis] / record.threadGroup[axis] + (groups[axis] % record.threadGroup[axis] != 0 ? 1u : 0u);
+    }
     outcome.argumentReadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count();
     record.x = groups[0];
     record.y = groups[1];
@@ -5112,6 +5128,24 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
         }
         recordStep(PhaseRecordDataRefresh);
     }
+    std::shared_ptr<Graphics::Buffer> threadArguments;
+    if (record.threadGroup != std::array<std::uint32_t, 3>{}) {
+        const auto data = resources.shaderDataBuffer(*record.shader);
+        const auto limitDword = record.shader->program->imageMetadataDword;
+        Graphics::Require(data != VK_NULL_HANDLE && limitDword >= 3, "Vulkan dispatch: a thread-dimension dispatch has no ShaderData thread limit");
+        const VkDeviceSize limitByte = static_cast<VkDeviceSize>(limitDword - 3) * sizeof(std::uint32_t);
+        Graphics::RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        if (argumentImport != nullptr) {
+            threadArguments = std::make_shared<Graphics::Buffer>(context, 24, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            Graphics::Require(recorder.RecordDispatchArguments(commands, argumentImport->address + (arguments - argumentImport->base), threadArguments->DeviceAddress(), &record.threadGroup), "Vulkan dispatch: thread-dimension indirect arguments need the argument kernel");
+            const VkBufferCopy limit{12, limitByte, 12};
+            context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, threadArguments->Handle(), data, 1, &limit);
+        } else {
+            context.Resolved(&Graphics::DeviceFunctions::cmdUpdateBuffer, "vkCmdUpdateBuffer")(commands, data, limitByte, sizeof(record.threadLimit), record.threadLimit.data());
+        }
+        resources.forgetShaderDataWords(*record.shader);
+        covered = 0;
+    }
     using CommandClass = Graphics::Recorder::CommandClass;
     if (Graphics::Recorder::BarrierValidate()) {
         if (argumentImport != nullptr) {
@@ -5145,7 +5179,11 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     }
     VkBuffer indirectBuffer = argumentImport != nullptr ? argumentImport->buffer : VK_NULL_HANDLE;
     VkDeviceSize indirectOffset = argumentImport != nullptr ? Graphics::HostImportOffset(*argumentImport, arguments) : 0;
-    if (argumentImport != nullptr && argumentImport->address != 0) {
+    if (threadArguments != nullptr) {
+        indirectBuffer = threadArguments->Handle();
+        indirectOffset = 0;
+        recorder.Keep(std::move(threadArguments));
+    } else if (argumentImport != nullptr && argumentImport->address != 0) {
         auto checked = std::make_shared<Graphics::Buffer>(context, 12, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         if (recorder.RecordDispatchArguments(commands, argumentImport->address + (arguments - argumentImport->base), checked->DeviceAddress())) {
             indirectBuffer = checked->Handle();
@@ -5248,10 +5286,7 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::createComputePipeline(cons
     objects->destroyModule = state->DeviceFunction<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
     objects->destroyLayout = state->DeviceFunction<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
     objects->destroyPipeline = state->DeviceFunction<PFN_vkDestroyPipeline>("vkDestroyPipeline");
-    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    moduleInfo.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
-    moduleInfo.pCode = shader.spirv.data();
-    check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &objects->module), "vkCreateShaderModule");
+    objects->module = Graphics::CreateShaderModule(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule"), state->device, state->graphicsPipelineLibrary, shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t), "vkCreateShaderModule");
     objects->resourcesLayout = setLayout;
     const std::array<VkDescriptorSetLayout, 2> setLayouts{setLayout, shader.workgroupMemoryDwords != 0 ? state->workgroupMemoryLayout : VK_NULL_HANDLE};
     const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::ComputePushConstantBytes};
@@ -5311,11 +5346,7 @@ VkPipeline VulkanDevice::splitComputePipeline(const Graphics::Context& context, 
     std::array<ShaderRecompiler::PipelineSpecializationConstant, ShaderRecompiler::PipelineSpecialization::WorkgroupOffsetWords> offsets{};
     for (std::uint32_t component = 0; component < offsets.size(); ++component) offsets[component] = {ShaderRecompiler::PipelineSpecialization::WorkgroupOffsetBase + component, base[component]};
     const Graphics::PipelineSpecialization specialization(shader, offsets);
-    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    moduleInfo.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
-    moduleInfo.pCode = shader.spirv.data();
-    VkShaderModule module = VK_NULL_HANDLE;
-    check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &module), "vkCreateShaderModule");
+    VkShaderModule module = Graphics::CreateShaderModule(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule"), state->device, state->graphicsPipelineLibrary, shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t), "vkCreateShaderModule");
     VkPipeline pipeline = VK_NULL_HANDLE;
     try {
         CreateComputePipeline(state->device, state->DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines"), context.pipelineCache, module, objects.layout, computePipelineFlags(), computeStageFlags(shader), specialization.Info(), computeSubgroupSize(shader), &pipeline, context.pipelineCacheSynchronization);
@@ -5371,8 +5402,19 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::computePipeline(const Grap
     return finish(std::move(objects), nullptr);
 }
 
-VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipeOut) {
+VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipeOut, const std::array<std::uint32_t, 3>& threadGroup) {
     startJournalReplay();
+    for (const auto& binding : shader.bindings) {
+        if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+        for (std::size_t at = 0; at + 4u <= binding.guestDescriptor.size(); at += 4u) {
+            const auto* words = binding.guestDescriptor.data() + at;
+            const auto base = static_cast<std::uint64_t>(words[0]) | (static_cast<std::uint64_t>(words[1] & 0xffffu) << 32u);
+            const auto stride = (words[1] >> 16u) & 0x3fffu;
+            const auto records = static_cast<std::uint64_t>(words[2]);
+            const auto bytes = stride != 0 ? records * stride : records;
+            if (base != 0 && bytes != 0) static_cast<void>(Graphics::FlushDepthPlanes(base, static_cast<std::size_t>(bytes)));
+        }
+    }
     state->recorder->BoundKeptBytes();
     ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     PerformanceTimer timing("Vulkan.Dispatch");
@@ -5509,6 +5551,10 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
                     Graphics::ShaderResources::MoveProof proof;
                     auto moved = cached->MovedDispatchBuffers(shaders[0], state->recorder.get(), DispatchMoveBytes(), proof);
                     moves.checked.fetch_add(1, std::memory_order_relaxed);
+                    if (moved.has_value() && threadGroup != std::array<std::uint32_t, 3>{}) {
+                        const auto data = cached->shaderDataAllocation(shaders[0]);
+                        if (data.has_value() && std::ranges::any_of(*moved, [&](const Graphics::ShaderResources::MovedBuffer& entry) { return entry.allocation == *data; })) moved.reset();
+                    }
                     if (moved.has_value() && !moved->empty()) {
                         overlay = cached->PrepareDrawBindings(*state->recorder, *moved, true);
                         if (overlay != nullptr && overlay->allocation.set == VK_NULL_HANDLE) overlay.reset();
@@ -5611,6 +5657,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     RecordedDispatch record{&context, &shaders[0], resources, objects, pushStages, &pushBytes, x, y, z, arguments, nullptr, programAddress, fromCache && TemplateDataRefresh() ? RecordedDispatch::DataRefresh::Words : RecordedDispatch::DataRefresh::None, 0, revalidateMs, &timer};
     record.resourceKeyMatched = fromCache;
     record.bindings = overlay;
+    record.threadGroup = threadGroup;
     if (arguments != 0) decideIndirect(record, outcome, groupsText);
     // The indirect hold total below still covers the whole call of a CPU-resolved one.
     const bool indirect = record.arguments != 0 || outcome.cpuReason != 0;
@@ -5685,7 +5732,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     return outcome;
 }
 
-RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify, bool refreshByWords) {
+RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify, bool refreshByWords, const std::array<std::uint32_t, 3>& threadGroup) {
     state->recorder->BoundKeptBytes();
     ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     PerformanceTimer timing("Vulkan.DispatchRecipe");
@@ -5781,6 +5828,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
     if (dataRefresh == RecordedDispatch::DataRefresh::Words) counters.refreshByWords.fetch_add(1, std::memory_order_relaxed);
     RecordedDispatch record{&context, &shaders[0], hit->resources, hit->objects, recipe.pushes ? VkShaderStageFlags{VK_SHADER_STAGE_COMPUTE_BIT} : VkShaderStageFlags{0}, &recipe.pushBytes, x, y, z, arguments, nullptr, programAddress, dataRefresh, recipe.dataWordsHash, 0, &timer};
     record.resourceKeyMatched = verify != nullptr;
+    record.threadGroup = threadGroup;
     if (arguments != 0) decideIndirect(record, outcome, groupsText);
     const bool indirect = record.arguments != 0 || outcome.cpuReason != 0;
     const auto recordStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

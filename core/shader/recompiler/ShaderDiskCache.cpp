@@ -142,7 +142,7 @@ constexpr std::size_t fieldCount() {
 
 static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
-static_assert(fieldCount<ImageResource>() == 40, "ImageResource changed: update the info encoder");
+static_assert(fieldCount<ImageResource>() == 41, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: update the info encoder");
 static_assert(fieldCount<SampledResourcePair>() == 3, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
@@ -759,6 +759,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
         out.Value(image.flatVolumeLineCompatible);
         out.Value(image.foldTexelOffsetsOnly);
         out.Value(image.convertedSamples);
+        out.Value(image.remappedDepth1D);
         out.Value(image.byElements);
         out.Value(image.byComponents);
         out.Value(image.packedFormat);
@@ -863,6 +864,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(image.flatVolumeLineCompatible);
         in.Value(image.foldTexelOffsetsOnly);
         in.Value(image.convertedSamples);
+        in.Value(image.remappedDepth1D);
         in.Value(image.byElements);
         in.Value(image.byComponents);
         in.Value(image.packedFormat);
@@ -1666,17 +1668,33 @@ private:
             entries += pack->Count();
             packs.push_back(std::move(pack));
         };
-        for (const auto& path : PrebuiltCachePaths(root)) {
+        for (const auto& candidate : PrebuiltCachePaths(root)) {
             std::error_code error;
+#ifdef _WIN32
+            const auto path = NativeCachePath_nid_no_patch(candidate, error);
+            if (error) continue;
+#else
+            const auto& path = candidate;
+#endif
             if (std::filesystem::is_regular_file(path, error)) { addPack(path); continue; }
             if (!std::filesystem::is_directory(path, error)) continue;
             bool loose = false;
             std::vector<std::filesystem::path> packPaths;
-            for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) {
-                const auto extension = it->path().extension();
-                if (extension == ".pack") packPaths.push_back(it->path());
-                if (extension == ".bin" && it->path().stem().string().size() == 32) loose = true;
+            const auto collect = [&](const std::filesystem::path& entry) {
+                const auto extension = entry.extension();
+                if (extension == ".pack") packPaths.push_back(entry);
+                if (extension == ".bin" && entry.stem().string().size() == 32) loose = true;
+            };
+#ifdef _WIN32
+            WIN32_FIND_DATAW data{};
+            const auto handle = FindFirstFileW((path / L"*").c_str(), &data);
+            if (handle != INVALID_HANDLE_VALUE) {
+                struct Search { HANDLE handle; ~Search() { FindClose(handle); } } search{handle};
+                do { collect(path / data.cFileName); } while (FindNextFileW(handle, &data));
             }
+#else
+            for (std::filesystem::directory_iterator it(path, error), end; !error && it != end; it.increment(error)) collect(it->path());
+#endif
             std::sort(packPaths.begin(), packPaths.end());
             for (const auto& item : packPaths) addPack(item);
             if (loose) looseDirectories.push_back(path);

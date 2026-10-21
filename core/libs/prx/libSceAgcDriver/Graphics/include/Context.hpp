@@ -82,6 +82,17 @@ inline void Check(VkResult result, const char* operation) {
     if (result != VK_SUCCESS) throw std::runtime_error(std::string("AGC graphics: ") + operation + ": Vulkan result " + std::to_string(result));
 }
 
+inline VkShaderModule CreateShaderModule(PFN_vkCreateShaderModule create, VkDevice device, bool graphicsPipelineLibrary, const std::uint32_t* code, std::size_t bytes, const char* operation) {
+    std::vector<std::uint32_t> keyed(code, code + bytes / sizeof(std::uint32_t));
+    if (!graphicsPipelineLibrary && keyed.size() > 2) keyed[2] ^= 0x8000u;
+    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    info.codeSize = keyed.size() * sizeof(std::uint32_t);
+    info.pCode = keyed.data();
+    VkShaderModule module = VK_NULL_HANDLE;
+    Check(create(device, &info, nullptr, &module), operation);
+    return module;
+}
+
 inline void Require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("AGC graphics: ") + reason);
 }
@@ -347,6 +358,10 @@ struct Context {
         return HostMemoryType(mask);
     }
 };
+
+inline VkShaderModule CreateShaderModule(const Context& context, const std::uint32_t* code, std::size_t bytes, const char* operation) {
+    return CreateShaderModule(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule"), context.device, context.graphicsPipelineLibrary, code, bytes, operation);
+}
 
 inline void EndRenderPass(const Context& context, VkCommandBuffer commands) {
     if (context.graphicsPipelineLibrary) context.Resolved(&DeviceFunctions::cmdEndRendering, "vkCmdEndRenderingKHR")(commands);

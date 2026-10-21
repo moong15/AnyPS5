@@ -1,3 +1,4 @@
+#include "HostImportFailure.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -434,6 +435,7 @@ int main() {
         BusyRetireOutlivesALaterBatch();
         CachedLookupMatchesTheFullLookup();
         CachedLookupFollowsTheImportTable();
+        AgcDriver::Tests::RunHostImportFailureTests(mockContext(), false);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         return 1;

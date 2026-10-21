@@ -119,6 +119,28 @@ class SelectTests(unittest.TestCase):
         subprocess.run(["cmake", "--build", str(self.build)], check=True, capture_output=True)
         self.assertEqual(built, {"alpha_tests"})
 
+    def test_explain_reports_input_and_fixture_reasons_without_a_build_cache(self):
+        changed = self.build / "explain-changed.txt"
+        cache = self.build / "CMakeCache.txt"
+        saved = self.build / "CMakeCache.saved"
+        cache.rename(saved)
+        try:
+            for path in ("alpha/alpha.h", "beta/main.c", "CMakeLists.txt"):
+                with self.subTest(path=path):
+                    changed.write_text(path + "\n", encoding="utf-8")
+                    report = json.loads(self.tool("explain", self.graph, changed))
+                    picked, full = select_tests.select(json.loads(self.graph.read_text(encoding="utf-8")), [path])
+                    self.assertEqual(report["tests"], sorted(picked) if picked is not None else None)
+                    self.assertEqual(report["full_run_paths"], full)
+                    if path == "alpha/alpha.h":
+                        self.assertIn("input: alpha/alpha.h", report["reasons"]["alpha"])
+                        self.assertIn("no build executable", report["reasons"]["script"])
+                    elif path == "beta/main.c":
+                        self.assertIn("fixture setup for: beta", report["reasons"]["beta_setup"])
+        finally:
+            saved.rename(cache)
+
+
 
 @unittest.skipUnless(shutil.which("ninja") and (shutil.which("gcc") or shutil.which("cc")), "needs ninja and a C compiler")
 class FixtureBuildTests(unittest.TestCase):

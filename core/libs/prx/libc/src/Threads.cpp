@@ -412,6 +412,7 @@ static void RequireThrd(int result, const char* what) {
 
 static std::atomic<PthreadCreateFn_nid_no_patch> registeredPthreadCreate{nullptr};
 static std::atomic<PthreadJoinFn_nid_no_patch> registeredPthreadJoin{nullptr};
+static std::atomic<PthreadDetachFn_nid_no_patch> registeredPthreadDetach{nullptr};
 
 void RegisterPthreadCreate_nid_no_patch(PthreadCreateFn_nid_no_patch fn) {
     registeredPthreadCreate.store(fn, std::memory_order_release);
@@ -419,6 +420,10 @@ void RegisterPthreadCreate_nid_no_patch(PthreadCreateFn_nid_no_patch fn) {
 
 void RegisterPthreadJoin_nid_no_patch(PthreadJoinFn_nid_no_patch fn) {
     registeredPthreadJoin.store(fn, std::memory_order_release);
+}
+
+void RegisterPthreadDetach_nid_no_patch(PthreadDetachFn_nid_no_patch fn) {
+    registeredPthreadDetach.store(fn, std::memory_order_release);
 }
 
 static void* APS5_VABI PadEntry_nid_no_patch(void* argument) {
@@ -475,6 +480,12 @@ int APS5_VABI _Thrd_join_nid_postfix(void* thread, int* code) {
     if (join(thread, &result) != 0) return threadError;
     if (code) *code = static_cast<int>(reinterpret_cast<std::intptr_t>(result));
     return threadSuccess;
+}
+
+int APS5_VABI _Thrd_detach_nid_postfix(void* thread) {
+    const auto detach = registeredPthreadDetach.load(std::memory_order_acquire);
+    if (!detach) throw std::runtime_error("_Thrd_detach: pthread_detach is not registered");
+    return detach(thread) == 0 ? threadSuccess : threadError;
 }
 
 int APS5_VABI _Thrd_id_nid_postfix(void) {

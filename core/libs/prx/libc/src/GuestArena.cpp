@@ -651,6 +651,16 @@ bool GuestArenaBeginHostWriteUnordered_nid_no_patch(void* pointer, std::size_t b
 #endif
 }
 
+#ifdef _WIN32
+bool GuestArenaBeginHostImport_nid_no_patch(void* pointer, std::size_t bytes) {
+    return WindowsMappings::Get().BeginHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes, false);
+}
+
+void GuestArenaEndHostImport_nid_no_patch(void* pointer, std::size_t bytes) {
+    WindowsMappings::Get().EndHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes, false);
+}
+#endif
+
 void GuestArenaEndHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
 #ifdef _WIN32
     WindowsMappings::Get().EndHostWrite(reinterpret_cast<std::uintptr_t>(pointer), bytes);

@@ -1851,6 +1851,26 @@ class ImportAuditTests(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn(f"FAIL: Permission denied: {library}", err)
 
+    def test_strict_stubs_fails_only_for_referenced_throwing_providers(self):
+        name = "sceExamplePending"
+        nid = nid_names.compute_nid(name)
+        registry = self.work.root / "game.json"
+        output = self.work.root / "audit.json"
+        (self.work.libs / "libSceExample.prx").write_bytes(exporting(nid))
+        write_source(self.work.source, "libSceExample", STUB_SOURCE.format(name=name))
+        for weak in (False, True):
+            with self.subTest(weak=weak):
+                write_registry(registry, [(nid, "libSceExample.prx", weak)])
+                self.assertEqual(self.work.run(registry)[0], 0)
+                code, out, err = self.work.run(registry, "--strict-stubs", "--json", str(output))
+                self.assertEqual((code, err), (1, ""))
+                self.assertIn("stub", out)
+                self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["unique_by_class"]["stub"], 1)
+        write_source(self.work.source, "libSceExample", DONE_SOURCE.format(name=name)
+                     + STUB_SOURCE.format(name="sceUnreferencedPending"))
+        self.assertEqual(self.work.run(registry, "--strict-stubs")[0], 0)
+
+
 
 class StrictProviderTests(unittest.TestCase):
     def test_named_provider_mismatch_is_optional_failure(self):

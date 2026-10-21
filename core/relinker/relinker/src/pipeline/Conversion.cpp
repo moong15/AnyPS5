@@ -139,7 +139,8 @@ ConversionOutput Conversion::Convert(ConversionInput input, const ConversionOpti
             ),
             std::make_shared<Elfpatcher::SectionHeaderTableBuilder>(byteWriter),
             byteWriter,
-            options.LinuxFixedBase
+            options.LinuxFixedBase,
+            options.TraceImports
         );
     }
 

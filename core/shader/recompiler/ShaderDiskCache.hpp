@@ -14,7 +14,7 @@
 
 namespace ShaderRecompiler::ShaderDiskCache {
 
-inline constexpr std::uint32_t FormatVersion = 46;
+inline constexpr std::uint32_t FormatVersion = 47;
 
 inline constexpr std::size_t ArtifactIdentityBytes = 16;
 

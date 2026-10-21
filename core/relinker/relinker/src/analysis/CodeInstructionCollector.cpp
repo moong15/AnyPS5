@@ -99,6 +99,19 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
         return offset;
     };
     std::vector<Domain::CodeRange> sceFunctions;
+    const auto trimToCode = [&](Domain::ProgramHeader& header, std::uint64_t end, bool interpreterAnywhere) {
+        const std::span<const std::uint8_t> segment(bytes.data() + header.Offset, header.FileSize);
+        auto begin = header.MappedAddress;
+        for (const auto& interpreter : headers)
+            if (interpreter.Type == 3 && interpreter.MappedAddress < end &&
+                (interpreterAnywhere ? interpreter.MappedAddress >= begin : interpreter.MappedAddress == begin))
+                begin = interpreter.MappedAddress + std::min(interpreter.FileSize, end - interpreter.MappedAddress);
+        const std::string_view loaderPath("/libexec/ld-elf.so.1", 21);
+        if (begin == header.MappedAddress && end - begin > loaderPath.size() && std::equal(loaderPath.begin(), loaderPath.end(), segment.begin())) begin += loaderPath.size();
+        header.Offset += begin - header.MappedAddress;
+        header.MappedAddress = begin;
+        header.FileSize = end - begin;
+    };
     if (sceBase) {
         const auto unwindFunctions = UnusedNidFilter::ReadExceptionFunctions(bytes, headers, {}, {});
         for (const auto& function : unwindFunctions) sceFunctions.push_back({function.Begin, function.End});
@@ -107,15 +120,12 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
             if (header.Type != 1 || (header.Flags & 1) == 0) continue;
             range(header.Offset, header.FileSize);
             const std::span<const std::uint8_t> segment(bytes.data() + header.Offset, header.FileSize);
-            const auto end = FindSceCodeEnd(segment, header.MappedAddress, unwindFunctions, value(3, 0x61000027).value_or(0), value(2, 0x6100002d).value_or(0)).value_or(header.MappedAddress + header.FileSize);
-            auto begin = header.MappedAddress;
-            for (const auto& interpreter : headers)
-                if (interpreter.Type == 3 && interpreter.MappedAddress >= begin && interpreter.MappedAddress < end) begin = interpreter.MappedAddress + std::min(interpreter.FileSize, end - interpreter.MappedAddress);
-            const std::string_view loaderPath("/libexec/ld-elf.so.1", 21);
-            if (begin == header.MappedAddress && end - begin > loaderPath.size() && std::equal(loaderPath.begin(), loaderPath.end(), segment.begin())) begin += loaderPath.size();
-            header.Offset += begin - header.MappedAddress;
-            header.MappedAddress = begin;
-            header.FileSize = end - begin;
+            trimToCode(header, FindSceCodeEnd(segment, header.MappedAddress, unwindFunctions, value(3, 0x61000027).value_or(0), value(2, 0x6100002d).value_or(0)).value_or(header.MappedAddress + header.FileSize), true);
+        }
+    } else {
+        for (auto& header : codeHeaders) {
+            if (header.Type != 1 || (header.Flags & 1) == 0) continue;
+            trimToCode(header, header.MappedAddress + header.FileSize, false);
         }
     }
     std::set<std::uint64_t> roots;

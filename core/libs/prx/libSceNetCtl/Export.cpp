@@ -352,6 +352,13 @@ static bool FindHostIpv4Interface(HostIpv4Interface& found) {
 #endif
 }
 
+extern "C" std::size_t NetCtlHostDnsServers_nid_no_patch(std::uint32_t* servers, std::size_t capacity) {
+    HostIpv4Interface host;
+    if (!FindHostIpv4Interface(host)) return 0;
+    for (std::size_t index = 0; index < host.dns.size() && index < capacity; ++index) servers[index] = host.dns[index].s_addr;
+    return host.dns.size();
+}
+
 static void WriteInfoWord(NetCtlInfo* info, std::uint32_t value) {
     std::memcpy(info->opaque, &value, sizeof(value));
 }

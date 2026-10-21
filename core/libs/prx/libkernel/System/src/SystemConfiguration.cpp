@@ -67,6 +67,16 @@ constexpr SystemString SystemStrings[] = {
     {{6, 1}, "hw.machine", "amd64"},
 };
 
+struct SystemInteger {
+    int mib[2];
+    const char* name;
+    std::int32_t value;
+};
+
+constexpr SystemInteger SystemIntegers[] = {
+    {{1, 24}, "kern.osreldate", 1104001},
+};
+
 const SystemString* FindSystemString(const int* name) {
     for (const auto& entry : SystemStrings) {
         if (name[0] == entry.mib[0] && name[1] == entry.mib[1]) return &entry;
@@ -74,8 +84,15 @@ const SystemString* FindSystemString(const int* name) {
     return nullptr;
 }
 
+const SystemInteger* FindSystemInteger(const int* name) {
+    for (const auto& entry : SystemIntegers) {
+        if (name[0] == entry.mib[0] && name[1] == entry.mib[1]) return &entry;
+    }
+    return nullptr;
+}
+
 bool IsLeafMib(const int* name) {
-    return (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5 || name[1] == 7)) || (name[0] == 1 && (name[1] == 37 || name[1] == 50));
+    return FindSystemInteger(name) != nullptr || (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5 || name[1] == 7)) || (name[0] == 1 && (name[1] == 37 || name[1] == 50));
 }
 
 bool IsMeasuredAbsentMib(const int* name, std::uint32_t nameLength) {
@@ -281,6 +298,13 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
             }
             return CopyOut(entry->value, std::strlen(entry->value) + 1, oldValue, oldLength);
         }
+        if (const auto* entry = FindSystemInteger(name)) {
+            if (newValue != nullptr) {
+                *__error_nid_postfix() = 1;
+                return -1;
+            }
+            return CopyOut(&entry->value, sizeof(entry->value), oldValue, oldLength);
+        }
     }
     if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 12) {
         if (newValue != nullptr) {
@@ -358,6 +382,9 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
         return -1;
     }
     for (const auto& entry : SystemStrings) {
+        if (std::strcmp(name, entry.name) == 0) return sysctl_nid_postfix(entry.mib, 2, oldValue, oldLength, newValue, newLength);
+    }
+    for (const auto& entry : SystemIntegers) {
         if (std::strcmp(name, entry.name) == 0) return sysctl_nid_postfix(entry.mib, 2, oldValue, oldLength, newValue, newLength);
     }
     if (IsUnansweredName(name)) {
@@ -482,6 +509,9 @@ int APS5_VABI sysctlnametomib_nid_postfix(const char* name, int* mib, std::size_
         if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, entry.length);
     }
     for (const auto& entry : SystemStrings) {
+        if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, 2);
+    }
+    for (const auto& entry : SystemIntegers) {
         if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, 2);
     }
     throw std::runtime_error(std::string(__func__) + ": unsupported name " + name);

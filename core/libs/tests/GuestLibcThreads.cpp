@@ -30,8 +30,10 @@ void APS5_VABI _ZNSt4_PadD2Ev_nid_postfix(GuestPad* pad);
 void APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(GuestPad* pad);
 void APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(GuestPad* pad, void** thread);
 int APS5_VABI _Thrd_join_nid_postfix(void* thread, int* code);
+int APS5_VABI _Thrd_detach_nid_postfix(void* thread);
 void RegisterPthreadCreate_nid_no_patch(int (APS5_VABI* fn)(void**, const void*, void* (APS5_VABI*)(void*), void*));
 void RegisterPthreadJoin_nid_no_patch(int (APS5_VABI* fn)(void*, void**));
+void RegisterPthreadDetach_nid_no_patch(int (APS5_VABI* fn)(void*));
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -227,6 +229,12 @@ static int APS5_VABI HostPthreadJoin(void* thread, void** value) {
     return 0;
 }
 
+static int APS5_VABI HostPthreadDetach(void* thread) {
+    if (!thread) return 22;
+    static_cast<HostPadThread*>(thread)->worker.detach();
+    return 0;
+}
+
 static unsigned APS5_VABI TestPadGo(GuestPad* base) {
     auto* pad = reinterpret_cast<TestPad*>(base);
     pad->ran.store(true);
@@ -269,6 +277,28 @@ static void PadLaunchAndJoin() {
     RegisterPthreadJoin_nid_no_patch(nullptr);
 }
 
+static void PadDetach() {
+    unsigned (APS5_VABI* vtable[1])(GuestPad*) = {TestPadGo};
+    RegisterPthreadDetach_nid_no_patch(nullptr);
+    RequireThrows<std::runtime_error>([] { _Thrd_detach_nid_postfix(nullptr); });
+
+    RegisterPthreadCreate_nid_no_patch(HostPthreadCreate);
+    RegisterPthreadDetach_nid_no_patch(HostPthreadDetach);
+
+    TestPad pad{};
+    pad.vtable = vtable;
+    _ZNSt4_PadC2Ev_nid_postfix(reinterpret_cast<GuestPad*>(&pad));
+    void* thread = nullptr;
+    _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(reinterpret_cast<GuestPad*>(&pad), &thread);
+    Require(thread != nullptr && pad.ran.load());
+    _ZNSt4_PadD2Ev_nid_postfix(reinterpret_cast<GuestPad*>(&pad));
+    Require(_Thrd_detach_nid_postfix(thread) == success);
+    Require(_Thrd_detach_nid_postfix(nullptr) == 4);
+
+    RegisterPthreadCreate_nid_no_patch(nullptr);
+    RegisterPthreadDetach_nid_no_patch(nullptr);
+}
+
 int main() {
     MutexBasics();
     RecursiveMutex();
@@ -276,4 +306,5 @@ int main() {
     ConditionBroadcast();
     ConditionSignal();
     PadLaunchAndJoin();
+    PadDetach();
 }

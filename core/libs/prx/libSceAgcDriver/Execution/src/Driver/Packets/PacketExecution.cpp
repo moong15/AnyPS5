@@ -669,6 +669,7 @@ void Driver::execute(const Submission& submission) {
                 submitOpenWork();
                 wakeQueueZeroForCompletions();
             }, {}, 0, {}, {}, true);
+            endTiming.Finish();
             executeRewindTail(submission);
             return;
         }
