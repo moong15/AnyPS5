@@ -159,6 +159,7 @@ struct Ngs2Rack {
     std::uint32_t maxGrainSamples = 0;
     std::uint32_t maxChannelWorks = 0;
     std::uint32_t maxInputs = 0;
+    std::uintptr_t userData = 0;
     Ngs2ContextBufferInfo bufferInfo{};
     Ngs2BufferAllocator allocator{};
     std::vector<Ngs2Voice> voices;
@@ -175,6 +176,7 @@ struct Ngs2System {
     Ngs2BufferAllocator allocator{};
     std::uint32_t uid = 0;
     std::int64_t renderCount = 0;
+    std::uint32_t renderDepth = 0;
     std::uintptr_t userData = 0;
     std::vector<Ngs2Rack*> racks;
 };
@@ -203,6 +205,7 @@ private:
 };
 
 bool Ngs2ExclusiveElsewhere();
+bool Ngs2RenderingHere(const Ngs2System& system);
 void Ngs2EnterExclusive();
 void Ngs2LeaveExclusive(std::uint32_t depth = 1);
 void Ngs2WaitOnce();

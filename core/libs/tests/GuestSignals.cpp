@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <atomic>
 #include <chrono>
 #include <thread>
 using Handler = void (APS5_VABI *)(int);
@@ -56,6 +57,14 @@ struct SuspendSender {
     void* target = nullptr;
     int result = -1;
 };
+struct EndingThread {
+    std::atomic<bool> release{false};
+};
+void* APS5_VABI EndingEntry(void* arg) {
+    auto& state = *static_cast<EndingThread*>(arg);
+    while (!state.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return nullptr;
+}
 void* APS5_VABI SuspendSend(void* arg) {
     auto& sender = *static_cast<SuspendSender*>(arg);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -89,6 +98,21 @@ int main() {
     Require(pthread_kill_nid_postfix(nullptr, 128) == 3);
     Require(pthread_kill_nid_postfix(nullptr, 129) == 22);
     Require(pthread_kill_nid_postfix(reinterpret_cast<void*>(std::uintptr_t{0x10}), 15) == 3);
+    Require(pthread_kill_nid_postfix(reinterpret_cast<void*>(std::uintptr_t{0x10}), 0) == 3);
+    {
+        EndingThread ending;
+        void* thread = nullptr;
+        Require(scePthreadCreate(&thread, nullptr, EndingEntry, &ending, nullptr) == 0);
+        Require(pthread_kill_nid_postfix(thread, 0) == 0);
+        ending.release.store(true);
+        int answer = 0;
+        for (int attempt = 0; attempt < 2000 && (answer = pthread_kill_nid_postfix(thread, 0)) != 3; ++attempt)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        Require(answer == 3);
+        Require(pthread_kill_nid_postfix(thread, 15) == 3);
+        Require(scePthreadJoin(thread, nullptr) == 0);
+        Require(pthread_kill_nid_postfix(thread, 0) == 3);
+    }
     Require(received == 0);
     Require(signal_nid_postfix(15, ignore) != invalid);
     received = 0;

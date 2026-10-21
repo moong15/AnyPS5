@@ -10,6 +10,7 @@ extern "C" {
 std::int32_t APS5_VABI sceDeviceServiceInitialize(std::int32_t mode, std::int32_t flags);
 std::int32_t APS5_VABI sceDeviceServiceTerminate();
 std::int32_t APS5_VABI sceDeviceServiceGetEventState(std::int32_t deviceType);
+std::int32_t APS5_VABI sceDeviceServiceGetGeneration();
 std::int32_t APS5_VABI sceDeviceServiceQueryDeviceInfo_(std::int32_t deviceClass, std::int32_t arg1, std::int32_t arg2, void* infos, std::int32_t maxInfos, std::int32_t* count, std::int32_t* reserved, std::uint64_t infoSize);
 }
 
@@ -26,6 +27,7 @@ void Require(bool condition, const char* message) {
 
 int main() {
     Require(sceDeviceServiceInitialize(3, 0) == 0, "initialization failed");
+    Require(sceDeviceServiceGetGeneration() == 0, "the device set started at another generation");
     Require(sceDeviceServiceGetEventState(1) == 0, "a device event was reported");
     std::array<std::uint8_t, 0x70> info{};
     std::int32_t count = 7;
@@ -38,6 +40,7 @@ int main() {
         threw = true;
     }
     Require(threw, "a null count was accepted");
+    Require(sceDeviceServiceGetGeneration() == 0, "the generation advanced without a device change");
     Require(sceDeviceServiceTerminate() == 0, "termination failed");
     std::puts("DeviceService tests passed");
     return 0;

@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleTarget.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
@@ -138,9 +139,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     const bool pipelineCandidate = submission.queue == 0 && !partialLastGroup && !incompleteThreadGroups && !resolving && !fromAhead && DispatchItemsEnabled() && DrawPipeline::Active() && indirectArguments == 0 && deferredLabels().labels.empty() && !matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) && !matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) && !MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute);
     if (DispatchItemsEnabled() && DrawPipeline::Active() && !pipelineCandidate) NoteItemFallback(ItemFallback::Excluded);
     if (resolving) {
+        if (indirectArguments == 0 && Graphics::MatchMultisampledSingleClear(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads)) return;
         if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
         if (!partialLastGroup && indirectArguments == 0 && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) return;
     } else {
+        if (indirectArguments == 0 && Graphics::TakeMultisampledSingleClear(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads)) {
+            pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
+            return;
+        }
         if (indirectArguments == 0 && (packet[4] & 0x20u) == 0) {
             if (const auto fill = Graphics::MatchMemoryValueFill(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads, {packet[1], packet[2], packet[3]})) Graphics::NoteMemoryValueFill(*fill);
         }

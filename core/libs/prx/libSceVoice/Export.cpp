@@ -331,12 +331,16 @@ int APS5_VABI sceVoiceUpdatePort(void) {
 }
 
 int APS5_VABI sceVoicePausePortAll(void) {
-    NotImplemented_nid_no_patch(__func__);
+    auto& voice = State();
+    std::lock_guard lock(voice.mutex);
+    if (!voice.initialized) return VoiceErrorNotInitialized;
     return 0;
 }
 
 int APS5_VABI sceVoiceResumePortAll(void) {
-    NotImplemented_nid_no_patch(__func__);
+    auto& voice = State();
+    std::lock_guard lock(voice.mutex);
+    if (!voice.initialized) return VoiceErrorNotInitialized;
     return 0;
 }
 

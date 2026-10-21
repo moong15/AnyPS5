@@ -177,12 +177,13 @@ std::uint64_t APS5_VABI sceKernelGetProcessTime() {
 }
 
 std::uint64_t APS5_VABI sceKernelGetProcessTimeCounter() {
-    const std::uint64_t start = GetStartNanos();
-    return GetMonotonicNanos() - start;
+    const std::uint64_t nanos = GetMonotonicNanos() - GetStartNanos();
+    const std::uint64_t frequency = sceKernelGetTscFrequency();
+    return nanos / 1000000000ULL * frequency + nanos % 1000000000ULL * frequency / 1000000000ULL;
 }
 
 std::uint64_t APS5_VABI sceKernelGetProcessTimeCounterFrequency() {
-    return 1000000000ULL;
+    return sceKernelGetTscFrequency();
 }
 
 static std::string DescribeCallSite(const void* caller) {

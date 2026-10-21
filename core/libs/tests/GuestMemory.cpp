@@ -599,6 +599,75 @@ static void CheckSavedDirectMemorySurvivesCachePressure() {
 #endif
 }
 
+static void CheckReusedDirectMemorySections() {
+#ifdef _WIN32
+    constexpr std::size_t page = 0x4000;
+    constexpr std::size_t bytes = page * 4;
+    const bool pooled = std::getenv("APS5_NO_DIRECT_MEMORY_SECTION_POOL") == nullptr;
+    const auto allocate = [] {
+        std::int64_t physical = 0;
+        Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, 0, 0, &physical) == 0);
+        return physical;
+    };
+    const auto map = [](std::int64_t physical) {
+        void* mapped = nullptr;
+        Require(sceKernelMapDirectMemory(&mapped, bytes, 3, 0, physical, 0) == 0);
+        return static_cast<unsigned char*>(mapped);
+    };
+    const auto blank = [](const unsigned char* data) { return std::all_of(data, data + bytes, [](unsigned char value) { return value == 0; }); };
+    const auto handles = [] {
+        DWORD count = 0;
+        Require(GetProcessHandleCount(GetCurrentProcess(), &count) != 0);
+        return count;
+    };
+    auto physical = allocate();
+    auto* data = map(physical);
+    std::memset(data, 0x5a, bytes);
+    Require(sceKernelMunmap(data, bytes) == 0);
+    auto before = handles();
+    Require(sceKernelReleaseDirectMemory(physical, bytes) == 0);
+    const auto released = handles();
+    Require(released == (pooled ? before : before - 1));
+    physical = allocate();
+    Require(handles() == (pooled ? released : released + 1));
+    data = map(physical);
+    Require(blank(data));
+    data[5] = 17;
+    data[bytes - 1] = 29;
+    void* second = nullptr;
+    Require(sceKernelMapDirectMemory(&second, bytes, 3, 0, physical, 0) == 0);
+    auto* alias = static_cast<unsigned char*>(second);
+    Require(alias != data && alias[5] == 17 && alias[6] == 0 && alias[bytes - 1] == 29);
+    alias[page + 3] = 41;
+    Require(data[page + 3] == 41);
+    data[page * 2] = 53;
+    Require(alias[page * 2] == 53);
+    Require(sceKernelMunmap(alias, bytes) == 0);
+    Require(data[5] == 17 && data[page + 3] == 41 && data[page * 2] == 53);
+    Require(sceKernelMunmap(data, bytes) == 0);
+    data = map(physical);
+    Require(data[5] == 17 && data[page + 3] == 41 && data[page * 2] == 53 && data[bytes - 1] == 29);
+    Require(sceKernelMunmap(data, bytes) == 0);
+    before = handles();
+    Require(sceKernelReleaseDirectMemory(physical, bytes) == 0);
+    Require(handles() == before - 1);
+    for (unsigned char round = 1; round <= 8; ++round) {
+        physical = allocate();
+        data = map(physical);
+        Require(blank(data));
+        std::memset(data, round, bytes);
+        if (round % 2 == 0) {
+            second = nullptr;
+            Require(sceKernelMapDirectMemory(&second, page, 3, 0, physical + static_cast<std::int64_t>(page), 0) == 0);
+            Require(static_cast<unsigned char*>(second)[page - 1] == round);
+            Require(sceKernelMunmap(second, page) == 0);
+        }
+        Require(sceKernelMunmap(data, bytes) == 0);
+        Require(sceKernelReleaseDirectMemory(physical, bytes) == 0);
+    }
+#endif
+}
+
 static void CheckReleaseDirectMemoryClearsMappings() {
     constexpr std::size_t page = 0x4000;
     std::int64_t phys = 0;
@@ -3223,6 +3292,7 @@ int main(int argc, char** argv) {
     CheckDirectMemoryFollowsPhysicalPages();
     CheckSparseDirectMemoryBacking();
     CheckSavedDirectMemorySurvivesCachePressure();
+    CheckReusedDirectMemorySections();
     CheckReleaseDirectMemoryClearsMappings();
     CheckReleaseDirectMemoryRejectsInvalidRanges();
     CheckFixedMappingReplacesPartialOverlap();

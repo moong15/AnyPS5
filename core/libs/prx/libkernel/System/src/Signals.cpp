@@ -533,9 +533,9 @@ int APS5_VABI killpg_nid_postfix(int pgrp, int guest) {
 int APS5_VABI pthread_kill_nid_postfix(Pthread thread, int guest) {
     if (guest < 0 || guest > MaxSignal) return PosixThread::GUEST_EINVAL;
     if (thread == nullptr) return PosixThread::GUEST_ESRCH;
-    if (guest == 0) return 0;
-    if (thread == scePthreadSelf()) return raise_nid_postfix(guest) == 0 ? 0 : *__error_nid_postfix();
+    if (thread == scePthreadSelf()) return guest == 0 || raise_nid_postfix(guest) == 0 ? 0 : *__error_nid_postfix();
     if (!GuestThreadIsLive(thread)) return PosixThread::GUEST_ESRCH;
+    if (guest == 0) return 0;
     if (Disposition(guest).handler != 1) MarkPending(guest);
     return 0;
 }

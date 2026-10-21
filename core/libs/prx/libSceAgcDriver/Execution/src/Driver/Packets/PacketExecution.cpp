@@ -558,6 +558,10 @@ void Driver::execute(const Submission& submission) {
                     } else if (traceDraws) {
                         std::fprintf(stderr, "[draw] target 0x%llx mask 0x%x ok\n",static_cast<unsigned long long>(color), readRegister(queue.context, 0x8e));
                     }
+                } catch (const RefusedDraw& refused) {
+                    CaptureTrace::Log("draw-refused submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, refused.what());
+                    countSkip(Graphics::DrawSkip::Thrown);
+                    ReportRefusedDraw(refused);
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
                     if (traceIndexBase()) AgcDriver::indexTrace("[index-base] failure serial=%llu queue=0x%x cursor=%zu error=%s\n", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, error.what());

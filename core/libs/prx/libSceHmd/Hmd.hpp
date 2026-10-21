@@ -63,6 +63,16 @@ std::int32_t APS5_VABI sceHmdGetDeviceInformationByHandle(std::int32_t handle,
                                                         Hmd::DeviceInformation* info);
 std::int32_t APS5_VABI sceHmdInternalGetDeviceStatus(Hmd::DeviceStatus* status);
 std::int32_t APS5_VABI sceHmdInternalMmapIsConnect();
+int APS5_VABI sceHmdDistortionGetWorkMemoryAlign(void);
+int APS5_VABI sceHmdDistortionGetWorkMemorySize(void);
+int APS5_VABI sceHmdReprojectionQueryGarlicBuffAlign(void);
+int APS5_VABI sceHmdReprojectionQueryGarlicBuffSize(void);
+int APS5_VABI sceHmdReprojectionQueryOnionBuffAlign(void);
+int APS5_VABI sceHmdReprojectionQueryOnionBuffSize(void);
+int APS5_VABI sceHmdGetFieldOfView(std::int32_t handle, void* fieldOfView);
+int APS5_VABI sceHmdGet2DEyeOffset(std::int32_t handle, void* leftOffset, void* rightOffset);
+int APS5_VABI sceHmdGetInertialSensorData(std::int32_t handle, void* data, std::int32_t count);
+int APS5_VABI sceHmdGetAssyError(void* data);
 }
 
 #endif

@@ -1,7 +1,10 @@
 #include <cstdint>
 #include <cstddef>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <mutex>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -11,8 +14,11 @@
 namespace {
 
 constexpr std::int32_t SCE_PSML_ERROR_NOT_INITIALIZED = static_cast<std::int32_t>(0x8A810001);
+constexpr std::int32_t SCE_PSML_ERROR_INVALID_ARGUMENT = static_cast<std::int32_t>(0x8A810005);
+constexpr std::int32_t SCE_PSML_ERROR_NULL_OUTPUT = static_cast<std::int32_t>(0x8A810009);
 constexpr std::uint64_t MfsrBlockBytes = 0x200000;
 constexpr std::uint64_t MfsrBlockCount = 4;
+constexpr std::uint32_t MfsrDispatchPacketDwords = 0x600;
 
 struct MfsrRequirement {
  std::uint64_t blockBytes;
@@ -37,7 +43,12 @@ struct MfsrContextParam {
  std::uint32_t reserved0[2];
  const MfsrBlock* blocks;
  std::uint64_t blockCount;
- std::uint32_t reserved1[8];
+ std::uint16_t inputWidth;
+ std::uint16_t inputHeight;
+ std::uint32_t reserved1;
+ const void* descriptor0;
+ const void* descriptor1;
+ std::uint32_t reserved2[2];
  void* sharedResources;
 };
 
@@ -45,6 +56,9 @@ static_assert(sizeof(MfsrRequirement) == 0x18);
 static_assert(sizeof(MfsrSharedResourcesParam) == 0x20);
 static_assert(offsetof(MfsrContextParam, blocks) == 0x08);
 static_assert(offsetof(MfsrContextParam, blockCount) == 0x10);
+static_assert(offsetof(MfsrContextParam, inputWidth) == 0x18);
+static_assert(offsetof(MfsrContextParam, descriptor0) == 0x20);
+static_assert(offsetof(MfsrContextParam, descriptor1) == 0x28);
 static_assert(offsetof(MfsrContextParam, sharedResources) == 0x38);
 
 enum class MfsrObjectKind { SharedResources, Context };
@@ -52,6 +66,8 @@ enum class MfsrObjectKind { SharedResources, Context };
 struct MfsrObject {
  MfsrObjectKind kind;
  void* sharedResources;
+ std::uint32_t inputWidth;
+ std::uint32_t inputHeight;
 };
 
 std::atomic<bool> g_mfsrInitialized{false};
@@ -70,15 +86,32 @@ void RequireBlocks(const MfsrBlock* blocks, std::uint64_t blockCount, const char
  }
 }
 
-void* CreateMfsrObject(MfsrObjectKind kind, void* sharedResources, const char* function) {
+void* CreateMfsrObject(MfsrObjectKind kind, void* sharedResources, const char* function, std::uint32_t inputWidth = 0, std::uint32_t inputHeight = 0) {
  std::lock_guard lock(g_mfsrMutex);
  if (kind == MfsrObjectKind::Context) {
   const auto found = g_mfsrObjects.find(sharedResources);
   RequireMfsr(found != g_mfsrObjects.end() && found->second->kind == MfsrObjectKind::SharedResources, function, "shared resources handle was not created by this library");
  }
- auto* object = new MfsrObject{kind, sharedResources};
+ auto* object = new MfsrObject{kind, sharedResources, inputWidth, inputHeight};
  g_mfsrObjects.emplace(object, object);
  return object;
+}
+
+bool FindMfsrObject(void* handle, MfsrObject* out) {
+ std::lock_guard lock(g_mfsrMutex);
+ const auto found = g_mfsrObjects.find(handle);
+ if (found == g_mfsrObjects.end()) return false;
+ *out = *found->second;
+ return true;
+}
+
+std::pair<std::uint32_t, std::uint32_t> MfsrInputDimensions(const MfsrContextParam* param) {
+ if (param->inputWidth != 0) return {param->inputWidth, param->inputHeight};
+ if (param->descriptor0 == nullptr) return {0, 0};
+ std::uint16_t width = 0, height = 0;
+ std::memcpy(&width, static_cast<const std::uint8_t*>(param->descriptor0) + 0x20, sizeof(width));
+ std::memcpy(&height, static_cast<const std::uint8_t*>(param->descriptor0) + 0x22, sizeof(height));
+ return {width, height};
 }
 
 void ReleaseMfsrObject(void* handle, MfsrObjectKind kind, const char* function) {
@@ -159,7 +192,8 @@ std::int32_t APS5_VABI scePsmlMfsrCreateContext800M3_2(void** context, const Mfs
  if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
  RequireMfsr(context != nullptr && param != nullptr, __func__, "null handle or parameter");
  RequireBlocks(param->blocks, param->blockCount, __func__);
- *context = CreateMfsrObject(MfsrObjectKind::Context, param->sharedResources, __func__);
+ const auto [inputWidth, inputHeight] = MfsrInputDimensions(param);
+ *context = CreateMfsrObject(MfsrObjectKind::Context, param->sharedResources, __func__, inputWidth, inputHeight);
  return 0;
 }
 
@@ -184,28 +218,43 @@ std::int32_t APS5_VABI scePsmlMfsrGetDispatchMfsrPacket1300(void* context, void*
  return SCE_PSML_ERROR_NOT_INITIALIZED;
 }
 
-int APS5_VABI scePsmlMfsrGetDispatchMfsrPacketSizeInDwords() {
- NotImplemented_nid_no_patch(__func__);
+std::int32_t APS5_VABI scePsmlMfsrGetDispatchMfsrPacketSizeInDwords(void* context, std::uint32_t* packetSizeInDwords) {
+ if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
+ MfsrObject object;
+ if (!FindMfsrObject(context, &object)) return SCE_PSML_ERROR_INVALID_ARGUMENT;
+ if (packetSizeInDwords == nullptr) return SCE_PSML_ERROR_NULL_OUTPUT;
+ *packetSizeInDwords = MfsrDispatchPacketDwords;
  return 0;
 }
 
-int APS5_VABI scePsmlMfsrSelectConfig() {
- NotImplemented_nid_no_patch(__func__);
+std::int32_t APS5_VABI scePsmlMfsrSelectConfig(void* config) {
+ if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
+ MfsrObject object;
+ if (!FindMfsrObject(config, &object)) return SCE_PSML_ERROR_INVALID_ARGUMENT;
  return 0;
 }
 
-int APS5_VABI scePsmlMfsrGetMipmapBias() {
- NotImplemented_nid_no_patch(__func__);
+std::int32_t APS5_VABI scePsmlMfsrGetMipmapBias(void* context, float* bias, std::uint32_t dimension) {
+ if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
+ MfsrObject object;
+ if (!FindMfsrObject(context, &object) || object.kind != MfsrObjectKind::Context) return SCE_PSML_ERROR_INVALID_ARGUMENT;
+ if (bias == nullptr) return SCE_PSML_ERROR_NULL_OUTPUT;
+ if (object.inputWidth == 0) return SCE_PSML_ERROR_INVALID_ARGUMENT;
+ *bias = std::log2f(static_cast<float>(dimension) / static_cast<float>(object.inputWidth)) - 1.0f;
  return 0;
 }
 
-int APS5_VABI scePsmlMfsrRequestCapture() {
- NotImplemented_nid_no_patch(__func__);
+std::int32_t APS5_VABI scePsmlMfsrRequestCapture(void* context) {
+ if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
+ MfsrObject object;
+ if (!FindMfsrObject(context, &object)) return SCE_PSML_ERROR_INVALID_ARGUMENT;
  return 0;
 }
 
-int APS5_VABI scePsmlMfsrIsCaptureInProgress() {
- NotImplemented_nid_no_patch(__func__);
+std::int32_t APS5_VABI scePsmlMfsrIsCaptureInProgress(void* context) {
+ if (!g_mfsrInitialized) return SCE_PSML_ERROR_NOT_INITIALIZED;
+ MfsrObject object;
+ if (!FindMfsrObject(context, &object)) return SCE_PSML_ERROR_INVALID_ARGUMENT;
  return 0;
 }
 

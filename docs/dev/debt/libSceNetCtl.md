@@ -38,7 +38,7 @@
 - [sceNetCtlSetErrorNotificationEnabledIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlRegisterCallbackV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlUnregisterCallbackV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetResultV6](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
+- [sceNetCtlGetResultV6](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl, NID `H5yARg37U5g`) - `(int eventType, int* errorCode)` comes only from [SharpProspero](https://github.com/SvenGDK/SharpProspero/blob/5dfdb4b0b166e83dc9ae275001afb695f12c7174/src/SharpProspero/Interop/Net/NetCtl.cs#L246-L251), whose source is unknown; shadPS4 only stubs it. Callbacks registered with `sceNetCtlRegisterCallbackV6` receive no event, so event types 1-3 write 0 to `errorCode`; what a console writes before the first event is unmeasured. A null `errorCode` answers `INVALID_ADDR`, as `sceNetCtlGetResult` does, and other event types throw, as their error code on a console is unknown
 - [sceNetCtlGetResultV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetStateV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetInfoV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature

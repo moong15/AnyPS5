@@ -203,6 +203,7 @@ int APS5_VABI sceNgs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* b
         rack = Ngs2FindRack(rack_handle);
     }
     if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
+    if (Ngs2RenderingHere(*rack->system)) throw std::runtime_error("NGS2: destroying a rack of a system from that system's render (a voice callback) is not implemented");
     return Ngs2DestroyRack(*rack, buffer_info);
 }
 
@@ -241,6 +242,23 @@ int APS5_VABI sceNgs2RackGetInfo(uintptr_t rack_handle, Ngs2RackInfo* info, size
     info->render_count = static_cast<std::uint64_t>(rack->system->renderCount);
     info->active_voice_count = static_cast<std::uint32_t>(std::count_if(rack->voices.begin(), rack->voices.end(),
                                                                         [](const Ngs2Voice& voice) { return voice.state != Ngs2PlayState::Empty; }));
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2RackSetUserData(uintptr_t rack_handle, uintptr_t user_data) {
+    std::lock_guard lock(Ngs2Mutex());
+    auto* rack = Ngs2FindRack(rack_handle);
+    if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
+    rack->userData = user_data;
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2RackGetUserData(uintptr_t rack_handle, uintptr_t* user_data) {
+    std::lock_guard lock(Ngs2Mutex());
+    const auto* rack = Ngs2FindRack(rack_handle);
+    if (rack == nullptr) return SCE_NGS2_ERROR_INVALID_RACK_HANDLE;
+    if (user_data == nullptr) APS5_INVALID_ARG_EX;
+    *user_data = rack->userData;
     return SCE_NGS2_OK;
 }
 

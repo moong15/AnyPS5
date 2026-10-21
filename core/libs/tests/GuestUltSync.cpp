@@ -253,6 +253,10 @@ struct alignas(8) UlthreadObject {
     std::uint8_t bytes[512];
 };
 
+struct alignas(8) UlthreadRuntimeObject {
+    std::uint8_t bytes[4096];
+};
+
 std::atomic<void*> gSelf{nullptr};
 std::atomic<int> gYield{-1};
 std::atomic<bool> gPastExit{false};
@@ -273,7 +277,7 @@ void Ulthreads() {
     CHECK(sceUltUlthreadYield() == State);
     CHECK(sceUltUlthreadExit(1) == State);
     std::vector<std::uint8_t> workArea(sceUltUlthreadRuntimeGetWorkAreaSize(2, 1));
-    Object runtime{};
+    UlthreadRuntimeObject runtime{};
     CHECK(sceUltUlthreadRuntimeCreate(&runtime, "runtime", 2, 1, workArea.data(), nullptr, 0) == Ok);
     UlthreadObject first{};
     std::uint8_t context[4096];

@@ -2,7 +2,7 @@
 
 ### Silent stubs
 
-- [sceNetShowIfconfig, sceNetShowNetstat](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - return success without printing anything: the `()` signatures and the success return follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/network/net.cpp), which stubs both the same way. PPSA01530 fails to load without the `sceNetShowIfconfig` export (#3177); PPSA11386 imports `sceNetShowNetstat` but does not call it during start-up. What the console prints and where is unverified
+- [sceNetShowIfconfig, sceNetShowNetstat, sceNetShowRoute, sceNetShowRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - return success without printing anything: the `()` signatures and the success return follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/network/net.cpp), which stubs each the same way. PPSA01530 fails to load without the `sceNetShowIfconfig` export (#3177); PPSA11386 imports `sceNetShowNetstat` but does not call it during start-up. What the console prints and where is unverified
 
 ### Unknown function info
 
@@ -15,7 +15,6 @@
 - [sceNetShowIfconfigWithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowPolicy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowPolicyWithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetShowRoute](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowRouteWithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetResolverConnectAbort](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetResolverConnectCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -23,7 +22,6 @@
 - [sceNetResolverConnectDestroy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetSockInfo6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSetDns6Info](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetShowRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowRoute6WithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAllocateAllRouteInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAllocateAllRouteInfo6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature

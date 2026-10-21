@@ -244,6 +244,13 @@ static int OpenNative(const std::filesystem::path& native, int flags, std::uint1
         }
     }
 #endif
+#ifdef _WIN32
+    if (fd < 0 && (errno == ENOENT || errno == ENOTDIR)) {
+        std::error_code metadataError;
+        const auto metadataPath = NativeMetadataPath(native, metadataError);
+        if (!metadataError && NativeSymbolicLinkLoop(metadataPath)) return SCE_KERNEL_ERROR_ELOOP;
+    }
+#endif
     if (fd < 0) {
         return SceErrorFromErrno(errno == ENOENT ? NotFoundError_nid_no_patch(native) : errno);
     }

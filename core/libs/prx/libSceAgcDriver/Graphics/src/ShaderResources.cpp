@@ -4455,7 +4455,8 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         throw std::runtime_error(detail);
     }
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
-    const auto size = static_cast<std::size_t>(byteSize);
+    auto size = static_cast<std::size_t>(byteSize);
+    if (const std::uint64_t stride = descriptor.Stride(); !written && target != nullptr && stride != 0 && address < target->address && address + size > target->address && address + size - target->address < stride) size = static_cast<std::size_t>(target->address - address);
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
     // APS5_ALL_BUFFERS_WRITTEN=1: every element is noted as written, as before bufferWritten existed.
     static const bool allWritten = std::getenv("APS5_ALL_BUFFERS_WRITTEN") != nullptr;

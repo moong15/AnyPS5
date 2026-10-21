@@ -414,6 +414,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_SHARED_COLLECT_MEMO` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | uses the tracker's shared collect-memo ring under its mutex instead of the per-thread ring |
 | `APS5_SHARED_MEMORY_COUNTERS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/GuestMemory.cpp` |  | accumulates the memory counters into one shared set with atomic RMWs |
 | `APS5_SKIP_INVALID_INDIRECT_REGISTERS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Packets/PacketExecution.cpp` |  | skips the entries whose offset dword is no register offset in a SET_*_REG_INDIRECT list read again where its packet executes, and writes its valid entries, instead of stopping |
+| `APS5_SKIP_REFUSED_DRAWS` | presence | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Diagnostics.cpp` |  | skips a draw whose graphics stage the recompiler refuses, reporting each refused shader once, instead of failing the queue |
 | `APS5_SKIP_REQUEST_DUMPS` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Shaders/ShaderDiagnostics.cpp` | 8 | caps RecompileRequest dumps per shader-skip reason |
 | `APS5_SKIP_SHADER` | integer | `core/libs/prx/libSceAgcDriver/Execution/src/Driver/Diagnostics.cpp` | 0 | hex program address of a shader to skip preparing |
 | `APS5_SNAPSHOT_CHECK_FATAL` | presence | `core/libs/prx/libSceAgcDriver/Graphics/src/GuestBufferMemory.cpp` |  | throws on the first snapshot that differs from registered memory instead of only counting them |
@@ -621,6 +622,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_COARSE_TIMED_WAITS` | presence | `core/libs/prx/libkernel/Time/TimedWait.cpp` |  | on Windows, rounds timed waits up to the scheduler tick |
 | `APS5_JOB_AFFINITY` | presence | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | pins the title's job worker threads to the efficiency cores of a hybrid CPU |
 | `APS5_JOB_AFFINITY_MASK` | integer | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | hex core mask that job worker threads are pinned to |
+| `APS5_NO_DIRECT_MEMORY_SECTION_POOL` | presence | `core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp` |  | on Windows, creates a section for every direct-memory allocation and closes it at release instead of reusing released sections that never held guest data |
 | `APS5_NO_JOB_AFFINITY` | presence | `core/libs/prx/libkernel/Pthread/src/Thread.cpp` |  | disables pinning of job worker threads |
 | `APS5_NO_SLEEP_WAKE` | presence | `core/libs/prx/libkernel/Time/SleepWake.cpp` |  | keeps every sleep of 1 ms or less in full instead of ending it at a GPU batch, batch completion action or flip completion |
 | `APS5_NO_TIMER_RESOLUTION` | presence | `core/libs/prx/libkernel/Time/Time.cpp` |  | keeps the default 15.6 ms scheduler tick instead of raising it to 0.5 ms on Windows |

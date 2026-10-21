@@ -6,6 +6,7 @@
 
 ### Unknown function info
 
+- [libSceHmd queries without a headset](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - the signatures, the distortion work memory (`0x20000`, aligned to `0x400`) and reprojection buffer sizes (garlic `0x100000`, onion `0x810`, both aligned to `0x100`), and the results of `sceHmdGetFieldOfView`, `sceHmdGet2DEyeOffset`, `sceHmdGetInertialSensorData` (`HANDLE_INVALID` once initialized; field of view checks its output for null first) and `sceHmdGetAssyError` (null output, then `DEVICE_DISCONNECTED` once initialized) follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/a808e76/src/core/libraries/hmd/hmd.cpp) (PS4) with no headset, not a PS5 measurement. Before initialization `sceHmdGetFieldOfView` returns `NOT_INITIALIZED` for a non-null output, where shadPS4 checks the handle first and returns `HANDLE_INVALID`. The third argument of `sceHmdGetInertialSensorData` is unnamed there and taken as a count
 - [sceHmdInternalGetPUVersion](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalEventInitialize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetVirtualDisplaySize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -16,9 +17,7 @@
 - [sceHmdReprojectionUnsetCallback](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetCrashReportCommand](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetDebugTextMode](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdDistortionGetWorkMemoryAlign](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalRegisterEventCallback](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdDistortionGetWorkMemorySize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionStartWideNear](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetPUSerialNumber](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetDebugSocialScreenMode](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -45,7 +44,6 @@
 - [sceHmdInternalAnotherScreenSendAudio](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetPuPositionParam](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionInitializeCapture](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdGet2DEyeOffset](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetDebugSocialScreenMode](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetHmuPowerStatusForDebug](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdGetDistortionWorkMemorySize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -60,7 +58,6 @@
 - [sceHmdInternalIsCommonDlgMiniAppVr2d](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalMmapGetSensorCalibrationData](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdDistortionGetCorrectionCommand](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdReprojectionQueryOnionBuffAlign](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetDebugMode](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalIsMiniAppVr2d](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalIsCommonDlgVr2d](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -68,7 +65,6 @@
 - [sceHmdInternalSetPortConnection](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionDebugGetLastInfo](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetM2LedOn](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdGetFieldOfView](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionAddDisplayBuffer](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetIpdSettingEnableForSystemService](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetLedOn](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -82,7 +78,6 @@
 - [sceHmdReprojectionStartCapture](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetDefaultLedData](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalDfuClose](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdReprojectionQueryGarlicBuffAlign](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetHmuPowerControl](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalBindDeviceWithUserId](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetHmuSerialNumber](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -92,7 +87,6 @@
 - [sceHmdInternalSeparateModeGetAudioStatus](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionStartLiveCapture](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalIsGameVr2d](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdGetAssyError](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionFinalize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSocialScreenSetFadeAndSwitch](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalDfuStart](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -128,7 +122,6 @@
 - [sceHmdInternalGetHmuOpticalParam](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSeparateModeSendVideo](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalResetLedForVrTracker](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdReprojectionQueryOnionBuffSize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionStartWithOverlay](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionSetUserEventEnd](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalCrashReportOpen](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -146,7 +139,6 @@
 - [sceHmdReprojectionStart2dVr](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalMmapGetCount](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetDefaultLedData](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdGetInertialSensorData](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternal3dAudioClose](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSetBrightness](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalSocialScreenGetFadeState](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
@@ -163,5 +155,4 @@
 - [sceHmdInternalGetIpdSettingEnableForSystemService](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdReprojectionDebugGetLastInfoMultilayer](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdInternalGetPuRevision](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
-- [sceHmdReprojectionQueryGarlicBuffSize](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature
 - [sceHmdGet2dVrCommand](../../../core/libs/prx/libSceHmd/Export.cpp) (libSceHmd) - unknown signature

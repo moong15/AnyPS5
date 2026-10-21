@@ -3827,10 +3827,7 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
                 const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> span{{{run.base, run.base + run.bytes}}};
                 if (wouldRetireImport(state, run) || StorageTexture::AnyPendingOverlaps(span)) return false;
             }
-            if (importAllocation(context, state, range->address, current, ImportRequester::Map, 0, false) == nullptr && GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) {
-                state.failed.erase(importRun(current, range->address, std::numeric_limits<std::uint64_t>::max(), effectiveBudget(context, state)).base);
-                state.failed.erase(range->address);
-            }
+            importAllocation(context, state, range->address, current, ImportRequester::Map, 0, false);
         } catch (const std::exception& error) {
             std::fprintf(stderr, "[gpu] import of GPU memory mapped at 0x%llx+0x%zx failed: %s\n", static_cast<unsigned long long>(range->address), range->bytes, error.what());
         }

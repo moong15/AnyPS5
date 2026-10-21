@@ -345,6 +345,37 @@ class CheckCompileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1 translation units compile", result.stdout)
 
+    def test_a_generated_translation_unit_outside_the_checkout_is_checked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve() / "generated unit.cpp"
+            source.write_text("int x;\n", encoding="utf-8")
+            seen = self.root / "arguments.json"
+            script = self.compiler(
+                "import json\nimport sys\nfrom pathlib import Path\n"
+                "Path(sys.argv[1]).write_text(json.dumps(sys.argv[3:]))\n"
+                "if sys.argv[2] == '1': sys.stderr.write('external source: error: no\\n')\n"
+                "sys.exit(int(sys.argv[2]))\n")
+            for relative in (False, True):
+                for status in (0, 1):
+                    with self.subTest(relative=relative, status=status):
+                        self.manifest([{
+                            "directory": str(self.build),
+                            "file": os.path.relpath(source, self.build) if relative else str(source),
+                            "arguments": [sys.executable, str(script), str(seen), str(status),
+                                          "-c", "-o", "generated.o", str(source)],
+                        }])
+                        path = os.path.relpath(source, self.root) if relative else str(source)
+                        result = self.tool(path)
+                        self.assertNotIn("no compile command", result.stderr)
+                        self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                        self.assertEqual(json.loads(seen.read_text(encoding="utf-8")),
+                                         ["-fsyntax-only", str(source)])
+                        if status:
+                            self.assertIn("external source: error: no", result.stderr)
+                            self.assertIn("1 of 1 translation units did not compile", result.stderr)
+                        else:
+                            self.assertIn("1 translation units compile", result.stdout)
+
     def test_a_changed_file_with_a_non_ascii_name_is_checked(self):
         self.failing("caf\u00e9.cpp")
         subprocess.run(["git", "-C", str(self.root), "add", "caf\u00e9.cpp"], check=True)

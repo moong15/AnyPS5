@@ -14,6 +14,17 @@ int APS5_VABI sceNpGetOnlineId(int user_id, NpOnlineId* online_id);
 int APS5_VABI sceNpGetUserIdByAccountId(std::uint64_t account_id, int* user_id);
 int APS5_VABI sceNpUnknown_8weiQyIdI3A(int userId, void* buffer);
 int APS5_VABI sceNpUnknown_WxLcN76q19o(void);
+int APS5_VABI sceNpGetAccountCountry(const NpOnlineId* online_id, void* country_code);
+int APS5_VABI sceNpGetAccountDateOfBirth(const NpOnlineId* online_id, void* date_of_birth);
+int APS5_VABI sceNpGetAccountLanguage(int req_id, const NpOnlineId* online_id, void* language);
+int APS5_VABI sceNpGetParentalControlInfo(int req_id, const NpOnlineId* online_id, std::int8_t* age, void* info);
+int APS5_VABI sceNpGetUserIdByOnlineId(const NpOnlineId* online_id, int* user_id);
+int APS5_VABI sceNpCheckPlus(int req_id, const void* param, void* result);
+int APS5_VABI sceNpNotifyPlusFeature(const void* param);
+int APS5_VABI sceNpGetAccountId(const NpOnlineId* online_id, std::uint64_t* account_id);
+int APS5_VABI sceNpSetGamePresenceOnline(int req_id, const NpOnlineId* online_id, std::uint32_t presence);
+int APS5_VABI sceNpRegisterPlusEventCallback(void* callback, void* userdata);
+int APS5_VABI sceNpUnregisterPlusEventCallback(void);
 }
 
 extern "C" {
@@ -31,6 +42,7 @@ int APS5_VABI sceNpUnregisterStateCallback(void);
 int APS5_VABI sceNpRegisterStateCallbackA(void* callback, void* userdata);
 int APS5_VABI sceNpUnregisterStateCallbackA(int callbackId);
 int APS5_VABI sceNpRegisterNpReachabilityStateCallback(void* callback, void* userdata);
+void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata);
 int APS5_VABI sceNpUnregisterNpReachabilityStateCallback(void);
 }
 
@@ -38,6 +50,7 @@ namespace {
 
 constexpr int InvalidArgument = static_cast<int>(0x80550003u);
 constexpr int SignedOut = static_cast<int>(0x80550006u);
+constexpr int UserNotFound = static_cast<int>(0x80550007u);
 constexpr int AlreadyRegistered = static_cast<int>(0x80550008u);
 constexpr int NotRegistered = static_cast<int>(0x80550009u);
 constexpr int RequestNotFound = static_cast<int>(0x80550014u);
@@ -76,6 +89,10 @@ bool SignedOutOnce(const StateCall& call, void* userdata) {
         call.npId == nullptr && call.userdata == userdata;
 }
 
+void APS5_VABI AbortingGamePresenceCallback(const void*, const void*, void*) {
+    std::abort();
+}
+
 void APS5_VABI AbortingReachabilityCallback(int, std::uint32_t, void*) {
     std::fprintf(stderr, "NpManager: the reachability callback was called\n");
     std::abort();
@@ -111,6 +128,8 @@ void CheckStateCallbacksA() {
     Require(stateCallsA[0].calls == 0, "registering calls the state callback");
     Require(sceNpRegisterNpReachabilityStateCallback(reinterpret_cast<void*>(&AbortingReachabilityCallback), nullptr) == 0,
         "registering the reachability callback");
+    sceNpRegisterGamePresenceCallback(nullptr, nullptr);
+    sceNpRegisterGamePresenceCallback(reinterpret_cast<void*>(&AbortingGamePresenceCallback), &userdata[0]);
     Require(sceNpCheckCallback() == 0, "sceNpCheckCallback failed");
     Require(SignedOutOnce(stateCallsA[0], &userdata[0]), "sceNpCheckCallback must deliver SIGNED_OUT once");
     Require(sceNpUnregisterNpReachabilityStateCallback() == 0, "unregistering the reachability callback");
@@ -202,9 +221,62 @@ void CheckRequestTimeouts() {
     Require(sceNpSetTimeout(asyncId, 2, 0, 0, 0, 0) == RequestNotFound, "deleted async request");
 }
 
+void CheckOnlineIdQueries() {
+    NpOnlineId onlineId{};
+    std::memcpy(onlineId.data, "player", 6);
+    unsigned char output[64];
+    std::memset(output, 0x5a, sizeof(output));
+    unsigned char untouched[64];
+    std::memset(untouched, 0x5a, sizeof(untouched));
+    std::int8_t age = 0x5a;
+    int userId = 0x5a5a;
+    Require(sceNpGetAccountCountry(&onlineId, output) == UserNotFound, "sceNpGetAccountCountry must find no user");
+    Require(sceNpGetAccountCountry(nullptr, output) == InvalidArgument, "sceNpGetAccountCountry must reject a null online id");
+    Require(sceNpGetAccountCountry(&onlineId, nullptr) == InvalidArgument, "sceNpGetAccountCountry must reject a null output");
+    Require(sceNpGetAccountDateOfBirth(&onlineId, output) == UserNotFound, "sceNpGetAccountDateOfBirth must find no user");
+    Require(sceNpGetAccountDateOfBirth(nullptr, output) == InvalidArgument, "sceNpGetAccountDateOfBirth must reject a null online id");
+    Require(sceNpGetAccountDateOfBirth(&onlineId, nullptr) == InvalidArgument, "sceNpGetAccountDateOfBirth must reject a null output");
+    Require(sceNpGetAccountLanguage(1, &onlineId, output) == UserNotFound, "sceNpGetAccountLanguage must find no user");
+    Require(sceNpGetAccountLanguage(1, nullptr, output) == InvalidArgument, "sceNpGetAccountLanguage must reject a null online id");
+    Require(sceNpGetAccountLanguage(1, &onlineId, nullptr) == InvalidArgument, "sceNpGetAccountLanguage must reject a null output");
+    Require(sceNpGetParentalControlInfo(1, &onlineId, &age, output) == UserNotFound, "sceNpGetParentalControlInfo must find no user");
+    Require(sceNpGetParentalControlInfo(1, nullptr, &age, output) == InvalidArgument, "sceNpGetParentalControlInfo must reject a null online id");
+    Require(sceNpGetParentalControlInfo(1, &onlineId, nullptr, output) == InvalidArgument, "sceNpGetParentalControlInfo must reject a null age");
+    Require(sceNpGetParentalControlInfo(1, &onlineId, &age, nullptr) == InvalidArgument, "sceNpGetParentalControlInfo must reject a null info");
+    Require(sceNpGetUserIdByOnlineId(&onlineId, &userId) == SignedOut, "sceNpGetUserIdByOnlineId must report NP as signed out");
+    Require(sceNpGetUserIdByOnlineId(nullptr, &userId) == InvalidArgument, "sceNpGetUserIdByOnlineId must reject a null online id");
+    Require(sceNpGetUserIdByOnlineId(&onlineId, nullptr) == InvalidArgument, "sceNpGetUserIdByOnlineId must reject a null output");
+    Require(sceNpCheckPlus(1, output, output + 32) == SignedOut, "sceNpCheckPlus must report NP as signed out");
+    Require(sceNpCheckPlus(0, output, output + 32) == InvalidArgument, "sceNpCheckPlus must reject request id 0");
+    Require(sceNpCheckPlus(1, nullptr, output + 32) == InvalidArgument, "sceNpCheckPlus must reject a null parameter");
+    Require(sceNpCheckPlus(1, output, nullptr) == InvalidArgument, "sceNpCheckPlus must reject a null result");
+    std::uint64_t accountId = 0x5a5a;
+    Require(sceNpGetAccountId(&onlineId, &accountId) == SignedOut, "sceNpGetAccountId must report NP as signed out");
+    Require(sceNpGetAccountId(nullptr, &accountId) == InvalidArgument, "sceNpGetAccountId must reject a null online id");
+    Require(sceNpGetAccountId(&onlineId, nullptr) == InvalidArgument, "sceNpGetAccountId must reject a null output");
+    const int presenceRequest = sceNpCreateRequest();
+    Require(presenceRequest > 0, "sceNpCreateRequest must return a positive request id");
+    Require(sceNpSetGamePresenceOnline(presenceRequest, &onlineId, 0) == SignedOut, "sceNpSetGamePresenceOnline must report NP as signed out");
+    Require(sceNpSetGamePresenceOnline(0, &onlineId, 0) == InvalidArgument, "sceNpSetGamePresenceOnline must reject request id 0");
+    Require(sceNpSetGamePresenceOnline(presenceRequest, nullptr, 0) == InvalidArgument, "sceNpSetGamePresenceOnline must reject a null online id");
+    Require(sceNpSetGamePresenceOnline(0x7fffffff, &onlineId, 0) == RequestNotFound, "sceNpSetGamePresenceOnline must reject a request that was never created");
+    Require(sceNpDeleteRequest(presenceRequest) == 0, "sceNpDeleteRequest failed");
+    Require(sceNpSetGamePresenceOnline(presenceRequest, &onlineId, 0) == RequestNotFound, "sceNpSetGamePresenceOnline must reject a deleted request");
+    Require(sceNpRegisterPlusEventCallback(output, nullptr) == 0 && sceNpUnregisterPlusEventCallback() == 0, "the plus event callback must register and unregister");
+    Require(sceNpUnregisterPlusEventCallback() == 0, "unregistering the plus event callback again must succeed like the premium one");
+    Require(std::memcmp(output, untouched, sizeof(output)) == 0 && age == 0x5a && userId == 0x5a5a && accountId == 0x5a5a, "a failed query wrote its output");
+    try {
+        sceNpNotifyPlusFeature(output);
+        Require(false, "sceNpNotifyPlusFeature must report that it is not implemented");
+    } catch (const std::runtime_error& error) {
+        Require(std::string(error.what()) == "sceNpNotifyPlusFeature not implemented", "sceNpNotifyPlusFeature threw");
+    }
+}
+
 }
 
 int main() {
+    CheckOnlineIdQueries();
     CheckStateCallbacksA();
     CheckLegacyStateCallback();
     CheckRequestTimeouts();

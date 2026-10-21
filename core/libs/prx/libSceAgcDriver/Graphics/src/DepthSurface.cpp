@@ -492,6 +492,30 @@ public:
         else Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
     }
 
+    void CopySample(std::uint32_t sample, StorageTexture& destination, VkImageView destinationView) {
+        auto* recorder = Recorder::Active();
+        Require(recorder != nullptr, "depth sample copies need an active recorder");
+        Require(sampleable, "DB depth copy from a depth surface the device cannot sample at its sample count");
+        ApplyFastClear();
+        if (useSampleShadow) {
+            if (sampleShadow == nullptr) createSampleShadow();
+            refreshSampleShadow(false);
+            recorder->Keep(sampleShadow);
+        }
+        if (depthView == VK_NULL_HANDLE) {
+            VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            viewInfo.image = useSampleShadow ? sampleShadow->image : image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = hostFormat;
+            viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &depthView), "vkCreateImageView depth sample copy");
+        }
+        Require(context.detiler != nullptr, "depth sample copies need the texture detiler");
+        context.detiler->DispatchDepthSample(recorder->Commands(), depthView, target.samples > 1, destinationView, target.extent.width, target.extent.height, sample);
+        Recorder::CountBarriers(Recorder::CommandClass::Copy, 2);
+        destination.MarkDirty();
+    }
+
     bool Holds(const Texture* texture) const {
         const auto held = [&](const auto& entry) { return entry.second.get() == texture; };
         return std::any_of(textures.begin(), textures.end(), held) || std::any_of(stencilCopy.textures.begin(), stencilCopy.textures.end(), held);
@@ -741,6 +765,7 @@ public:
     const VkFormat hostFormat;
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    VkImageView depthView = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::shared_ptr<std::atomic<bool>> active = std::make_shared<std::atomic<bool>>(true);
     bool sampleable = true;
@@ -979,6 +1004,7 @@ private:
         releaseStencilCopy();
         mirrorPlane = {};
         textures.clear();
+        if (depthView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, depthView, nullptr);
         if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
         if (owned != nullptr) owned.reset();
         else {
@@ -1775,6 +1801,32 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target, 
     return surface->view;
 }
 
+SampleOrderTarget DepthSurfaceOrderTarget(const Context& context, const DepthTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::unique_lock lock(surfacesMutex());
+    for (const auto& candidate : surfaces()) {
+        if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !sameSurface(candidate->target, target)) continue;
+        Require(candidate->sampleable, "the multisampled depth surface whose samples are put in the guest's order cannot be sampled");
+        return {candidate->image, candidate->view, candidate->hostFormat, target.extent, target.samples, DepthSampleOrderMethod(context, target), candidate->owned};
+    }
+    throw std::runtime_error("AGC graphics: the multisampled depth surface whose samples are put in the guest's order is not resident");
+}
+
+DepthSampleLocations DepthSurfaceSampleLocations(const Context& context, const DepthTarget& target) {
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::unique_lock lock(surfacesMutex());
+    for (const auto& candidate : surfaces()) {
+        if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !sameSurface(candidate->target, target)) continue;
+        DepthSampleLocations depth;
+        depth.image = candidate->image;
+        depth.format = candidate->hostFormat;
+        depth.samples = target.samples;
+        depth.keep = candidate->owned;
+        return depth;
+    }
+    throw std::runtime_error("AGC graphics: the depth surface drawn at custom sample locations is not resident");
+}
+
 bool DepthPlanesStale() {
     auto& planes = stalePlanes();
     return planes.begin.load(std::memory_order_acquire) < planes.end.load(std::memory_order_acquire);
@@ -2177,6 +2229,17 @@ std::shared_ptr<StorageTexture> DepthSurfaceStorage(const Context& context, std:
     if (stencil || resource.dimension != TextureDimension::k2DArray || (resource.baseArray == 0 && resource.depthOrLastArray == 0)) return surface.Storage(words, resource, mip);
     if (!surface.StorageViewMatches(words, resource)) return nullptr;
     return layeredDepthStorage(context, surface, resource, mip);
+}
+
+void CopyDepthSample(const Context& context, std::uint64_t depthAddress, std::uint32_t samples, std::uint32_t sample, StorageTexture& destination, VkImageView destinationView, VkExtent2D extent) {
+    std::lock_guard lock(surfacesMutex());
+    auto* found = planeSurface(context.device, depthAddress);
+    Require(found != nullptr && found->target.address == depthAddress, "DB depth copy from a depth plane no draw rendered");
+    Require(found->target.format == VK_FORMAT_D32_SFLOAT || found->target.format == VK_FORMAT_D32_SFLOAT_S8_UINT, "DB depth copy from a depth surface that is not 32-bit float");
+    Require(found->target.samples == samples, "DB depth copy from a depth surface of another sample count");
+    Require(found->target.extent.width == extent.width && found->target.extent.height == extent.height, "DB depth copy from a depth surface of another size");
+    Require(sample < found->target.samples, "DB depth copy of a sample the depth surface does not have");
+    found->CopySample(sample, destination, destinationView);
 }
 
 bool DepthSurfaceStoreBack(const Context& context, const StorageTexture& storage) {

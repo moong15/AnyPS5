@@ -17,11 +17,6 @@ bool Driver::dispatchRelocationEnabled() {
     return enabled && !stampValidate();
 }
 
-EntryCounters Driver::DispatchCacheCounters() {
-    std::lock_guard cacheLock(dispatchCacheMutex);
-    return entryCounters;
-}
-
 std::uint64_t Driver::dispatchAliasKey(std::uint64_t identity, std::span<const std::uint32_t> userData, const DrawRelocation& relocation) {
     if (relocation.words.empty()) return 0;
     auto key = identity;
@@ -255,6 +250,11 @@ std::uint64_t Driver::DispatchCacheBytes() {
         return parsed != 0 ? static_cast<std::uint64_t>(parsed) : std::uint64_t{256} << 20u;
     }();
     return bytes;
+}
+
+EntryCounters Driver::DispatchCacheCounters() {
+    std::lock_guard lock(dispatchCacheMutex);
+    return entryCounters;
 }
 
 Driver::DispatchCacheFootprint Driver::DispatchCacheSize() {

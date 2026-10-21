@@ -326,6 +326,12 @@ private:
             }
             block.sources = m_blockSources[index];
             block.images = m_blockImages[index];
+            for (const IrValue* inst : order[index]->Instructions()) {
+                if (inst->Opcode() != IrOpcode::ReadConst || inst->ArgumentCount() != 2u || inst->Argument(0)->Resolve()->Opcode() != IrOpcode::GetSrtResource) continue;
+                const IrValue* slot = inst->Argument(1)->Resolve();
+                if (!slot->HasImmediate() || slot->Type() != IrType::U32 || slot->ImmediateU32() >= m_program.Resources().srtReads.size()) fail("resource control flow has an invalid flat SRT slot");
+                if (std::ranges::find(block.flatSlots, slot->ImmediateU32()) == block.flatSlots.end()) block.flatSlots.push_back(slot->ImmediateU32());
+            }
         }
         std::vector<std::uint8_t> unconditional(order.size());
         for (std::uint32_t index = 0; index < order.size() && unconditional[index] == 0u;) {
@@ -337,6 +343,7 @@ private:
         }
         std::vector<std::uint8_t> reached(m_sources.size());
         std::vector<std::uint8_t> reachedImages(m_info.images.size());
+        std::vector<std::uint8_t> reachedFlat(m_program.Resources().srtReads.size());
         for (std::uint32_t index = 0; index < order.size(); index++) {
             if (unconditional[index] == 0u) {
                 continue;
@@ -347,6 +354,9 @@ private:
             for (const auto image : controlFlow[index].images) {
                 reachedImages[image] = 1u;
             }
+            for (const auto slot : controlFlow[index].flatSlots) {
+                reachedFlat[slot] = 1u;
+            }
         }
         bool guarded = false;
         for (const auto& block : controlFlow) {
@@ -355,6 +365,9 @@ private:
             }
             for (const auto image : block.images) {
                 guarded = guarded || reachedImages[image] == 0u;
+            }
+            for (const auto slot : block.flatSlots) {
+                guarded = guarded || reachedFlat[slot] == 0u;
             }
         }
         if (guarded) {

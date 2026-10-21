@@ -98,6 +98,10 @@ static ExclusiveState& Exclusive() {
     return state;
 }
 
+bool Ngs2RenderingHere(const Ngs2System& system) {
+    return system.renderDepth != 0;
+}
+
 bool Ngs2ExclusiveElsewhere() {
     return Exclusive().depth != 0 && Exclusive().owner != std::this_thread::get_id();
 }
@@ -273,6 +277,7 @@ int APS5_VABI sceNgs2SystemDestroy(uintptr_t system_handle, Ngs2ContextBufferInf
         system = Ngs2FindSystem(system_handle);
     }
     if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    if (Ngs2RenderingHere(*system)) throw std::runtime_error("NGS2: destroying a system from its own render (a voice callback) is not implemented");
     while (!system->racks.empty()) {
         const int result = Ngs2DestroyRack(*system->racks.back(), nullptr);
         if (result != SCE_NGS2_OK) return result;
@@ -400,15 +405,18 @@ int APS5_VABI sceNgs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuffe
         state = &found;
     }
     Ngs2EnterExclusive();
+    system->renderDepth++;
     struct Release {
         SystemLockState* state;
+        Ngs2System* system;
         ~Release() {
+            system->renderDepth--;
             Ngs2LeaveExclusive();
             Ngs2NotifyWaiters();
             std::lock_guard locks(SystemLockMutex());
             ReleaseSystemLock(*state);
         }
-    } release{state};
+    } release{state, system};
     Ngs2RenderSystem(*system, buffer_info, num_buffer_info);
     return SCE_NGS2_OK;
 }

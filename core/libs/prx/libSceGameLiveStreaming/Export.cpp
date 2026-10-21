@@ -40,6 +40,216 @@ int APS5_VABI sceGameLiveStreamingGetProgramInfo() {
     return 0;
 }
 
+int APS5_VABI sceGameLiveStreamingScreenInitialize(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenInitializeSeparateModeParameter(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenTerminate(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenCloseSeparateMode(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenConfigureSeparateMode(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenOpenSeparateMode(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingScreenSetMode(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingPermitLiveStreaming(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetMaxBitrate(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingGetCurrentStatus(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingEnableSocialFeedback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingGetSocialFeedbackMessagesCount(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingGetSocialFeedbackMessages(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingPermitServerSideRecording(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetMetadata(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetSpoilerTag(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingClearSpoilerTag(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetPresetSocialFeedbackCommands(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingClearPresetSocialFeedbackCommands(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetPresetSocialFeedbackCommandsDescription(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingClearSocialFeedbackMessages(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingPostSocialMessage(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetCameraFrameSetting(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetServiceProviderPermission(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetDefaultServiceProviderPermission(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetInvitationSessionId(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStartGenerateStandbyScreenResource(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStopGenerateStandbyScreenResource(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingRegisterCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingUnregisterCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingCheckCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetStandbyScreenResource(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingGetCurrentBroadcastScreenLayout(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingLaunchLiveViewer(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingLaunchLiveViewerA(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetGuardAreas(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStartSocialFeedbackMessageFiltering(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStopSocialFeedbackMessageFiltering(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingApplySocialFeedbackMessageFilter(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingSetLinkCommentPreset(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStartDebugBroadcast(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceGameLiveStreamingStopDebugBroadcast(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceGameLiveStreamingEnableLiveStreaming(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;

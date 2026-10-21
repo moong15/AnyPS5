@@ -672,8 +672,12 @@ int APS5_VABI sceNetCtlUnregisterCallbackV6IpcInt(void) {
     return 0;
 }
 
-int APS5_VABI sceNetCtlGetResultV6(void) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNetCtlGetResultV6(int event_type, int* error_code) {
+    if (!error_code) return SCE_NET_CTL_ERROR_INVALID_ADDR;
+    if (event_type < NET_CTL_EVENT_DISCONNECTED || event_type > NET_CTL_EVENT_IPOBTAINED) {
+        throw std::runtime_error("sceNetCtlGetResultV6: event type " + std::to_string(event_type) + " is not implemented");
+    }
+    *error_code = 0;
     return 0;
 }
 
@@ -738,42 +742,34 @@ int APS5_VABI sceNetCtlGetConnectionElapsedTimeIpcInt(void) {
 }
 
 int APS5_VABI sceNetCtlApRpCheckCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpClearEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpRegisterCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpUnregisterCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpGetResult(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpGetState(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpGetInfo(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpStart(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -793,17 +789,14 @@ int APS5_VABI sceNetCtlApAppStartWithRetry(void) {
 }
 
 int APS5_VABI sceNetCtlApRpStartWithRetry(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpStartConf(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceNetCtlApRpStop(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
