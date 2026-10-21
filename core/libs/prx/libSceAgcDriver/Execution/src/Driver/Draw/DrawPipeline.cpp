@@ -243,19 +243,28 @@ void DrawPipeline::run() {
     PerformanceTrace::BindThread("draw committer");
     GuestMemory::SetTraceGpuHolds(true);
     StartCommitterSampler();
+    static const bool fusedRetire = std::getenv("APS5_NO_FUSED_RETIRE") == nullptr;
+    Commit* commit = nullptr;
+    const std::vector<Range>* orderedReads = nullptr;
+    std::uint32_t queue = 0xffffffffu;
+    bool fetched = false;
     for (;;) {
-        Commit* commit = nullptr;
-        SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
-        {
-            std::unique_lock lock(mutex);
-            committerWaiting = true;
-            wake.wait(lock, [&] { return !items.empty() || closing; });
-            committerWaiting = false;
-            if (items.empty()) break;
-            committingQueue() = items.front().queue;
-            commit = stopped ? nullptr : &items.front().commit;
-            committingOrderedReads() = items.front().orderedReads ? &items.front().reads : nullptr;
+        if (!fetched) {
+            SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
+            {
+                std::unique_lock lock(mutex);
+                committerWaiting = true;
+                wake.wait(lock, [&] { return !items.empty() || closing; });
+                committerWaiting = false;
+                if (items.empty()) break;
+                queue = items.front().queue;
+                commit = stopped ? nullptr : &items.front().commit;
+                orderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
+            }
         }
+        fetched = false;
+        committingQueue() = queue;
+        committingOrderedReads() = orderedReads;
         auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
         const auto outerSite = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(GuestMemory::GpuLockSite::Other) : GuestMemory::GpuLockSite::Other;
         const auto start = std::chrono::steady_clock::now();
@@ -284,19 +293,35 @@ void DrawPipeline::run() {
         }
         std::chrono::steady_clock::time_point retired;
         std::chrono::steady_clock::time_point released;
+        Item retiredItem;
+        bool notify = false;
         {
             std::lock_guard lock(mutex);
             if (trace != nullptr) retired = std::chrono::steady_clock::now();
             queuedReads.fetch_sub(items.front().reads.size(), std::memory_order_relaxed);
+            if (fusedRetire) retiredItem = std::move(items.front());
             items.pop_front();
-            if (trace != nullptr) released = std::chrono::steady_clock::now();
+            if (!fusedRetire && trace != nullptr) released = std::chrono::steady_clock::now();
             ++commits;
             commitNs += spent;
             if (failed) ++commitErrors;
             if (fatal != nullptr && failure == nullptr) failure = fatal;
             outstanding.fetch_sub(1, std::memory_order_release);
-            if (idleWaiters != 0) idle.notify_all();
+            if (fusedRetire) {
+                notify = idleWaiters != 0;
+                if (!items.empty()) {
+                    commit = stopped ? nullptr : &items.front().commit;
+                    orderedReads = items.front().orderedReads ? &items.front().reads : nullptr;
+                    queue = items.front().queue;
+                    fetched = true;
+                }
+            } else if (idleWaiters != 0) {
+                idle.notify_all();
+            }
         }
+        if (notify) idle.notify_all();
+        retiredItem = {};
+        if (fusedRetire && trace != nullptr) released = std::chrono::steady_clock::now();
         if (trace != nullptr) trace->Add("Driver.Commit", "retire", retired, released);
     }
     runningCommitters.fetch_sub(1, std::memory_order_acq_rel);

@@ -2745,6 +2745,17 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_draw_pipeline_trace_disabled PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test(NAME agc_driver_draw_pipeline_trace_retire_off COMMAND ${CMAKE_COMMAND} -E env
+            --unset=APS5_TRACE_FRAMES --unset=APS5_TRACE_SECONDS --unset=APS5_TRACE_SUMMARY_EVERY
+            $<TARGET_FILE:agc_driver_draw_pipeline_trace_tests> disabled)
+    set_tests_properties(agc_driver_draw_pipeline_trace_retire_off PROPERTIES
+            ENVIRONMENT "APS5_PIPELINED_DRAWS=8;APS5_NO_FUSED_RETIRE=0" SKIP_RETURN_CODE 77 TIMEOUT 30)
+    set_property(TEST agc_driver_draw_pipeline_trace agc_driver_draw_pipeline_trace_disabled APPEND PROPERTY
+            ENVIRONMENT_MODIFICATION "APS5_NO_FUSED_RETIRE=unset:")
+    if(WIN32)
+        set_property(TEST agc_driver_draw_pipeline_trace_retire_off APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     set_tests_properties(agc_driver_held_read_fast_path PROPERTIES TIMEOUT 60)
     add_test(NAME agc_driver_held_read_fast_path_off COMMAND agc_driver_held_read_fast_path_tests)
     set_tests_properties(agc_driver_held_read_fast_path_off PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_HELD_READ_FAST_PATH=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 60)
