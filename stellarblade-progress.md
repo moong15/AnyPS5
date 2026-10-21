@@ -956,3 +956,9 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
 - Main build E:\AnyPS5 (tmp/main-1a3a1b2e0), libs staged E:\StellarBlade\libs-main-1a3a1b2e0 (stamp ok, cmp 0). Relinker changed since 30fda0a03 (Windows load image #7740) -> relink exe with 1a3a1b2e0 relinker, backup StellarBlade.exe.bak-pre-1a3a1b2e0, restore after.
 - Evidence plan: (1) validation ctest main vs PR, pattern ^agc_(import_miss_memo|import_miss_memo_off|host_import|driver_host_import|driver_registration|sparse_run_import); (2) 6 runs M,P,M,P,M,P, 400:90, BASE APS5_PREBUILD_THREADS=16, no PROFILE; (3) diagnostic pair (not fps): APS5_SAMPLE_WORKER + APS5_PROFILE_DRAW on both, symbolized with scratchpad/symstacks.py -> share of worker time in HostImportFor/lease/refreshImports/importRun + memo hit rate (CnRJay).
 - Reply draft: pr-traces/pr7457-reply-draft.md (show user before posting).
+
+## 2026-10-22 03:40 — sb5 = merge14 9ec682746
+- merge14 (sb5 bddc95620 + main 0c6a5bd593, 161 commits): 191/194 focused tests (known main sample_order x3), VUID 0. run583 m14 761 / 8070 draw/s vs sb5 run582/584 mean 758 / 7995: neutral, kept as the main merge.
+- Tonight's candidates: none stacked. instream and rol remove 0 waits (counter runs 497/498). combo2 -8%, pdw -17% (2 test fails), dcache2 -11% (1 test fail). Label gate + drain (B) is -35% warm but 2.6x presents cold.
+- sb5 drifts over a night: 933 -> 729 presents, 811 -> 988 draws/frame. Compare only within interleaved same-session pairs. The specialized shader cache sits at its 65536-entry cap and evicts ~5.8k entries per run.
+- Crash: run539 corrupt UObject hash with an RGBA16F texel as a pointer (GPU write-back into reused CPU memory; H2 favoured). Writer not found yet.
