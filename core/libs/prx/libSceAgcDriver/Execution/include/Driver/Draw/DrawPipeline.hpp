@@ -42,6 +42,7 @@ public:
     // later items and never for another queue's.
     static void FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, std::uint64_t queueToken);
     static unsigned Committers();
+    static std::uint32_t RecordingQueue();
 
     void Enqueue(Commit commit, std::vector<Range> writes, std::uint64_t labelAddress = 0, std::vector<std::byte> labelBytes = {}, std::vector<Range> reads = {}, bool bounded = false, bool orderedReads = false, bool writesComplete = true, bool storeOnly = false);
     void Drain(DrainReason reason, std::uint32_t opcode = 0x100);
@@ -72,6 +73,7 @@ private:
         bool orderedReads = false;
         bool writesComplete = true;
         bool storeOnly = false;
+        std::uint32_t queue = 0xffffffffu;
     };
     DrawPipeline() = default;
     void drain(DrainReason reason, std::uint32_t opcode);

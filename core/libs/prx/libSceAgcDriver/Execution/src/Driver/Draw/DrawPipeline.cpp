@@ -125,6 +125,18 @@ void DrawPipeline::FollowEpoch(std::uint32_t queue, std::uint64_t sharedToken, s
     GuestMemory::SetCollectScope(static_cast<std::uint32_t>(slot), queueToken);
 }
 
+namespace {
+std::uint32_t& committingQueue() {
+    struct QueueTag { std::uint32_t value = 0xffffffffu; };
+    return ThreadScratch<QueueTag, QueueTag>().value;
+}
+}
+
+std::uint32_t DrawPipeline::RecordingQueue() {
+    const auto queue = committingQueue();
+    return queue != 0xffffffffu ? queue : GuestMemory::GpuLockThreadTag();
+}
+
 unsigned DrawPipeline::Committers() {
     return runningCommitters.load(std::memory_order_acquire);
 }
@@ -157,7 +169,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     ++enqueued;
     writesComplete &= std::all_of(writes.begin(), writes.end(), [](const Range& range) { return range.first < range.second; });
     heldReadRanges.fetch_add(reads.size(), std::memory_order_relaxed);
-    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads, writesComplete, storeOnly});
+    items.push_back({std::move(commit), std::move(writes), labelAddress, std::move(labelBytes), std::move(reads), bounded, orderedReads, writesComplete, storeOnly, RecordingQueue()});
     queuedReads.fetch_add(items.back().reads.size(), std::memory_order_relaxed);
     outstanding.fetch_add(1, std::memory_order_release);
     if (!thread.joinable()) {
@@ -240,6 +252,7 @@ void DrawPipeline::run() {
             wake.wait(lock, [&] { return !items.empty() || closing; });
             committerWaiting = false;
             if (items.empty()) break;
+            committingQueue() = items.front().queue;
             commit = stopped ? nullptr : &items.front().commit;
             committingOrderedReads() = items.front().orderedReads ? &items.front().reads : nullptr;
         }
@@ -261,6 +274,7 @@ void DrawPipeline::run() {
             fatal = std::current_exception();
         }
         committingOrderedReads() = nullptr;
+        committingQueue() = 0xffffffffu;
         const auto site = trace != nullptr ? GuestMemory::SwapLastGpuLockSite(outerSite) : GuestMemory::GpuLockSite::Other;
         if (trace != nullptr) trace->Add("Driver.Commit", commitStageName(site), start, std::chrono::steady_clock::now());
         const auto spent = elapsedNs(start);

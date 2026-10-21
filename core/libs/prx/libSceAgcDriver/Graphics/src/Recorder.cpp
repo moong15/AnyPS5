@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/shaders/SampleCounter_spv.h"
 #include "prx/libSceAgcDriver/Graphics/shaders/SampleDumps_spv.h"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4Opcodes.hpp"
@@ -3318,7 +3319,7 @@ void Recorder::OnComplete(std::function<void()> action) {
     writeBackCompletions.fetch_add(1, std::memory_order_acq_rel);
 }
 
-bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel, int value, std::int64_t word) {
+bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel, int value, std::int64_t word, WriteKind kind) {
     CaptureTrace::Log("buffer-write batch=%llu address=%llx bytes=%zu label=%d", static_cast<unsigned long long>(submissions + 1), static_cast<unsigned long long>(address), bytes, ownLabel);
     if (bytes == 0) return false;
     ensureOpen();
@@ -3337,7 +3338,9 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
     open->writeValues.push_back(static_cast<std::int16_t>(value));
     if (!ownLabel) TraceLoadWrite("record", this, submissions + 1, address, bytes, value);
     open->writeQueues.push_back(GuestMemory::GpuLockThreadTag());
+    open->writeStreamQueues.push_back(DriverDetail::DrawPipeline::RecordingQueue());
     open->writeWords.push_back(word);
+    open->writeKinds.push_back(ownLabel ? WriteKind::Label : kind);
     if (!ownLabel) markOverwritten(address, end);
     // A poller waiting on this range learns that the open batch may now hold its producer.
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
@@ -3376,7 +3379,9 @@ void Recorder::noteWriteOn(Batch& batch, std::uint64_t address, std::size_t byte
     batch.writeValues.push_back(-1);
     if (!ownLabel) TraceLoadWrite("attach", this, batch.serial, address, bytes);
     batch.writeQueues.push_back(GuestMemory::GpuLockThreadTag());
+    batch.writeStreamQueues.push_back(DriverDetail::DrawPipeline::RecordingQueue());
     batch.writeWords.push_back(-1);
+    batch.writeKinds.push_back(ownLabel ? WriteKind::Label : WriteKind::Other);
     if (!ownLabel) markOverwritten(address, address + bytes);
     if (activeRecorder == this) writeGeneration.fetch_add(1, std::memory_order_release);
     if (!SnapshotCovers(address, address + bytes)) {
@@ -3393,8 +3398,8 @@ void Recorder::markOverwritten(std::uint64_t address, std::uint64_t end) {
     for (auto it = labels.lower_bound(address >= 3 ? address - 3 : 0); it != labels.end() && it->first < end; ++it) it->second.overwritten = true;
 }
 
-void Recorder::NotePendingWrite(std::uint64_t address, std::size_t bytes) {
-    if (!noteWrite(address, bytes)) return;
+void Recorder::NotePendingWrite(std::uint64_t address, std::size_t bytes, WriteKind kind) {
+    if (!noteWrite(address, bytes, false, -1, -1, kind)) return;
     const std::array ranges{std::pair{address, address + bytes}};
     publishPendingWrites(ranges);
     // The note precedes this thread's vkQueueSubmit and the label another queue polls for; the
@@ -3403,7 +3408,7 @@ void Recorder::NotePendingWrite(std::uint64_t address, std::size_t bytes) {
 }
 
 void Recorder::NotePendingFill(std::uint64_t address, std::size_t bytes, std::uint8_t value) {
-    if (!noteWrite(address, bytes, false, value, value * std::int64_t{0x01010101})) return;
+    if (!noteWrite(address, bytes, false, value, value * std::int64_t{0x01010101}, WriteKind::Fill)) return;
     const std::array ranges{std::pair{address, address + bytes}};
     publishPendingWrites(ranges);
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -3411,16 +3416,16 @@ void Recorder::NotePendingFill(std::uint64_t address, std::size_t bytes, std::ui
 
 void Recorder::NotePendingWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word) {
     const int value = word == (word & 0xffu) * 0x01010101u ? static_cast<int>(word & 0xffu) : -1;
-    if (!noteWrite(address, bytes, false, value, word)) return;
+    if (!noteWrite(address, bytes, false, value, word, WriteKind::Fill)) return;
     const std::array ranges{std::pair{address, address + bytes}};
     publishPendingWrites(ranges);
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
-void Recorder::NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+void Recorder::NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, WriteKind kind) {
     bool publish = false;
     for (const auto& [begin, end] : ranges) {
-        if (end > begin && noteWrite(begin, static_cast<std::size_t>(end - begin))) publish = true;
+        if (end > begin && noteWrite(begin, static_cast<std::size_t>(end - begin), false, -1, -1, kind)) publish = true;
     }
     if (!publish) return;
     publishPendingWrites(ranges);
@@ -3500,6 +3505,66 @@ bool Recorder::PendingWriteOverlaps(std::uint64_t address, std::size_t bytes, bo
         if (overlaps(*batch, address, end)) return true;
     }
     return false;
+}
+
+Recorder::FlushWriteInfo Recorder::DescribeFlushWrites(std::uint64_t address, std::size_t bytes) const {
+    FlushWriteInfo result;
+    const auto queue = DriverDetail::DrawPipeline::RecordingQueue();
+    const auto inspect = [&](const Batch& batch) {
+        result.addressBased |= readOverlap(batch, address, address + bytes, ReadKind::AddressBased).has_value();
+        for (std::size_t i = 0; i < batch.writes.size(); ++i) {
+            const auto& [begin, end] = batch.writes[i];
+            if (address >= end || begin >= address + bytes) continue;
+            const auto kind = batch.writeKinds[i];
+            result.kinds |= 1u << static_cast<unsigned>(kind);
+            result.sameQueue &= queue != 0xffffffffu && batch.writeStreamQueues[i] == queue;
+            result.eligible &= kind == WriteKind::Store || kind == WriteKind::ShaderBuffer;
+        }
+    };
+    if (bytes != 0) {
+        if (open != nullptr) inspect(*open);
+        for (const auto& batch : inFlight) inspect(*batch);
+    }
+    result.eligible &= result.sameQueue && !result.addressBased;
+    return result;
+}
+
+namespace {
+struct FlushSyncCount {
+    std::uint32_t queue;
+    std::string reason;
+    unsigned site;
+    std::uint32_t kinds;
+    bool addressBased, sameQueue, watched, cpuOverlap, eligible;
+    std::uint64_t count = 0;
+};
+std::mutex flushSyncMutex;
+std::vector<FlushSyncCount> flushSyncCounts;
+}
+
+void Recorder::CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!profile) return;
+    const auto queue = GuestMemory::GpuLockThreadTag();
+    std::lock_guard lock(flushSyncMutex);
+    for (auto& entry : flushSyncCounts) {
+        if (entry.queue == queue && entry.reason == reason && entry.site == site && entry.kinds == writes.kinds && entry.addressBased == writes.addressBased && entry.sameQueue == writes.sameQueue && entry.watched == watched && entry.cpuOverlap == cpuOverlap && entry.eligible == eligible) {
+            ++entry.count;
+            return;
+        }
+    }
+    flushSyncCounts.push_back({queue, reason, site, writes.kinds, writes.addressBased, writes.sameQueue, watched, cpuOverlap, eligible, 1});
+}
+
+std::string Recorder::FlushSyncReport() {
+    std::lock_guard lock(flushSyncMutex);
+    std::string result;
+    for (const auto& entry : flushSyncCounts) {
+        char text[320];
+        std::snprintf(text, sizeof(text), " q%x/%s/site%u/kinds%x/bda%d/same%d/watch%d/cpu%d/eligible%d=%llu", entry.queue, entry.reason.c_str(), entry.site, entry.kinds, entry.addressBased, entry.sameQueue, entry.watched, entry.cpuOverlap, entry.eligible, static_cast<unsigned long long>(entry.count));
+        result += text;
+    }
+    return result;
 }
 
 bool Recorder::OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const {
@@ -4574,7 +4639,7 @@ void Recorder::waitFence(Batch& batch, int source) {
                 lastReport = now;
                 const auto& h = holdCounters;
                 AgcDriver::ProfilePrint_nid_no_patch("[host-write] %llu host writes ordered against pending GPU writes (cumulative)\n", static_cast<unsigned long long>(orderedHostWrites.load(std::memory_order_relaxed)));
-                AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs waited %llu fences and left %llu batches in flight, %llu full syncs waited %llu fences; snapshot %llu rebuilds %.0f ms, %llu notes covered; pending-write tests %llu, %llu answered by the snapshot (%.0f%%); %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait t-targeted/full):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu, commit waits unlocked %llu / %.0f ms GPU + %.0f ms relock; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(targetedFenceWaits.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(fullSyncCount.load()), static_cast<unsigned long long>(fullFenceWaits.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(pendingWriteTests.load()), static_cast<unsigned long long>(pendingWriteSnapshotAnswers.load()), pendingWriteTests.load() != 0 ? 100.0 * static_cast<double>(pendingWriteSnapshotAnswers.load()) / static_cast<double>(pendingWriteTests.load()) : 0.0, static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(h.commitUnlockedWaits), h.commitUnlockedWaitMs, h.commitRelockMs, static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()));
+                AgcDriver::ProfilePrint_nid_no_patch("[recorder] %llu syncs waited %.1f s for the GPU in total (sources, count/wait: idle %llu/%.1fs, pending write %llu/%.1fs, recorded store %llu/%.1fs, address-based %llu/%.1fs, other %llu/%.1fs); hook %llu calls, %llu locked; %llu targeted syncs waited %llu fences and left %llu batches in flight, %llu full syncs waited %llu fences; snapshot %llu rebuilds %.0f ms, %llu notes covered; pending-write tests %llu, %llu answered by the snapshot (%.0f%%); %llu unlocked timeline waits %.1f s; %llu submissions, %zu label entries, %llu completion labels pending; fence waits by thread (count/wait):%s; top sync sites (source@caller syncs/batches/wait t-targeted/full):%s; under holds (cumulative): %llu completions ran %.0f ms (kept objects released %.0f ms), pending-write syncs from completions: %llu skipped, %llu waited %.0f ms; %llu reaps (%llu with work) retired %llu batches in %.0f ms; hook waits unlocked %llu / %.0f ms GPU (pending write %llu / %.0f ms, recorded store %llu / %.0f ms) + %.0f ms relock (%llu found the recorder torn down), locked %llu, commit waits unlocked %llu / %.0f ms GPU + %.0f ms relock; deferred releases: on the release thread %llu batches (%llu objects) in %.0f ms, inline %llu batches (%llu objects) in %.0f ms (%llu batches over the queue bound of %zu), queue max %llu batches, %llu pending; flush Sync candidates (kinds bits other/store/shader/copy/fill/label/cmask/query):%s\n",static_cast<unsigned long long>(waits), waitedMs / 1000, static_cast<unsigned long long>(syncCounts[0]), syncWaitedMs[0] / 1000, static_cast<unsigned long long>(syncCounts[1]), syncWaitedMs[1] / 1000, static_cast<unsigned long long>(syncCounts[2]), syncWaitedMs[2] / 1000, static_cast<unsigned long long>(syncCounts[3]), syncWaitedMs[3] / 1000, static_cast<unsigned long long>(syncCounts[4]), syncWaitedMs[4] / 1000, static_cast<unsigned long long>(hookCalls.load()), static_cast<unsigned long long>(hookLocks.load()), static_cast<unsigned long long>(targetedSyncs.load()), static_cast<unsigned long long>(targetedFenceWaits.load()), static_cast<unsigned long long>(batchesLeftInFlight.load()), static_cast<unsigned long long>(fullSyncCount.load()), static_cast<unsigned long long>(fullFenceWaits.load()), static_cast<unsigned long long>(snapshotRebuilds), snapshotRebuildMs, static_cast<unsigned long long>(snapshotCovered), static_cast<unsigned long long>(pendingWriteTests.load()), static_cast<unsigned long long>(pendingWriteSnapshotAnswers.load()), pendingWriteTests.load() != 0 ? 100.0 * static_cast<double>(pendingWriteSnapshotAnswers.load()) / static_cast<double>(pendingWriteTests.load()) : 0.0, static_cast<unsigned long long>(unlockedWaits.load()), unlockedWaitedUs.load() / 1e6, static_cast<unsigned long long>(recorder.submissions), recorder.PendingLabels(), static_cast<unsigned long long>(completionLabels.load()), ThreadSyncReport().c_str(), SyncSiteReport().c_str(), static_cast<unsigned long long>(h.completions), h.completionMs, h.keptReleaseMs, static_cast<unsigned long long>(h.completionSyncsSkipped), static_cast<unsigned long long>(h.completionSyncsWaited), h.completionSyncWaitMs, static_cast<unsigned long long>(h.reaps), static_cast<unsigned long long>(h.reapsWithWork), static_cast<unsigned long long>(h.reapBatches), h.reapMs, static_cast<unsigned long long>(h.hookUnlockedWaits), h.hookUnlockedWaitMs, static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[1]), h.hookUnlockedWaitMsBySource[1], static_cast<unsigned long long>(h.hookUnlockedWaitsBySource[2]), h.hookUnlockedWaitMsBySource[2], h.hookRelockMs, static_cast<unsigned long long>(h.hookUnlockedTornDown), static_cast<unsigned long long>(h.hookLockedWaits), static_cast<unsigned long long>(h.commitUnlockedWaits), h.commitUnlockedWaitMs, h.commitRelockMs, static_cast<unsigned long long>(threadReleases.load()), static_cast<unsigned long long>(threadObjects.load()), threadReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineReleases.load()), static_cast<unsigned long long>(inlineObjects.load()), inlineReleaseUs.load() / 1000.0, static_cast<unsigned long long>(inlineOverBound.load()), ReleaseQueueBound(), static_cast<unsigned long long>(releaseQueueMax.load()), static_cast<unsigned long long>(deferredPending.load()), FlushSyncReport().c_str());
                 AgcDriver::ProfilePrint_nid_no_patch("[recorder] completion label stores: %llu run, %llu skipped (no CPU write-back overlapped them); %llu counted pending at a write-back; %llu write-backs over a tracked label; %llu write-back completions pending\n", static_cast<unsigned long long>(completionStoresRun.load()), static_cast<unsigned long long>(completionStoresSkipped.load()), static_cast<unsigned long long>(completionLabelsCountedLate.load()), static_cast<unsigned long long>(writeBacksOverLabels.load()), static_cast<unsigned long long>(writeBackCompletions.load()));
                 AgcDriver::ProfilePrint_nid_no_patch("[recorder] submits %llu, vkQueueSubmit mean %.1f us, max %.1f us\n", static_cast<unsigned long long>(submitCount), submitCount != 0 ? submitUs / static_cast<double>(submitCount) : 0.0, submitMaxUs);
                 const auto reads = Recorder::ReadCounts();

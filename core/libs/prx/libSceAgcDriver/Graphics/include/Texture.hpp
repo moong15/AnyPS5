@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <source_location>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -33,6 +34,7 @@ StorageHostStats StorageHostCounters();
 class Buffer;
 class ResidentColor;
 class CommandBatch;
+class Recorder;
 class StorageTexture;
 struct HostImport;
 
@@ -220,7 +222,8 @@ public:
     // any unit was: a reader of the import must sync for a publish as for a store. Only images
     // with a pending unit inside the range are stored (APS5_NO_FLUSH_PRETEST=1 lists every
     // overlapping pending image, as before).
-    static bool FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr, const char* reason = "memory access", PublishScope scope = PublishScope::Whole, bool* published = nullptr);
+    enum class FlushSite : unsigned { Other, RevalidateEpoch, RevalidateRead, RevalidateWrite };
+    static bool FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr, const char* reason = "memory access", PublishScope scope = PublishScope::Whole, bool* published = nullptr, FlushSite site = FlushSite::Other, const std::source_location& source = std::source_location::current());
     static bool FlushForHostWrite(std::uint64_t address, std::size_t bytes);
     static void FlushAllPending(const char* reason);
     static bool WaitForFlushing(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr);
@@ -417,6 +420,7 @@ private:
     // APS5_BLOCK_WRITEBACK_EACH=1 stores the touched units only).
     void writeBack(std::uint64_t address, std::size_t bytes);
     void writeBackLayers(const std::vector<bool>& layers);
+    bool inStreamFlushSafe(const Recorder& recorder, bool& watched, bool& cpuOverlap) const;
     bool unchangedSinceBaseline(std::uint64_t from, std::uint64_t to) const;
     void saveBeforeUnwatch();
     void saveUploadBeforeUnwatch(std::uint64_t address, std::size_t bytes);

@@ -3706,7 +3706,7 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
             // A region over a unit shadow's fresh results (a retile bumped the serial) is
             // published by the flush, as one over a pending image is stored.
             for (const auto& region : regions) {
-                if (region.overlaps || AnyShadowedOverlaps(region.begin, static_cast<std::size_t>(region.end - region.begin))) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region");
+                if (region.overlaps || AnyShadowedOverlaps(region.begin, static_cast<std::size_t>(region.end - region.begin))) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region", PublishScope::Whole, nullptr, StorageTexture::FlushSite::RevalidateEpoch);
             }
         }
         static const bool reconcileImports = std::getenv("APS5_NO_IMPORT_PROOF_RECONCILE") == nullptr;
@@ -3717,8 +3717,8 @@ bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofR
             importsProof = HostImportsIdentity(context);
         }
     } else {
-        for (const auto& region : directRegions) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region");
-        for (const auto& [begin, end] : guestMemory.Writes()) StorageTexture::FlushPending(begin, static_cast<std::size_t>(end - begin), nullptr, "written buffer range");
+        for (const auto& region : directRegions) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region", PublishScope::Whole, nullptr, StorageTexture::FlushSite::RevalidateRead);
+        for (const auto& [begin, end] : guestMemory.Writes()) StorageTexture::FlushPending(begin, static_cast<std::size_t>(end - begin), nullptr, "written buffer range", PublishScope::Whole, nullptr, StorageTexture::FlushSite::RevalidateWrite);
         if (!serialLoop()) return finish(fast, false, ProofFailure::Imports);
     }
     // (3) Buffers staged in device memory (GuestBufferMemory::AllowDeviceStaging) are copied in
@@ -5897,7 +5897,7 @@ void ShaderResources::MarkGpuWrites(Recorder& recorder) {
     guestMemory.RecordCopyBacks(recorder);
     // Only the written elements' ranges (AddWritable): a read-only element is neither noted here
     // nor marked as a direct write, so CPU reads of its memory never wait for this work.
-    recorder.NotePendingWrites(guestMemory.Writes());
+    recorder.NotePendingWrites(guestMemory.Writes(), Recorder::WriteKind::ShaderBuffer);
     guestMemory.MarkDirectWrites();
     if (!BuildProfiled()) return;
     auto& counters = BufferWrites();

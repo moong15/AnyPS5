@@ -3934,7 +3934,7 @@ std::uint64_t StorageTexture::writeBackWindows(std::span<const ImportSegment> se
         recorder->MarkCovered(storedAccess);
         // Only the pieces written into the import are stores a CPU reader must wait for; the
         // shadowed ones reach it through a publish, which notes its own.
-        if (!imported.empty()) recorder->NotePendingWrites(imported);
+        if (!imported.empty()) recorder->NotePendingWrites(imported, Recorder::WriteKind::Store);
     }
     partialWriteBacks.fetch_add(1, std::memory_order_relaxed);
     partialWriteBackBytes.fetch_add(storedBytes, std::memory_order_relaxed);
@@ -4206,7 +4206,7 @@ void waitForIdlePublish(const char* reason) {
 
 }
 
-bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except, const char* reason, PublishScope scope, bool* published) {
+bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except, const char* reason, PublishScope scope, bool* published, FlushSite site, const std::source_location& source) {
     GuestMemory::TargetRefreshCounter inspected("flush_images");
     const TargetRefreshScope targetScope(TargetRefreshStep::Flush);
     static_cast<void>(FlushDepthPlanes(address, bytes));
@@ -4277,6 +4277,26 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         try {
             recorder->Reap();
             if (const auto writer = recorder->PendingWriterSerial(address, bytes); writer == recorder->OpenSerial()) {
+                static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+                if (profile) {
+                    auto writes = recorder->DescribeFlushWrites(address, bytes);
+                    bool watched = true;
+                    bool cpuOverlap = false;
+                    bool safe = true;
+                    for (const auto& texture : flush) {
+                        const auto span = recorder->DescribeFlushWrites(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
+                        writes.kinds |= span.kinds;
+                        writes.addressBased |= span.addressBased;
+                        writes.sameQueue &= span.sameQueue;
+                        writes.eligible &= span.eligible;
+                        safe &= texture->inStreamFlushSafe(*recorder, watched, cpuOverlap);
+                    }
+                    const bool eligible = site != FlushSite::Other && writes.eligible && safe;
+                    if (profile) {
+                        const auto caller = std::string(reason) + "@" + source.file_name() + ":" + std::to_string(source.line());
+                        Recorder::CountFlushSync(caller.c_str(), static_cast<unsigned>(site), writes, watched, cpuOverlap, eligible);
+                    }
+                }
                 Recorder::CountSync(recorder->OpenWriteOverlaps(address, bytes) ? 1 : 3);
                 CountSmallStore(reason, &SmallStoreCounts::waits);
                 recorder->Sync();
@@ -5910,6 +5930,34 @@ bool StorageTexture::guestBytesSettled() const {
     return recorder == nullptr || !recorder->PendingWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
 }
 
+bool StorageTexture::inStreamFlushSafe(const Recorder& recorder, bool& watched, bool& cpuOverlap) const {
+    constexpr std::uint64_t block = 65536;
+    const auto bytes = static_cast<std::size_t>(guestBytes);
+    const bool tracked = GuestMemory::Watched(descriptor.baseAddress, bytes);
+    watched &= tracked;
+    if (!tracked || !HostImportCovers(context, descriptor.baseAddress, bytes)) return false;
+    GuestMemory::CollectWritesUncached(descriptor.baseAddress, bytes);
+    bool safe = true;
+    for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+        if (!layerPending[layer]) continue;
+        const auto begin = layerBegin(layer);
+        const auto size = static_cast<std::size_t>(layerBytes(layer));
+        const auto first = begin & ~(block - 1);
+        const auto count = static_cast<std::size_t>((begin + size - first + block - 1) / block);
+        const std::vector<std::uint64_t> generations(count, layerGeneration[layer]);
+        std::vector<std::uint8_t> changed(count);
+        if (!GuestMemory::ChangedBlocks(begin, size, generations, changed)) return false;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (changed[i] != GuestMemory::BlockWritten) continue;
+            if (recorder.PendingWriteOverlaps(first + i * block, block, false)) {
+                cpuOverlap = true;
+                safe = false;
+            }
+        }
+    }
+    return safe;
+}
+
 bool StorageTexture::unchangedSinceBaseline(std::uint64_t from, std::uint64_t to) const {
     const auto& baseline = originalHolds(from, static_cast<std::size_t>(to - from)) ? original : generationBaseline;
     if (baseline.size() != guestBytes) return false;
@@ -6211,7 +6259,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         } else {
             recorder->EndGpuTiming(timing, storedBytes);
             recorder->MarkShaderReadsCovered();
-            recorder->NotePendingWrite(firstStored, static_cast<std::size_t>(lastStored - firstStored));
+            recorder->NotePendingWrite(firstStored, static_cast<std::size_t>(lastStored - firstStored), Recorder::WriteKind::Store);
         }
         countStorageWriteBack(storedBytes, true);
         if (profile) Profile().storageGpu += timer.lap();

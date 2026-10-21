@@ -2725,7 +2725,7 @@ bool VulkanDevice::DumpSamplesOnGpu(std::uint64_t address) {
     if (!recorder.QueuesSampleDumps()) recorder.FlushStoresOverlapping(address, bytes);
     recorder.FlushKeyStoresOverlapping(address, bytes);
     if (!recorder.DumpSamples(import->address + (address - import->base), address)) return false;
-    recorder.NotePendingWrite(address, bytes);
+    recorder.NotePendingWrite(address, bytes, Graphics::Recorder::WriteKind::Query);
     GuestMemory::MarkWritten(address, bytes);
     return true;
 }
@@ -2906,7 +2906,7 @@ bool VulkanDevice::FillBuffer(std::uint64_t address, std::size_t bytes, std::spa
     recorder.MarkCovered(filledAccess);
     phase(recordMs);
     if (uniform) recorder.NotePendingWordFill(address, bytes, pattern[0]);
-    else recorder.NotePendingWrite(address, bytes);
+    else recorder.NotePendingWrite(address, bytes, Graphics::Recorder::WriteKind::Fill);
     GuestMemory::MarkWritten(address, bytes);
     phase(notesMs);
     return true;
@@ -3125,7 +3125,7 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
     }
     if (AliasCopy(context, destination, source, bytes)) {
         noteWriter({}, 0);
-        recorder.NotePendingWrite(destination, bytes);
+        recorder.NotePendingWrite(destination, bytes, Graphics::Recorder::WriteKind::Copy);
         Graphics::StorageTexture::FlushPending(destination, bytes, nullptr, "buffer copy destination", Graphics::PublishScope::Whole);
         outcome.path = 3;
         return outcome;
@@ -3191,7 +3191,7 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
     recorder.MarkCovered(copiedAccess);
     recorder.NotePendingRead(source, bytes, Graphics::Recorder::ReadKind::CopySource);
     GuestMemory::MarkWritten(destination, bytes);
-    recorder.NotePendingWrite(destination, bytes);
+    recorder.NotePendingWrite(destination, bytes, Graphics::Recorder::WriteKind::Copy);
     // The destination's bytes after the transfer are the source's now when nothing recorded,
     // pending or still to land can change the source before the transfer reads it (a CPU store
     // to it in between is a hardware race too): the caller's ring entry carries them, stamped
@@ -3200,7 +3200,7 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
     const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> sourceRange{{{source, source + bytes}}};
     const bool sourceCurrent = bytes <= knownMax && generation != 0 && !recorder.PendingWriteOverlaps(source, bytes) && !recorder.PendingLabelIn(source, bytes) && !completionStoreOverlaps(source) && !Graphics::StorageTexture::AnyPendingOverlaps(sourceRange) && !Graphics::AnyShadowedOverlaps(sourceRange);
     noteWriter(sourceCurrent ? std::span(reinterpret_cast<const std::byte*>(source), bytes) : std::span<const std::byte>{}, sourceCurrent ? generation : 0);
-    recorder.NotePendingWrite(destination, bytes);
+    recorder.NotePendingWrite(destination, bytes, Graphics::Recorder::WriteKind::Copy);
     outcome.path = 1;
     return outcome;
 }

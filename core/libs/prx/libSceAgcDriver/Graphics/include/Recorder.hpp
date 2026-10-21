@@ -171,11 +171,12 @@ public:
     bool KnownHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::optional<std::uint32_t>& highest);
     void KeepHighestIndex(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint64_t generation, std::uint64_t registryGeneration, std::optional<std::uint32_t> highest);
     void OnComplete(std::function<void()> action);
-    void NotePendingWrite(std::uint64_t address, std::size_t bytes);
+    enum class WriteKind : std::uint8_t { Other, Store, ShaderBuffer, Copy, Fill, Label, Cmask, Query, Count };
+    void NotePendingWrite(std::uint64_t address, std::size_t bytes, WriteKind kind = WriteKind::Other);
     void NotePendingFill(std::uint64_t address, std::size_t bytes, std::uint8_t value);
     void NotePendingWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word);
     // Notes several [begin, end) ranges and publishes the snapshot once (a dispatch writes many buffers).
-    void NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
+    void NotePendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, WriteKind kind = WriteKind::Other);
     bool PendingWriteOverlaps(std::uint64_t address, std::size_t bytes, bool useSnapshot = true) const;
     static std::uint64_t PendingWriteTests();
     static std::uint64_t PendingWriteSnapshotAnswers();
@@ -233,6 +234,15 @@ public:
     };
     static ReadStatistics ReadCounts();
     // Whether the OPEN (unsubmitted) batch writes the range: a wait on such a range must submit it.
+    struct FlushWriteInfo {
+        std::uint32_t kinds = 0;
+        bool sameQueue = true;
+        bool addressBased = false;
+        bool eligible = true;
+    };
+    FlushWriteInfo DescribeFlushWrites(std::uint64_t address, std::size_t bytes) const;
+    static void CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible);
+    static std::string FlushSyncReport();
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
     bool OpenCrossQueueWriteOverlaps(std::uint64_t address, std::size_t bytes, std::uint32_t queue) const;
     std::uint64_t PendingWriterSerial(std::uint64_t address, std::size_t bytes) const;
@@ -700,6 +710,8 @@ private:
         std::vector<std::uint64_t> writeNotes;
         std::vector<std::int16_t> writeValues;
         std::vector<std::uint32_t> writeQueues;
+        std::vector<std::uint32_t> writeStreamQueues;
+        std::vector<WriteKind> writeKinds;
         std::vector<std::int64_t> writeWords;
         // In-place reads (see NotePendingRead), dying with the batch: a finished batch's reads are done.
         struct Read {
@@ -937,7 +949,7 @@ private:
     // Appends one range to the open batch; returns whether the snapshot must be rebuilt for it.
     // `ownLabel`: the range is a label's own store (NoteLabel, AfterCompletions), which does not
     // overwrite the table entries it covers; any other range flags them (table mutex, briefly).
-    bool noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel = false, int value = -1, std::int64_t word = -1);
+    bool noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel = false, int value = -1, std::int64_t word = -1, WriteKind kind = WriteKind::Other);
     // Appends one range to `batch` (open or in flight) and publishes the snapshot if needed.
     void noteWriteOn(Batch& batch, std::uint64_t address, std::size_t bytes, bool ownLabel = false);
     void noteLabelOn(Batch& batch, std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool behindCompletion = false);
