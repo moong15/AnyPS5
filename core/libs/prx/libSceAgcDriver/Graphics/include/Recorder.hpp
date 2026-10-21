@@ -241,7 +241,7 @@ public:
         bool eligible = true;
     };
     FlushWriteInfo DescribeFlushWrites(std::uint64_t address, std::size_t bytes) const;
-    static void CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible, bool inStream = false);
+    static void CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible, bool inStream = false, const char* why = "none");
     static std::string FlushSyncReport();
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
     bool OpenCrossQueueWriteOverlaps(std::uint64_t address, std::size_t bytes, std::uint32_t queue) const;

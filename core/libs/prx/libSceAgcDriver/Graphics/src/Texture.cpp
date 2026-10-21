@@ -4284,20 +4284,21 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
                     auto writes = recorder->DescribeFlushWrites(address, bytes);
                     bool watched = true;
                     bool cpuOverlap = false;
-                    bool safe = true;
+                    auto rejection = InStreamRejection::None;
                     for (const auto& texture : flush) {
                         const auto span = recorder->DescribeFlushWrites(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
                         writes.kinds |= span.kinds;
                         writes.addressBased |= span.addressBased;
                         writes.sameQueue &= span.sameQueue;
                         writes.eligible &= span.eligible;
-                        safe &= texture->inStreamFlushSafe(*recorder, watched, cpuOverlap);
+                        const auto rejected = texture->inStreamFlushRejection(*recorder, watched, cpuOverlap);
+                        if (rejection == InStreamRejection::None) rejection = rejected;
                     }
-                    const bool eligible = site != FlushSite::Other && writes.eligible && safe;
+                    const bool eligible = site != FlushSite::Other && writes.eligible && rejection == InStreamRejection::None;
                     skipSync = inStream && eligible;
                     if (profile) {
                         const auto caller = std::string(reason) + "@" + source.file_name() + ":" + std::to_string(source.line());
-                        Recorder::CountFlushSync(caller.c_str(), static_cast<unsigned>(site), writes, watched, cpuOverlap, eligible, skipSync);
+                        Recorder::CountFlushSync(caller.c_str(), static_cast<unsigned>(site), writes, watched, cpuOverlap, eligible, skipSync, InStreamRejectionName(rejection));
                     }
                 }
                 if (!skipSync) {
@@ -5935,12 +5936,26 @@ bool StorageTexture::guestBytesSettled() const {
     return recorder == nullptr || !recorder->PendingWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
 }
 
-bool StorageTexture::inStreamFlushSafe(const Recorder& recorder, bool& watched, bool& cpuOverlap) const {
+const char* StorageTexture::InStreamRejectionName(InStreamRejection rejection) {
+    switch (rejection) {
+        case InStreamRejection::None: return "none";
+        case InStreamRejection::Unwatched: return "unwatched";
+        case InStreamRejection::Dcc: return "dcc";
+        case InStreamRejection::ImportUncovered: return "importUncovered";
+        case InStreamRejection::ChangedUnknown: return "changedUnknown";
+        case InStreamRejection::CpuWritten: return "cpuWritten";
+    }
+    return "unknown";
+}
+
+StorageTexture::InStreamRejection StorageTexture::inStreamFlushRejection(const Recorder& recorder, bool& watched, bool& cpuOverlap) const {
     constexpr std::uint64_t block = 65536;
     const auto bytes = static_cast<std::size_t>(guestBytes);
     const bool tracked = GuestMemory::Watched(descriptor.baseAddress, bytes);
     watched &= tracked;
-    if (!tracked || descriptor.dccAddress != 0 || !HostImportCovers(context, descriptor.baseAddress, bytes)) return false;
+    if (!tracked) return InStreamRejection::Unwatched;
+    if (descriptor.dccAddress != 0) return InStreamRejection::Dcc;
+    if (!HostImportCovers(context, descriptor.baseAddress, bytes)) return InStreamRejection::ImportUncovered;
     GuestMemory::CollectWritesUncached(descriptor.baseAddress, bytes);
     bool safe = true;
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
@@ -5951,7 +5966,7 @@ bool StorageTexture::inStreamFlushSafe(const Recorder& recorder, bool& watched, 
         const auto count = static_cast<std::size_t>((begin + size - first + block - 1) / block);
         const std::vector<std::uint64_t> generations(count, layerGeneration[layer]);
         std::vector<std::uint8_t> changed(count);
-        if (!GuestMemory::ChangedBlocks(begin, size, generations, changed)) return false;
+        if (!GuestMemory::ChangedBlocks(begin, size, generations, changed)) return InStreamRejection::ChangedUnknown;
         for (std::size_t i = 0; i < count; ++i) {
             if (changed[i] != GuestMemory::BlockWritten) continue;
             if (recorder.PendingWriteOverlaps(first + i * block, block, false)) {
@@ -5960,7 +5975,7 @@ bool StorageTexture::inStreamFlushSafe(const Recorder& recorder, bool& watched, 
             }
         }
     }
-    return safe;
+    return safe ? InStreamRejection::None : InStreamRejection::CpuWritten;
 }
 
 bool StorageTexture::unchangedSinceBaseline(std::uint64_t from, std::uint64_t to) const {

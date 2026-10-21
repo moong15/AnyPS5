@@ -49,6 +49,7 @@ constexpr std::uint32_t Stored = 0x11111111u;
 constexpr std::uint32_t Overwritten = 0x22222222u;
 constexpr std::size_t OverwrittenDword = 0x100u / 4u;
 constexpr std::size_t FarDword = 100u * Width;
+constexpr std::size_t KeysOffset = 0x40000u;
 
 alignas(256) constexpr std::array<std::uint32_t, 11> StoreImageCode{0x7e000280u, 0x7e020280u, 0x7e0402ffu, Stored, 0xf0200108u, 0x00010200u, 0x7e0202ffu, 0x00000064u, 0xf0200108u, 0x00010200u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 7> StoreGlobalCode{0x7e000208u, 0x7e020209u, 0x7e0402ffu, Overwritten, 0xdc708100u, 0x007d0200u, 0xbf810000u};
@@ -195,8 +196,15 @@ int RunInStream(AgcDriver::VulkanDevice& device, std::string_view mode) {
         std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
         if (HostImportFor(device.graphicsContext(), image, ImageBytes) == nullptr) return VulkanTestSkipped;
     }
+    const bool tiled = mode == "store_tiled" || mode == "dcc";
     auto imageData = ImageUserData(image);
-    if (mode == "store_tiled") imageData[7] |= 0x1bu << 20u;
+    if (tiled) imageData[7] |= 0x1bu << 20u;
+    if (mode == "dcc") {
+        const auto keys = image + KeysOffset;
+        std::memset(guest.Words() + KeysOffset / 4u, 0xff, ImageBytes / 256u);
+        imageData[10] = (1u << 20u) | (1u << 21u) | (static_cast<std::uint32_t>((keys >> 8u) & 0xffu) << 24u);
+        imageData[11] = static_cast<std::uint32_t>(keys >> 16u);
+    }
     const auto shader = Compile(StoreImageCode, imageData, device.Target());
     device.Dispatch(shader, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(StoreImageCode.data()));
     std::unique_lock gpu(AgcDriver::GuestMemory::GpuMutex());
@@ -206,7 +214,8 @@ int RunInStream(AgcDriver::VulkanDevice& device, std::string_view mode) {
     Require(HostImportCovers(context, image, ImageBytes), "in-stream flush: the image lost its import");
     const auto texture = StorageTexture::FindPending(image, ImageBytes);
     Require(texture != nullptr, "in-stream flush: no pending image");
-    const auto address = mode == "store_tiled" ? image : image + FarDword * 4u;
+    Require(mode != "dcc" || texture->Descriptor().dccAddress == image + KeysOffset, "in-stream flush: the pending image has no DCC keys");
+    const auto address = tiled ? image : image + FarDword * 4u;
     const auto* import = HostImportFor(context, address, 4u);
     Require(import != nullptr, "in-stream flush: no import");
     if (mode == "cpu") guest.Words()[FarDword] = Overwritten;
@@ -224,6 +233,11 @@ int RunInStream(AgcDriver::VulkanDevice& device, std::string_view mode) {
     const bool skipped = eligible && std::getenv("APS5_NO_INSTREAM_FLUSH") == nullptr;
     Require(StorageTexture::FlushPending(image, ImageBytes, nullptr, mode == "flip" ? "flip" : "imported buffer region", PublishScope::Whole, nullptr, site), "in-stream flush: no results flushed");
     Require((recorder->Submissions() == before) == skipped, "in-stream flush: unexpected CPU synchronization");
+    if (std::getenv("APS5_PROFILE_DRAW") != nullptr) {
+        const std::string why = mode == "cpu" ? "cpuWritten" : mode == "unwatched" ? "unwatched" : mode == "dcc" ? "dcc" : "none";
+        const auto report = Recorder::FlushSyncReport();
+        Require(report.find("/why=" + why + "=") != std::string::npos, "in-stream flush: the flush Sync candidates do not name why=" + why + ":" + report);
+    }
     auto readback = std::make_shared<Buffer>(context, 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     recorder->Keep(readback);
     const auto commands = recorder->Commands();

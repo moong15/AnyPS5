@@ -223,6 +223,8 @@ public:
     // with a pending unit inside the range are stored (APS5_NO_FLUSH_PRETEST=1 lists every
     // overlapping pending image, as before).
     enum class FlushSite : unsigned { Other, RevalidateEpoch, RevalidateRead, RevalidateWrite };
+    enum class InStreamRejection : std::uint8_t { None, Unwatched, Dcc, ImportUncovered, ChangedUnknown, CpuWritten };
+    static const char* InStreamRejectionName(InStreamRejection rejection);
     static bool FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except = nullptr, const char* reason = "memory access", PublishScope scope = PublishScope::Whole, bool* published = nullptr, FlushSite site = FlushSite::Other, const std::source_location& source = std::source_location::current());
     static bool FlushForHostWrite(std::uint64_t address, std::size_t bytes);
     static void FlushAllPending(const char* reason);
@@ -420,7 +422,7 @@ private:
     // APS5_BLOCK_WRITEBACK_EACH=1 stores the touched units only).
     void writeBack(std::uint64_t address, std::size_t bytes);
     void writeBackLayers(const std::vector<bool>& layers);
-    bool inStreamFlushSafe(const Recorder& recorder, bool& watched, bool& cpuOverlap) const;
+    InStreamRejection inStreamFlushRejection(const Recorder& recorder, bool& watched, bool& cpuOverlap) const;
     bool unchangedSinceBaseline(std::uint64_t from, std::uint64_t to) const;
     void saveBeforeUnwatch();
     void saveUploadBeforeUnwatch(std::uint64_t address, std::size_t bytes);
