@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -19,6 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -181,6 +184,59 @@ private:
     VkEvent event = VK_NULL_HANDLE;
 };
 
+int RunInStream(AgcDriver::VulkanDevice& device, std::string_view mode) {
+    using namespace AgcDriver::Graphics;
+    if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
+    AgcDriver::GuestMemory::TagGpuLockThread(0);
+    GuestBlock guest(mode != "unwatched");
+    const auto image = guest.Address();
+    if (mode == "unwatched" && AgcDriver::GuestMemory::Watched(image, ImageBytes)) return VulkanTestSkipped;
+    {
+        std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+        if (HostImportFor(device.graphicsContext(), image, ImageBytes) == nullptr) return VulkanTestSkipped;
+    }
+    auto imageData = ImageUserData(image);
+    if (mode == "store_tiled") imageData[7] |= 0x1bu << 20u;
+    const auto shader = Compile(StoreImageCode, imageData, device.Target());
+    device.Dispatch(shader, 1u, 1u, 1u, {}, reinterpret_cast<std::uintptr_t>(StoreImageCode.data()));
+    std::unique_lock gpu(AgcDriver::GuestMemory::GpuMutex());
+    auto* recorder = Recorder::Active();
+    Require(recorder != nullptr, "in-stream flush: no recorder");
+    const auto context = recorder->DeviceContext();
+    Require(HostImportCovers(context, image, ImageBytes), "in-stream flush: the image lost its import");
+    const auto texture = StorageTexture::FindPending(image, ImageBytes);
+    Require(texture != nullptr, "in-stream flush: no pending image");
+    const auto address = mode == "store_tiled" ? image : image + FarDword * 4u;
+    const auto* import = HostImportFor(context, address, 4u);
+    Require(import != nullptr, "in-stream flush: no import");
+    if (mode == "cpu") guest.Words()[FarDword] = Overwritten;
+    if (mode == "cross") AgcDriver::GuestMemory::TagGpuLockThread(0x20);
+    const std::array<std::uint32_t, 1> value{Overwritten};
+    recorder->RecordStore(import->buffer, HostImportOffset(*import, address), std::as_bytes(std::span(value)), address);
+    recorder->FlushStoresOverlapping(address, 4u);
+    const auto kind = mode == "shader" ? Recorder::WriteKind::ShaderBuffer : mode == "copy" ? Recorder::WriteKind::Copy : Recorder::WriteKind::Store;
+    recorder->NotePendingWrite(address, 4u, kind);
+    AgcDriver::GuestMemory::TagGpuLockThread(0);
+    if (mode == "bda") recorder->NotePendingRead(image, ImageBytes, Recorder::ReadKind::AddressBased);
+    const auto before = recorder->Submissions();
+    const auto site = mode == "flip" ? StorageTexture::FlushSite::Other : StorageTexture::FlushSite::RevalidateRead;
+    const bool eligible = mode == "store" || mode == "store_tiled" || mode == "shader";
+    const bool skipped = eligible && std::getenv("APS5_NO_INSTREAM_FLUSH") == nullptr;
+    Require(StorageTexture::FlushPending(image, ImageBytes, nullptr, mode == "flip" ? "flip" : "imported buffer region", PublishScope::Whole, nullptr, site), "in-stream flush: no results flushed");
+    Require((recorder->Submissions() == before) == skipped, "in-stream flush: unexpected CPU synchronization");
+    auto readback = std::make_shared<Buffer>(context, 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    recorder->Keep(readback);
+    const auto commands = recorder->Commands();
+    CopyBuffer(context, commands, import->buffer, HostImportOffset(*import, address), readback->Handle(), 0, 4u);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    recorder->Sync();
+    readback->Invalidate();
+    std::uint32_t seen = 0;
+    std::memcpy(&seen, readback->Bytes().data(), sizeof(seen));
+    Require(seen == (mode == "cpu" || mode == "unwatched" ? Overwritten : Stored), "in-stream flush: GPU consumer saw stale bytes");
+    return 0;
+}
+
 int RunSmallStoreRetry(AgcDriver::VulkanDevice& device, bool submitted) {
     using namespace AgcDriver::Graphics;
     if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
@@ -260,6 +316,7 @@ int main(int argc, char** argv) {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 3 && std::strcmp(argv[1], "--instream") == 0) return RunInStream(*device, argv[2]);
         if (argc == 3 && std::strcmp(argv[1], "--small-store-retry") == 0) return RunSmallStoreRetry(*device, std::strcmp(argv[2], "submitted") == 0);
         const bool watched = AgcDriver::GuestMemory::WriteWatched();
         GuestBlock guest(watched);

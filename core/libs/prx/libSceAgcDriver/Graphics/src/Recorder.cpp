@@ -3535,25 +3535,25 @@ struct FlushSyncCount {
     std::string reason;
     unsigned site;
     std::uint32_t kinds;
-    bool addressBased, sameQueue, watched, cpuOverlap, eligible;
+    bool addressBased, sameQueue, watched, cpuOverlap, eligible, inStream;
     std::uint64_t count = 0;
 };
 std::mutex flushSyncMutex;
 std::vector<FlushSyncCount> flushSyncCounts;
 }
 
-void Recorder::CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible) {
+void Recorder::CountFlushSync(const char* reason, unsigned site, const FlushWriteInfo& writes, bool watched, bool cpuOverlap, bool eligible, bool inStream) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;
     const auto queue = GuestMemory::GpuLockThreadTag();
     std::lock_guard lock(flushSyncMutex);
     for (auto& entry : flushSyncCounts) {
-        if (entry.queue == queue && entry.reason == reason && entry.site == site && entry.kinds == writes.kinds && entry.addressBased == writes.addressBased && entry.sameQueue == writes.sameQueue && entry.watched == watched && entry.cpuOverlap == cpuOverlap && entry.eligible == eligible) {
+        if (entry.queue == queue && entry.reason == reason && entry.site == site && entry.kinds == writes.kinds && entry.addressBased == writes.addressBased && entry.sameQueue == writes.sameQueue && entry.watched == watched && entry.cpuOverlap == cpuOverlap && entry.eligible == eligible && entry.inStream == inStream) {
             ++entry.count;
             return;
         }
     }
-    flushSyncCounts.push_back({queue, reason, site, writes.kinds, writes.addressBased, writes.sameQueue, watched, cpuOverlap, eligible, 1});
+    flushSyncCounts.push_back({queue, reason, site, writes.kinds, writes.addressBased, writes.sameQueue, watched, cpuOverlap, eligible, inStream, 1});
 }
 
 std::string Recorder::FlushSyncReport() {
@@ -3561,7 +3561,7 @@ std::string Recorder::FlushSyncReport() {
     std::string result;
     for (const auto& entry : flushSyncCounts) {
         char text[320];
-        std::snprintf(text, sizeof(text), " q%x/%s/site%u/kinds%x/bda%d/same%d/watch%d/cpu%d/eligible%d=%llu", entry.queue, entry.reason.c_str(), entry.site, entry.kinds, entry.addressBased, entry.sameQueue, entry.watched, entry.cpuOverlap, entry.eligible, static_cast<unsigned long long>(entry.count));
+        std::snprintf(text, sizeof(text), " q%x/%s/site%u/kinds%x/bda%d/same%d/watch%d/cpu%d/eligible%d/stream%d=%llu", entry.queue, entry.reason.c_str(), entry.site, entry.kinds, entry.addressBased, entry.sameQueue, entry.watched, entry.cpuOverlap, entry.eligible, entry.inStream, static_cast<unsigned long long>(entry.count));
         result += text;
     }
     return result;
