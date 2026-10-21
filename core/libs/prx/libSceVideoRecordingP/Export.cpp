@@ -12,6 +12,7 @@
 namespace {
 std::mutex g_infoMutex;
 std::map<int32_t, std::vector<unsigned char>> g_info;
+constexpr int SceVideoRecordingStatusNone = 0;
 }
 
 extern "C" {
@@ -63,8 +64,7 @@ int APS5_VABI sceVideoRecordingGetInfoByHandle(int handle, int32_t info, void* d
 }
 
 int APS5_VABI sceVideoRecordingGetStatus(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return SceVideoRecordingStatusNone;
 }
 
 int APS5_VABI sceVideoRecordingGetSupportInfo(void* info) {

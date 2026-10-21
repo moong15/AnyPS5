@@ -145,13 +145,11 @@ int APS5_VABI sceNpAuthWaitAsync(int req_id, int* result) {
 }
 
 int APS5_VABI sceNpAuthGetAuthorizationCodeA(int req_id, const void* param, void* auth_code, int* issuer_id) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNpAuthGetAuthorizationCodeV3(req_id, param, auth_code, issuer_id);
 }
 
 int APS5_VABI sceNpAuthGetIdTokenA(int req_id, const void* param, void* token) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNpAuthGetIdTokenV3(req_id, param, token);
 }
 
 }

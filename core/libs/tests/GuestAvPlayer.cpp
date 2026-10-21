@@ -1596,9 +1596,9 @@ void TestVideoSyncTolerance() {
     Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }), "sync tolerance first frame missing");
     Check(FrameIndex(frame.timestamp) == 0, "first frame not index 0");
     AvPlayer::SetAvPlayerClockForTest_nid_no_patch(player, 5.0);
-    Check(!sceAvPlayerGetVideoDataEx(player, &frame), "frame beyond sync tolerance delivered prematurely");
+    Check(!WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }, 200), "frame beyond sync tolerance delivered prematurely");
     AvPlayer::SetAvPlayerClockForTest_nid_no_patch(player, 10.0);
-    Check(sceAvPlayerGetVideoDataEx(player, &frame), "frame within sync tolerance was not delivered");
+    Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }), "frame within sync tolerance was not delivered");
     Check(FrameIndex(frame.timestamp) == 1, "unexpected second frame index");
     Check(sceAvPlayerClose(player) == 0, "sync tolerance close failed");
     std::lock_guard lock(allocations.mutex);

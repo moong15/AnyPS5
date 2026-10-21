@@ -287,6 +287,17 @@ static void CheckStrictMemoryProtectionBits() {
     Require(sceKernelReleaseDirectMemory(physical, length) == 0);
 }
 
+static void CheckPosixMprotectIgnoresUndefinedBits() {
+    constexpr std::size_t length = 0x4000;
+    auto* mapping = static_cast<volatile unsigned char*>(mmap_nid_postfix(nullptr, length, 3, 0x1002, -1, 0));
+    Require(mapping != reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1)));
+    Require(mprotect_nid_postfix(const_cast<unsigned char*>(mapping), length, static_cast<int>(0xfffffff2u)) == 0);
+    mapping[length - 1] = 5;
+    Require(mapping[length - 1] == 5);
+    Require(mprotect_nid_postfix(const_cast<unsigned char*>(mapping), length, 0x8 | 0x3) == 0);
+    Require(munmap_nid_postfix(const_cast<unsigned char*>(mapping), length) == 0);
+}
+
 static void CheckInternalNamedFlexibleMapping() {
     constexpr std::size_t length = 0x10000;
     std::size_t before = 0;
@@ -3289,6 +3300,7 @@ int main(int argc, char** argv) {
     CheckAudioCoprocessorProtection();
     CheckMprotectIgnoresUndefinedBits();
     CheckStrictMemoryProtectionBits();
+    CheckPosixMprotectIgnoresUndefinedBits();
     CheckDirectMemoryFollowsPhysicalPages();
     CheckSparseDirectMemoryBacking();
     CheckSavedDirectMemorySurvivesCachePressure();
@@ -3381,6 +3393,14 @@ int main(int argc, char** argv) {
     reject(page, 3, 0x1012, -1, 0, 22);
     reject(page, 3, 0x2, 0, 0, 45);    // file-backed
     reject(page, 3, 0x22, -1, 0, 45);  // Linux MAP_ANON is not guest MAP_ANON
+    reject(page, 3, 0x1003, -1, 0, 22);
+    reject(page, 3, 0x3, 0, 0, 22);
+    auto* anonymousOnly = static_cast<volatile unsigned char*>(mmap_nid_postfix(nullptr, page, 3, 0x1000, -1, 0));
+    Require(anonymousOnly != failed && (reinterpret_cast<std::uintptr_t>(anonymousOnly) & (page - 1)) == 0);
+    anonymousOnly[page - 1] = 7;
+    Require(anonymousOnly[page - 1] == 7 && anonymousOnly[0] == 0);
+    Require(munmap_nid_postfix(const_cast<unsigned char*>(anonymousOnly), page) == 0);
+    reject(page, 3, 0x1000, 0, 0, 22);
 
     auto* memory = static_cast<unsigned char*>(mmap_nid_postfix(nullptr, page * 3 - 1, 3, 0x1002, -1, 0));
     Require(memory != failed && (reinterpret_cast<std::uintptr_t>(memory) & (page - 1)) == 0);

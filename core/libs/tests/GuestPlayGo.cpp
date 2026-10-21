@@ -17,6 +17,7 @@ int APS5_VABI scePlayGoInitialize(const PlayGoInitParams*);
 int APS5_VABI scePlayGoOpen(int*, const void*);
 int APS5_VABI scePlayGoClose(int);
 int APS5_VABI scePlayGoGetLanguageMask(int, std::uint64_t*);
+int APS5_VABI scePlayGoSetLanguageMask(int, std::uint64_t);
 int APS5_VABI scePlayGoGetSupportedOptionalChunk(int, std::int32_t, PlayGoOptionalChunk*);
 int APS5_VABI scePlayGoGetOptionalChunk(int, std::int32_t, PlayGoOptionalChunk*);
 int APS5_VABI scePlayGoSetToDoList(int, const PlayGoToDo*, std::uint32_t);
@@ -102,6 +103,12 @@ static int CheckNoPlayGoFile(const char* root) {
     std::uint64_t mask = 0;
     Require(scePlayGoGetLanguageMask(handle + 1, &mask) == badHandle);
     Require(scePlayGoGetLanguageMask(handle, nullptr) == badPointer);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
+    Require(scePlayGoSetLanguageMask(handle + 1, 0x5) == badHandle);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
+    Require(scePlayGoSetLanguageMask(handle, 0x5) == 0);
+    Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == 0x5);
+    Require(scePlayGoSetLanguageMask(handle, ~0ull) == 0);
     Require(scePlayGoGetLanguageMask(handle, &mask) == 0 && mask == ~0ull);
 
     for (const auto getOptionalChunk : {scePlayGoGetSupportedOptionalChunk, scePlayGoGetOptionalChunk}) {

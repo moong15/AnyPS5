@@ -62,6 +62,7 @@ public:
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     std::string DeviceName() const;
     std::string DriverInfo() const;
+    bool SupportsImageFormat(VkFormat format, VkImageUsageFlags usage) const;
     bool CalibrateClock(double& gpuNs, std::chrono::steady_clock::time_point& cpu) const;
     ShaderRecompiler::SpirvTarget Target() const;
     Graphics::SampleOrder HostSampleOrder(const Graphics::State& graphics) const;

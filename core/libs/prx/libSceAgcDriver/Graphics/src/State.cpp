@@ -281,7 +281,9 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
     const auto opValue = refMask >> 24u;
     auto reference = test;
     auto fixed = compare == 0 || compare == 7 ? 0u : face.compareMask;
-    const auto convert = [&](std::uint32_t op) {
+    std::uint32_t invertMask = 0;
+    std::uint32_t inverted = 0;
+    const auto convert = [&](std::uint32_t op, bool testFailed) {
         if (face.writeMask == 0) return VK_STENCIL_OP_KEEP;
         char detail[112];
         if (opValExport && ((op == 4 && !opValReference) || op == 5 || op == 6 || op == 8 || op == 9)) {
@@ -304,6 +306,16 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
                 }
                 const auto value = op == 2 ? 0xffu : op == 3 ? test : opValue;
                 if (((reference ^ value) & fixed & face.writeMask) != 0) {
+                    const auto compared = test & face.compareMask;
+                    const bool passKnown = compare == 2 || (compare == 3 && compared == face.compareMask) || (compare == 6 && compared == 0u);
+                    const bool failKnown = compare == 5 || (compare == 1 && compared == 0u) || (compare == 4 && compared == face.compareMask);
+                    const bool testValueKnown = testFailed ? failKnown : passKnown;
+                    const auto flipped = (test ^ value) & face.writeMask;
+                    if (testValueKnown && (face.writeMask & ~face.compareMask) == 0 && (invertMask == 0 || invertMask == flipped)) {
+                        invertMask = flipped;
+                        ++inverted;
+                        return VK_STENCIL_OP_INVERT;
+                    }
                     std::snprintf(detail, sizeof(detail), "AGC graphics: stencil replacement 0x%02x against test value 0x%02x (masks 0x%02x/0x%02x) is unsupported", value, test, face.compareMask, face.writeMask);
                     throw std::runtime_error(detail);
                 }
@@ -326,9 +338,14 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
                 throw std::runtime_error(detail);
         }
     };
-    face.failOp = convert(ops & 0xfu);
-    face.passOp = convert((ops >> 4u) & 0xfu);
-    face.depthFailOp = convert((ops >> 8u) & 0xfu);
+    face.failOp = convert(ops & 0xfu, true);
+    face.passOp = convert((ops >> 4u) & 0xfu, false);
+    face.depthFailOp = convert((ops >> 8u) & 0xfu, false);
+    if (invertMask != 0) {
+        const auto active = ((ops & 0xfu) != 0u) + (((ops >> 4u) & 0xfu) != 0u) + (((ops >> 8u) & 0xfu) != 0u);
+        if (inverted != active) throw std::runtime_error("AGC graphics: a stencil replacement drawn as an inversion beside another stencil operation is unsupported");
+        face.writeMask = invertMask;
+    }
     face.reference = reference;
     Require(!opValReference || compare == 0 || compare == 7 || face.compareMask == 0, "a stencil compare against the test value is unsupported with a pixel shader that exports the stencil operation value");
     return face;
@@ -1289,7 +1306,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     if (depthKeepsSampleZero && (read(cx, 0x292) & 1u) == 0) {
         const bool filled = result.topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
         const auto sampleInputs = read(cx, 0x1b3) & read(cx, 0x1b4) & (ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::Ancillary) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::SampleCoverage));
-        Require(filled && !result.alphaToCoverage && (PixelProgramSkipped(queue) || ((read(cx, 0x293) & PixelShaderIteratesSamples) == 0 && sampleInputs == 0)) && (read(cx, 0x203) & 0x100u) == 0 && (read(cx, 0x201) & 0x0f0c0000u) == 0, "a one-sample depth target under a multisampled rasterizer without MSAA_ENABLE is unsupported for points or lines and with alpha-to-coverage, PS_ITER_SAMPLE, a sample index or coverage input, a sample-mask export, or DB_EQAA Z interpolation or overrasterization");
+        Require(filled && !result.alphaToCoverage && (PixelProgramSkipped(queue) || sampleInputs == 0) && (read(cx, 0x203) & 0x100u) == 0 && (read(cx, 0x201) & 0x0f0c0000u) == 0, "a one-sample depth target under a multisampled rasterizer without MSAA_ENABLE is unsupported for points or lines and with alpha-to-coverage, a sample index or coverage input, a sample-mask export, or DB_EQAA Z interpolation or overrasterization");
         result.samples = 1;
         result.customSampleLocations = false;
         result.sampleLocations.fill(0);

@@ -93,6 +93,7 @@ def git(*args, text=True):
 class Check:
     def __init__(self, base, head):
         self.head = head
+        self.target = base
         self.base = git("merge-base", base, head).strip()
         self.findings = []
         self.added = defaultdict(list)
@@ -361,7 +362,10 @@ class Check:
         reads = set()
         for line in result.stdout.splitlines():
             reads.update(match.group("name") for _, match in env_reference.line_reads(line))
-        documented = set(env_reference.documented_pattern(env_reference.PREFIXES).findall(self.show(doc))) if doc in self.tree else set()
+        pattern = env_reference.documented_pattern(env_reference.PREFIXES)
+        documented = set(pattern.findall(self.show(doc))) if doc in self.tree else set()
+        if git("ls-tree", "--name-only", self.target, "--", doc).strip() == doc:
+            documented |= set(pattern.findall(git("show", f"{self.target}:{doc}"))) - dropped
         for name, (source, line) in sorted(added.items()):
             if name not in documented:
                 self.report("env-reference", source, line, f"{name} is read here but has no row in {doc}")

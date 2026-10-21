@@ -128,4 +128,69 @@ int APS5_VABI sceRazorCpuEndLogicalFileAccess(void) {
  return 0;
 }
 
+int APS5_VABI sceRazorCpuFiberLogNameChange(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuFiberSwitch(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuGpuMarkerSync(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuInitializeGpuMarkerContext(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuInitializeInternal(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuSetPopMarkerCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuSetPushMarkerCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuSetPushMarkerStaticCallback(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuStartCaptureInternal(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuStopCaptureInternal(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuWorkloadRunBegin(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuWorkloadRunEnd(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRazorCpuWorkloadSubmit(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }
