@@ -118,6 +118,9 @@ def syntax_only(entry, source):
 def syntax_arguments(arguments, directory, source):
     if not isinstance(arguments, list) or not arguments or any(not isinstance(argument, str) for argument in arguments) or not arguments[0]:
         raise ValueError("arguments must be a nonempty list of strings with an executable")
+    for argument in arguments[1:]:
+        if argument.startswith("@"):
+            raise ValueError(f"unexpanded response file {argument[1:]}; provide expanded compile arguments before checking syntax")
     wanted = source.resolve()
     trimmed = []
     index = 0

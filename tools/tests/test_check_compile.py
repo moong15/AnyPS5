@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,35 @@ TOOL = Path(__file__).resolve().parents[1] / "check_compile.py"
 
 
 class CheckCompileTests(unittest.TestCase):
+    def test_unexpanded_response_files_cannot_rewrite_build_outputs(self):
+        compiler = shutil.which("clang")
+        if compiler is None:
+            self.skipTest("Clang is required to check compilation-fragment side effects")
+        source = self.source("unit.c")
+        outputs = [self.build / name for name in ("unit.o", "unit.d", "fragment.json")]
+        response = self.build / "unit flags.rsp"
+        response.write_text(" ".join('"' + argument + '"' for argument in
+                                    ("-c", source.as_posix(), "-MMD", "-MF", outputs[1].as_posix(),
+                                     "-MJ", outputs[2].as_posix(), "-o", outputs[0].as_posix())), encoding="utf-8")
+        arguments = [compiler, "@" + str(response)]
+        original = subprocess.run(arguments, cwd=self.build, capture_output=True, text=True)
+        self.assertEqual(original.returncode, 0, original.stderr)
+        preserved = {path: path.read_bytes() for path in [source, response, *outputs]}
+        for field in ("arguments", "command"):
+            for jobs in ("1", "2"):
+                with self.subTest(field=field, jobs=jobs):
+                    command = (subprocess.list2cmdline(arguments) if os.name == "nt" else
+                               " ".join(shlex.quote(argument) for argument in arguments))
+                    self.manifest([{"directory": str(self.build), "file": str(source),
+                                    field: arguments if field == "arguments" else command}])
+                    result = self.tool("--jobs", jobs, "unit.c")
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertIn("unexpanded response file", result.stderr)
+                    self.assertIn(str(response), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    for path, content in preserved.items():
+                        self.assertEqual(path.read_bytes(), content)
+
     def test_dependency_options_do_not_make_syntax_checks_fail_or_rewrite_outputs(self):
         compiler = shutil.which("clang")
         if compiler is None:
