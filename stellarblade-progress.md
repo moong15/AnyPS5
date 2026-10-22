@@ -962,3 +962,8 @@ fps12 = sb5 0198a83f3, "perf(agc): expand single-key DCC storage uploads on the 
 - Tonight's candidates: none stacked. instream and rol remove 0 waits (counter runs 497/498). combo2 -8%, pdw -17% (2 test fails), dcache2 -11% (1 test fail). Label gate + drain (B) is -35% warm but 2.6x presents cold.
 - sb5 drifts over a night: 933 -> 729 presents, 811 -> 988 draws/frame. Compare only within interleaved same-session pairs. The specialized shader cache sits at its 65536-entry cap and evicts ~5.8k entries per run.
 - Crash: run539 corrupt UObject hash with an RGBA16F texel as a pointer (GPU write-back into reused CPU memory; H2 favoured). Writer not found yet.
+
+## 2026-10-22 08:40
+- sb5 = e0e46198f (m14 + instream-dcc). DCC storage images now take the in-stream flush (GPU-recorded uncompressed key store), so the committer's Recorder.Sync falls from 6.2 to 0.6 ms/frame. run651 vs run641: +2.8% fps, +6.4% draws/s, p99 −4.6%. Libs: E:\StellarBlade\libs-idcc-e0e46198f with exe m14-9ec682746.
+- Sol out (weekly limit) until 2026-10-27 15:35; delegation is on .claude-third (same quota as this session).
+- Open: evictwb crash fix (c3 job running), speccache and gpubusy analyses (queued on c3).
