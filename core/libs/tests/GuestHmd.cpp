@@ -42,10 +42,10 @@ void CheckHandleQueries(std::int32_t expected) {
     std::memset(sensor, 0x5a, sizeof(sensor));
     for (const auto handle : {0, -1, 1, 0x0f000000}) {
         Require(sceHmdGetFieldOfView(handle, nullptr) == Hmd::ParameterNull, "null field of view accepted");
-        Require(sceHmdGetFieldOfView(handle, fieldOfView) == expected, "field of view without a headset");
-        Require(sceHmdGet2DEyeOffset(handle, left, right) == expected, "eye offset without a headset");
+        Require(sceHmdGetFieldOfView(handle, reinterpret_cast<HmdFieldOfView*>(fieldOfView)) == expected, "field of view without a headset");
+        Require(sceHmdGet2DEyeOffset(handle, reinterpret_cast<HmdEyeOffset*>(left), reinterpret_cast<HmdEyeOffset*>(right)) == expected, "eye offset without a headset");
         Require(sceHmdGet2DEyeOffset(handle, nullptr, nullptr) == expected, "eye offset with null outputs");
-        Require(sceHmdGetInertialSensorData(handle, sensor, 1) == expected, "sensor data without a headset");
+        Require(sceHmdGetInertialSensorData(handle, reinterpret_cast<HmdInertialSensorData*>(sensor), 1) == expected, "sensor data without a headset");
     }
     for (const auto* bytes : {left, right, fieldOfView}) {
         for (std::size_t index = 0; index < 16; ++index) Require(bytes[index] == 0x5a, "a refused query wrote its output");
@@ -57,7 +57,7 @@ void CheckAssyError(std::int32_t expected) {
     unsigned char data[32];
     std::memset(data, 0x5a, sizeof(data));
     Require(sceHmdGetAssyError(nullptr) == Hmd::ParameterNull, "null assembly error output accepted");
-    Require(sceHmdGetAssyError(data) == expected, "assembly error query without a headset");
+    Require(sceHmdGetAssyError(reinterpret_cast<HmdAssemblyError*>(data)) == expected, "assembly error query without a headset");
     for (const auto byte : data) Require(byte == 0x5a, "a refused assembly error query wrote its output");
 }
 

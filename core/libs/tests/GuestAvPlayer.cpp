@@ -21,6 +21,7 @@
 #include <thread>
 #include <vector>
 #include "SceTypes.hpp"
+#include "prx/libSceAvPlayer/include/AvPlayer.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libSceAvPlayer/include/AvPlayer.hpp"
 
@@ -37,7 +38,7 @@ int APS5_VABI sceAvPlayerEnableStream(AvPlayerInternal*, std::uint32_t);
 int APS5_VABI sceAvPlayerChangeStream(AvPlayerInternal*, std::uint32_t, std::uint32_t);
 int APS5_VABI sceAvPlayerSetAvailableBandwidth(AvPlayerInternal*, std::uint32_t, std::uint32_t, std::uint32_t);
 int APS5_VABI sceAvPlayerStart(AvPlayerInternal*);
-int APS5_VABI sceAvPlayerStartEx(AvPlayerInternal*, const void*);
+int APS5_VABI sceAvPlayerStartEx(AvPlayerInternal*, const AvPlayer::StartInfo*);
 int APS5_VABI sceAvPlayerStop(AvPlayerInternal*);
 int APS5_VABI sceAvPlayerPause(AvPlayerInternal*);
 int APS5_VABI sceAvPlayerResume(AvPlayerInternal*);
@@ -1072,11 +1073,22 @@ void TestExtendedExports() {
     CheckStreamInfoEx(player);
     Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "enable video failed");
     Check(sceAvPlayerStartEx(nullptr, nullptr) == InvalidParams, "start accepted a null player");
-    Check(sceAvPlayerStartEx(player, nullptr) == 0, "extended start failed");
+    Check(sceAvPlayerStartEx(player, nullptr) == InvalidParams, "start accepted null parameters");
+    AvPlayer::StartInfo startInfo{0, 700};
+    Check(sceAvPlayerStartEx(player, &startInfo) == InvalidParams, "start accepted an invalid parameter size");
+    startInfo.size = sizeof(startInfo);
+    Check(sceAvPlayerStartEx(player, &startInfo) == 0, "extended start failed");
     Check(WaitFor([&] { return events.Seen(EventPlay); }), "play event missing");
     AvPlayerFrameInfoEx frame{};
     Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }), "no frame after the extended start");
     CheckVideoFrame(frame);
+    Check(frame.timestamp >= 700 && frame.timestamp <= 767, "extended start ignored the requested position");
+    Check(!events.Seen(EventWarning, JumpComplete), "extended start reported a jump");
+    Check(sceAvPlayerStop(player) == 0, "extended stop failed");
+    startInfo.startTime = 0;
+    Check(sceAvPlayerStartEx(player, &startInfo) == 0, "extended restart failed");
+    Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }), "no frame after extended restart");
+    Check(frame.timestamp <= 67, "zero-position start did not restart playback");
     Check(sceAvPlayerClose(player) == 0, "close failed");
 }
 

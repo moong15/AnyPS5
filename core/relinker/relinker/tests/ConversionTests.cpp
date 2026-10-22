@@ -132,14 +132,22 @@ void fixedBase() {
     const Relinker::Conversion converter(progress);
     auto source = input();
     source.Modules.push_back({"virtual/title/sce_module/plugin.prx", fixture()});
-    const auto plain = converter.Convert(source, {});
+    const auto standard = converter.Convert(source, {});
+    Relinker::ConversionOptions lazy;
+    lazy.LazyBinding = true;
+    const auto independent = converter.Convert(input(), lazy);
     Relinker::ConversionOptions options;
     options.LinuxFixedBase = 0x400000000;
     const auto fixed = converter.Convert(source, options);
-    require(Io::ReadU16(plain.Executable, 16) == 3 && Io::ReadU16(fixed.Executable, 16) == 2, "Fixed base did not select ET_EXEC");
-    require(Io::ReadU64(fixed.Executable, 24) == Io::ReadU64(plain.Executable, 24) + *options.LinuxFixedBase, "Fixed entry was not rebased above 4 GiB");
-    require(fixed.Modules.front().Bytes == plain.Modules.front().Bytes, "Executable fixed base changed a bundled module");
+    require(Io::ReadU16(standard.Executable, 16) == 2 && Io::ReadU16(fixed.Executable, 16) == 2, "Fixed base did not select ET_EXEC");
+    require(Io::ReadU16(independent.Executable, 16) == 3, "Lazy binding did not keep ET_DYN");
+    require(standard.LinuxBase == 0x400000 && fixed.LinuxBase == *options.LinuxFixedBase && !independent.LinuxBase, "Conversion reported the wrong Linux base");
+    require(Io::ReadU64(fixed.Executable, 24) == Io::ReadU64(standard.Executable, 24) + *options.LinuxFixedBase - 0x400000, "Fixed entry was not rebased above 4 GiB");
+    require(fixed.Modules.front().Bytes == standard.Modules.front().Bytes, "Executable fixed base changed a bundled module");
     for (const auto target : {Relinker::TargetSystem::Windows, Relinker::TargetSystem::MacOs}) {
+        Relinker::ConversionOptions other;
+        other.Target = target;
+        require(!converter.Convert(source, other).LinuxBase, "A non-Linux conversion reported a Linux base");
         options.Target = target;
         reject([&] { converter.Convert(source, options); });
     }

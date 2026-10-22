@@ -40,6 +40,7 @@ int APS5_VABI fgetc_nid_postfix(FileStream* stream) {
     if (!stream->SwitchToReading()) return -1;
     const int result = std::fgetc(native);
     stream->SyncStatus();
+    stream->KeepDirectoryReadError(result == -1);
     return result;
 }
 std::int32_t APS5_VABI fgetwc_nid_postfix(FileStream* stream) {
@@ -95,6 +96,7 @@ int APS5_VABI getc_unlocked_nid_postfix(FileStream* stream) {
     const int result = ::getc_unlocked(native);
 #endif
     stream->SyncUnlockedStatus();
+    stream->KeepDirectoryReadError(result == -1);
     return result;
 }
 int APS5_VABI __srget_nid_postfix(FileStream* stream) { return fgetc_nid_postfix(stream); }
@@ -143,6 +145,7 @@ char* APS5_VABI fgets_nid_postfix(char* buffer, int size, FileStream* stream) {
     if (!stream->SwitchToReading()) return nullptr;
     auto* result = std::fgets(buffer, size, native);
     stream->SyncStatus();
+    stream->KeepDirectoryReadError(result == nullptr);
     return result;
 }
 int APS5_VABI feof_nid_postfix(FileStream* stream) {

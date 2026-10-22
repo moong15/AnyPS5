@@ -2873,7 +2873,7 @@ bool RunSparseBufferHoleTests(const Context& context, const BdaTestAccess& acces
                 std::memset(reservation.data + 2 * unit, 0x72, unit);
                 VkBuffer seeded = VK_NULL_HANDLE;
                 {
-                    Buffer seed(context, copied, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                    Buffer seed(context, copied, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
                     std::fill(seed.Bytes().begin(), seed.Bytes().end(), std::byte{0xa5});
                     seeded = seed.Handle();
                 }

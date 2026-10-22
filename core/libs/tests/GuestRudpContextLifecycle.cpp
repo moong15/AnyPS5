@@ -13,7 +13,7 @@ extern "C" {
 using GuestRudpEventHandler = void(APS5_VABI*)(int, int, int, void*);
 int APS5_VABI sceRudpInit_nid_postfix(void*, int);
 int APS5_VABI sceRudpEnd();
-int APS5_VABI sceRudpActivate();
+int APS5_VABI sceRudpActivate(std::int32_t, const void*, std::uint32_t);
 int APS5_VABI sceRudpEnableInternalIOThread(std::uint32_t, std::uint32_t);
 int APS5_VABI sceRudpSetEventHandler(GuestRudpEventHandler, void*);
 int APS5_VABI sceRudpCreateContext(GuestRudpEventHandler, void*, int*);
@@ -113,7 +113,7 @@ int main() {
     constexpr int connReset = static_cast<int>(0x80770009u);
     alignas(16) static unsigned char pool[0x10000];
 
-    Require(sceRudpActivate() == 0);
+    Require(sceRudpActivate(-1, nullptr, 0) == static_cast<int>(0x80770001));
 
     Require(sceRudpEnableInternalIOThread(0, 0) == notInitialized);
 
@@ -143,7 +143,7 @@ int main() {
 
     Require(sceRudpInit_nid_postfix(pool, sizeof(pool)) == 0);
 
-    Require(sceRudpActivate() == 0);
+    Require(sceRudpActivate(-1, nullptr, 0) == static_cast<int>(0x80770004));
 
     Require(sceRudpEnableInternalIOThread(0, 0) == 0);
     Require(sceRudpEnableInternalIOThread(1024, 1) == 0);
@@ -169,6 +169,17 @@ int main() {
     int ctx = -1;
     Require(sceRudpCreateContext(Handler, nullptr, &ctx) == 0);
     Require(ctx >= 0);
+
+    Require(sceRudpActivate(ctx, nullptr, 0) == static_cast<int>(0x80770004));
+    unsigned char address[34]{};
+    Require(sceRudpActivate(-1, address, sizeof(address)) == static_cast<int>(0x80770004));
+    bool activationUnsupported = false;
+    try {
+        sceRudpActivate(ctx, address, sizeof(address));
+    } catch (const std::runtime_error&) {
+        activationUnsupported = true;
+    }
+    Require(activationUnsupported);
 
     Require(sceRudpBind(ctx, 0, 0, 0) == 0);
 

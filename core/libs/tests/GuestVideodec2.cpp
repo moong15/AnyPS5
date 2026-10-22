@@ -678,6 +678,51 @@ std::uint64_t frameBufferBytes() {
     return memory.maxFrameBufferSize;
 }
 
+void testEmptyAccessUnit() {
+    constexpr int AccessUnitSizeError = static_cast<int>(0x811D010Du);
+    constexpr int AccessUnitPointerError = static_cast<int>(0x811D010Eu);
+    std::vector<std::uint8_t> buffer(frameBufferBytes());
+    const auto handle = createDecoder(CodecHevc, 1);
+    const auto units = hevcUnits(HevcStream.data(), HevcStream.size());
+    std::size_t pictures = 0;
+    const auto take = [&](const OutputInfo& output, const FrameBuffer& frame) {
+        check(output.isValid == frame.isAccepted, "frame buffer acceptance disagrees with the output");
+        if (!output.isValid) return false;
+        check(pictures < HevcHashes.size(), "more pictures than access units");
+        check(hashNv12(buffer.data(), output.framePitch, output.frameHeight) == HevcHashes[pictures], "picture " + std::to_string(pictures) + " differs from the reference after a refused access unit");
+        ++pictures;
+        return true;
+    };
+    const auto refuse = [&](const std::uint8_t* data, std::uint64_t size, int expected, const char* message) {
+        const InputData input{sizeof(InputData), data, size, 2000, 0, 0};
+        FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size(), true};
+        OutputInfo output{sizeof(OutputInfo)};
+        output.isValid = true;
+        output.pictureCount = 1;
+        check(sceVideodec2Decode_nid_postfix(handle, &input, &frame, &output) == expected, message);
+        check(!output.isValid && output.pictureCount == 0 && !frame.isAccepted, "a refused access unit handed out a picture");
+    };
+    for (std::size_t unit = 0; unit < units.size(); ++unit) {
+        if (unit == 2) {
+            refuse(units[unit].data(), 0, AccessUnitSizeError, "an empty access unit did not return ACCESS_UNIT_SIZE");
+            refuse(nullptr, units[unit].size(), AccessUnitPointerError, "a null access unit did not return ACCESS_UNIT_POINTER");
+        }
+        const InputData input{sizeof(InputData), units[unit].data(), units[unit].size(), 1000 + unit, unit, 0};
+        FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size(), false};
+        OutputInfo output{sizeof(OutputInfo)};
+        check(sceVideodec2Decode_nid_postfix(handle, &input, &frame, &output) == 0, "decode failed");
+        take(output, frame);
+    }
+    for (;;) {
+        FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size(), false};
+        OutputInfo output{sizeof(OutputInfo)};
+        check(sceVideodec2Flush_nid_postfix(handle, &frame, &output) == 0, "flush failed");
+        if (!take(output, frame)) break;
+    }
+    check(pictures == HevcHashes.size(), "refused access units cost pictures");
+    check(sceVideodec2DeleteDecoder_nid_postfix(handle) == 0, "delete failed");
+}
+
 void testDecodeAfterFlush() {
     std::vector<std::uint8_t> buffer(frameBufferBytes());
     const auto handle = createDecoder(1, 100);
@@ -845,6 +890,7 @@ int main() {
         testVp9PictureMetadata();
         testTenBit();
         testDecodeAfterFlush();
+        testEmptyAccessUnit();
         testPictureOwnership();
         testConcurrentOwnership();
         std::puts("Videodec2 tests passed");

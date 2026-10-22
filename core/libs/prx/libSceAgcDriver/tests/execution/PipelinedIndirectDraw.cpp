@@ -202,20 +202,34 @@ void Flush(const std::array<std::byte, 1024>& memory) {
 }
 
 struct Blocker {
-    std::atomic<bool> release{false};
+    struct State {
+        std::atomic<bool> release{false};
+        std::atomic<bool> done{false};
+    };
+    std::shared_ptr<State> state = std::make_shared<State>();
+    void Release() { state->release = true; }
     void Enqueue() {
-        DrawPipeline::Queue0().Enqueue([this] {
-            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            std::lock_guard gpuLock(AgcDriver::GuestMemory::GpuMutex());
+        DrawPipeline::Queue0().Enqueue([state = state] {
+            while (!state->release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            { std::lock_guard gpuLock(AgcDriver::GuestMemory::GpuMutex()); }
+            state->done = true;
         }, {}, 0, {}, {}, true);
+    }
+    void Join() const {
+        const auto start = std::chrono::steady_clock::now();
+        while (!state->done.load()) {
+            Require(std::chrono::steady_clock::now() - start < std::chrono::seconds(20), "the blocker never ran");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
 };
 
-void SubmitBehind(Blocker& blocker, std::vector<std::uint32_t>& commands) {
+void SubmitBehind(Blocker& blocker, std::vector<std::uint32_t>& commands, std::size_t queuedBefore) {
     std::unique_lock gpuLock(AgcDriver::GuestMemory::GpuMutex());
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
     AgcDriver::Submit(&packet, 0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto start = std::chrono::steady_clock::now();
+    while (DrawPipeline::Queue0().Outstanding() < queuedBefore && std::chrono::steady_clock::now() - start < std::chrono::seconds(60)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     blocker.Enqueue();
 }
 
@@ -234,14 +248,15 @@ void WaitForItems(std::size_t items, Blocker& blocker, const std::string& what) 
     while (DrawPipeline::Queue0().Outstanding() < items) {
         if (std::chrono::steady_clock::now() - start > WaitSeconds) {
             const auto outstanding = DrawPipeline::Queue0().Outstanding();
-            blocker.release = true;
+            blocker.Release();
             Finish();
             Require(false, what + " (" + std::to_string(outstanding) + " items outstanding, expected " + std::to_string(items) + ")");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    blocker.release = true;
+    blocker.Release();
     Finish();
+    blocker.Join();
 }
 
 void DrawDirectReference() {
@@ -284,14 +299,16 @@ void IndirectDrawsQueueBehindTheCommitter() {
     AppendTarget(commands, SecondMemory, Clipped);
     AppendIndirect(commands);
     Blocker blocker;
-    SubmitBehind(blocker, commands);
-    if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+    if (PipelinedIndirectDisabled()) {
+        SubmitBehind(blocker, commands, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto outstanding = DrawPipeline::Queue0().Outstanding();
-        blocker.release = true;
+        blocker.Release();
         Finish();
+        blocker.Join();
         Require(outstanding == 1, "disabled pipelined indirect draws did not drain before reading records");
     } else {
+        SubmitBehind(blocker, commands, 3);
         WaitForItems(3, blocker, "the indirect draws drained the pipeline instead of queuing behind it");
     }
     Flush(FirstMemory);
@@ -310,12 +327,13 @@ void IndirectDrawWaitsForItsQueuedRecordWrite() {
     AppendTarget(commands, WrittenMemory, Clipped);
     AppendIndirect(commands);
     Blocker blocker;
-    SubmitBehind(blocker, commands);
+    const auto drainsBefore = DrawPipeline::DrainRequestsByOpcode(0x100);
+    SubmitBehind(blocker, commands, 1);
     const auto start = std::chrono::steady_clock::now();
-    while (DrawPipeline::Queue0().Outstanding() < 2 && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    blocker.release = true;
+    while (DrawPipeline::DrainRequestsByOpcode(0x100) == drainsBefore && std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    blocker.Release();
     Finish();
+    blocker.Join();
     Flush(WrittenMemory);
     Require(LateRecords[0] == 3, "the queued label did not store the record's vertex count");
     SameAsDirect(WrittenMemory, DirectMemory, "the indirect draw whose record a queued label wrote");
@@ -335,10 +353,11 @@ void IndirectDrawWaitsForQueuedDma() {
     AppendTarget(commands, WrittenMemory, Clipped);
     AppendIndirect(commands);
     Blocker blocker;
-    SubmitBehind(blocker, commands);
+    SubmitBehind(blocker, commands, 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    blocker.release = true;
+    blocker.Release();
     Finish();
+    blocker.Join();
     Flush(WrittenMemory);
     Require(LateRecords == Records, "queued DMA did not publish indirect records");
     SameAsDirect(WrittenMemory, DirectMemory, "indirect records written by queued DMA");
@@ -366,8 +385,9 @@ void HeldImageArgumentsDrainBeforeRead(bool gpuSide = false) {
     Require(staleCount == Records[0], "argument fixture already published its GPU results");
     WrittenMemory.fill(Kept);
     Blocker blocker;
-    DrawPipeline::Queue0().Enqueue([&] {
-        while (!blocker.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    DrawPipeline::Queue0().Enqueue([state = blocker.state] {
+        while (!state->release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        state->done = true;
     }, {}, 0, {}, gpuSide ? std::vector<DrawPipeline::Range>{} : std::vector<DrawPipeline::Range>{{0, std::numeric_limits<std::uint64_t>::max()}}, true);
     if (!gpuSide) {
         Require(DrawPipeline::HeldReads(address, sizeof(Records)), "dispatch-miss read hold was not registered");
@@ -391,8 +411,9 @@ void HeldImageArgumentsDrainBeforeRead(bool gpuSide = false) {
     while (DrawPipeline::DrainRequestsByOpcode(0x100) == drains && DrawPipeline::Queue0().Outstanding() < (gpuSide ? 3u : 2u) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const bool requestedDrain = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
     const auto outstanding = DrawPipeline::Queue0().Outstanding();
-    blocker.release = true;
+    blocker.Release();
     Finish();
+    blocker.Join();
     Flush(WrittenMemory);
     Require(requestedDrain, "pending image argument read did not request an inline drain");
     Require(outstanding == 1, "pending image argument read did not drain its read hold");
@@ -426,9 +447,10 @@ void WriteCompletenessControlsIndirectDrain(bool gds) {
     WrittenMemory.fill(Kept);
     LateRecords = gds ? std::array<std::uint32_t, 4>{0, 1, 0, 0} : Records;
     Blocker blocker;
-    DrawPipeline::Queue0().Enqueue([&] {
-        while (!blocker.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    DrawPipeline::Queue0().Enqueue([state = blocker.state, gds] {
+        while (!state->release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         if (gds) LateRecords = Records;
+        state->done = true;
     }, std::move(writes), 0, {}, std::move(reads), bounded, false, complete);
     Require(!DrawPipeline::Queue0().Overlaps(reinterpret_cast<std::uintptr_t>(LateRecords.data()), sizeof(LateRecords)), "ordinary overlap query changed for unbounded reads or incomplete writes");
     std::vector<std::uint32_t> commands;
@@ -444,8 +466,9 @@ void WriteCompletenessControlsIndirectDrain(bool gds) {
     while ((mustDrain ? DrawPipeline::DrainRequestsByOpcode(0x100) == drains : DrawPipeline::Queue0().Outstanding() < 2) && std::chrono::steady_clock::now() - start < WaitSeconds) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const bool drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
     const auto outstanding = DrawPipeline::Queue0().Outstanding();
-    blocker.release = true;
+    blocker.Release();
     Finish();
+    blocker.Join();
     Require(drained == mustDrain, "indirect drain did not depend only on write completeness");
     Require(mustDrain || outstanding >= 2, "complete writes with unbounded reads prevented indirect queuing");
     Flush(WrittenMemory);
@@ -461,14 +484,16 @@ void TrailingZeroCountRecordIsNotQueued() {
     AppendIndirectMulti(commands, 2);
     Blocker blocker;
     const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
-    SubmitBehind(blocker, commands);
     if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+        SubmitBehind(blocker, commands, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
-        blocker.release = true;
+        blocker.Release();
         Finish();
+        blocker.Join();
         Require(drained, "disabled multi-record indirect draw did not request a drain");
     } else {
+        SubmitBehind(blocker, commands, 1);
         WaitForItems(2, blocker, "a draw whose last record has no vertices queued nothing");
     }
     Flush(InlineMemory);
@@ -485,14 +510,16 @@ void OutOfRangeIndexedRecordIsNotQueued() {
     AppendIndexedIndirectMulti(commands, 2);
     Blocker blocker;
     const auto drains = DrawPipeline::DrainRequestsByOpcode(0x100);
-    SubmitBehind(blocker, commands);
     if (std::getenv("APS5_NO_PIPELINED_INDIRECT") != nullptr) {
+        SubmitBehind(blocker, commands, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto drained = DrawPipeline::DrainRequestsByOpcode(0x100) > drains;
-        blocker.release = true;
+        blocker.Release();
         Finish();
+        blocker.Join();
         Require(drained, "disabled indexed indirect draw did not request a drain");
     } else {
+        SubmitBehind(blocker, commands, 1);
         WaitForItems(2, blocker, "an indexed draw whose second record is out of range queued nothing");
     }
     Flush(IndexedMemory);
@@ -510,14 +537,16 @@ void GpuSideIndirectDrawsQueueBehindTheCommitter() {
     AppendTarget(commands, SecondMemory, 0);
     AppendGpuSideIndirect(commands);
     Blocker blocker;
-    SubmitBehind(blocker, commands);
     if (PipelinedIndirectDisabled()) {
+        SubmitBehind(blocker, commands, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto outstanding = DrawPipeline::Queue0().Outstanding();
-        blocker.release = true;
+        blocker.Release();
         Finish();
+        blocker.Join();
         Require(outstanding == 1, "disabled pipelined indirect draws queued a GPU-side indirect draw");
     } else {
+        SubmitBehind(blocker, commands, 2);
         WaitForItems(3, blocker, "the GPU-side indirect draws drained the pipeline instead of queuing behind it");
     }
     Flush(FirstMemory);
@@ -536,14 +565,16 @@ void GpuSideIndirectDrawQueuesBehindTheStoreOfItsArguments() {
     AppendTarget(commands, WrittenMemory, 0);
     AppendGpuSideIndirect(commands);
     Blocker blocker;
-    SubmitBehind(blocker, commands);
     if (PipelinedIndirectDisabled()) {
+        SubmitBehind(blocker, commands, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto outstanding = DrawPipeline::Queue0().Outstanding();
-        blocker.release = true;
+        blocker.Release();
         Finish();
+        blocker.Join();
         Require(outstanding == 1, "disabled pipelined indirect draws queued a GPU-side indirect draw behind the store of its arguments");
     } else {
+        SubmitBehind(blocker, commands, 2);
         WaitForItems(3, blocker, "a GPU-side indirect draw drained for the queued store of its arguments instead of queuing behind it");
     }
     Flush(WrittenMemory);
@@ -750,14 +781,16 @@ void IndirectBatch(const std::string& mode) {
     }
     if (committer) {
         Blocker blocker;
-        SubmitBehind(blocker, commands);
         if (PipelinedIndirectDisabled()) {
+            SubmitBehind(blocker, commands, 0);
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             const auto outstanding = DrawPipeline::Queue0().Outstanding();
-            blocker.release = true;
+            blocker.Release();
             Finish();
+            blocker.Join();
             Require(outstanding == 1, "disabled pipelined indirect batch queued draw items");
         } else {
+            SubmitBehind(blocker, commands, 2);
             WaitForItems(3, blocker, "indirect batch did not queue two separate committer items");
         }
     } else {
