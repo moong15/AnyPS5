@@ -4273,13 +4273,13 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     }
     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Writeback);
     std::lock_guard gpu(GuestMemory::GpuMutex());
+    bool skipSync = false;
     if (auto* recorder = Recorder::Active(); recorder != nullptr && !Recorder::InCompletion() && recorder->PendingWriterSerial(address, bytes) != 0) {
         try {
             recorder->Reap();
             if (const auto writer = recorder->PendingWriterSerial(address, bytes); writer == recorder->OpenSerial()) {
                 static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
                 static const bool inStream = std::getenv("APS5_NO_INSTREAM_FLUSH") == nullptr;
-                bool skipSync = false;
                 if (profile || (inStream && site != FlushSite::Other)) {
                     auto writes = recorder->DescribeFlushWrites(address, bytes);
                     bool watched = true;
@@ -4321,7 +4321,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         try {
             // Only the pending layers the access overlaps are stored; the others stay pending (the
             // store re-registers the image for them).
-            texture->writeBack(address, bytes);
+            texture->writeBack(address, bytes, skipSync);
             if (texture->smallStoreDeferred) {
                 texture->smallStoreDeferred = texture->Dirty();
                 CountSmallStore(reason, &SmallStoreCounts::later);
@@ -4332,6 +4332,11 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
     }
     flushReason = previousReason;
     if (failure) std::rethrow_exception(failure);
+    if (auto* recorder = Recorder::Active(); skipSync && recorder != nullptr) {
+        for (const auto& texture : flush) {
+            if (texture->descriptor.dccAddress != 0) recorder->FlushKeyStoresOverlapping(texture->descriptor.dccAddress, DccKeyCount(texture->descriptor, texture->guestBytes));
+        }
+    }
     // The stores above went into the unit shadows where slabs took them: the consumer reads the
     // import, so they are published under the same hold, after every store.
     if (scope != PublishScope::None) {
@@ -5887,7 +5892,7 @@ std::uint64_t StorageTexture::borrowUnits(StorageTexture& source, const std::vec
     return bytes;
 }
 
-void StorageTexture::writeBack(std::uint64_t address, std::size_t bytes) {
+void StorageTexture::writeBack(std::uint64_t address, std::size_t bytes, bool inStream) {
     // Block units are stored per access; an image whose units keep being asked for in pieces (a
     // consumer touching it through many small ranges, each piece re-arming the pending memos of
     // the next dispatch) stores every pending unit once more than `pieces` partial stores fall
@@ -5926,7 +5931,7 @@ void StorageTexture::writeBack(std::uint64_t address, std::size_t bytes) {
             coalescedWriteBacks.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    writeBackLayers(layers);
+    writeBackLayers(layers, inStream);
 }
 
 bool StorageTexture::guestBytesSettled() const {
@@ -5941,6 +5946,9 @@ const char* StorageTexture::InStreamRejectionName(InStreamRejection rejection) {
         case InStreamRejection::None: return "none";
         case InStreamRejection::Unwatched: return "unwatched";
         case InStreamRejection::Dcc: return "dcc";
+        case InStreamRejection::DccKeysCpu: return "dccKeysCpu";
+        case InStreamRejection::DccKeyWriters: return "dccKeyWriters";
+        case InStreamRejection::DccKeyAlias: return "dccKeyAlias";
         case InStreamRejection::ImportUncovered: return "importUncovered";
         case InStreamRejection::ChangedUnknown: return "changedUnknown";
         case InStreamRejection::CpuWritten: return "cpuWritten";
@@ -5954,7 +5962,17 @@ StorageTexture::InStreamRejection StorageTexture::inStreamFlushRejection(const R
     const bool tracked = GuestMemory::Watched(descriptor.baseAddress, bytes);
     watched &= tracked;
     if (!tracked) return InStreamRejection::Unwatched;
-    if (descriptor.dccAddress != 0) return InStreamRejection::Dcc;
+    if (descriptor.dccAddress != 0) {
+        static const bool inStreamDcc = std::getenv("APS5_NO_INSTREAM_DCC") == nullptr;
+        if (!inStreamDcc) return InStreamRejection::Dcc;
+        const auto keys = RecordedUncompressedKeyCount(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+        if (!keys) return InStreamRejection::DccKeysCpu;
+        const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> range{{{descriptor.dccAddress, descriptor.dccAddress + *keys}}};
+        if (AnyPendingOverlaps(range) || AnyShadowedOverlaps(range)) return InStreamRejection::DccKeyAlias;
+        constexpr auto ordered = (1u << static_cast<unsigned>(Recorder::WriteKind::Store)) | (1u << static_cast<unsigned>(Recorder::WriteKind::ShaderBuffer)) | (1u << static_cast<unsigned>(Recorder::WriteKind::Fill));
+        const auto writers = recorder.DescribeFlushWrites(descriptor.dccAddress, *keys);
+        if ((writers.kinds & ~ordered) != 0 || !writers.sameQueue || writers.addressBased) return InStreamRejection::DccKeyWriters;
+    }
     if (!HostImportCovers(context, descriptor.baseAddress, bytes)) return InStreamRejection::ImportUncovered;
     GuestMemory::CollectWritesUncached(descriptor.baseAddress, bytes);
     bool safe = true;
@@ -5985,7 +6003,13 @@ bool StorageTexture::unchangedSinceBaseline(std::uint64_t from, std::uint64_t to
     return GuestMemory::EqualsCommittedUnsynced(from, std::span<const std::byte>(baseline).subspan(offset, static_cast<std::size_t>(to - from)));
 }
 
-void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
+void StorageTexture::writeBackLayers(const std::vector<bool>& layers, bool inStream) {
+    const auto storeKeys = [&] {
+        if (IsDccClear(filledKeys) || uploadedKeys == DccKeys::Uncompressed) return;
+        const auto count = DccKeyCount(descriptor, guestBytes);
+        if (inStream) RecordDccUncompressed(context, descriptor.dccAddress, guestBytes, count);
+        else MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, count);
+    };
     CaptureTrace::Log("writeback image=%llx generation=%llu reason=%s units=%zu", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(generation), flushReason, static_cast<std::size_t>(std::count(layers.begin(), layers.end(), true)));
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
@@ -6170,7 +6194,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             if (profile) Profile().storageGpu += timer.lap();
             forgetStored();
             traceKeyStore("block write-back", descriptor, guestBytes);
-            if (!IsDccClear(filledKeys) && uploadedKeys != DccKeys::Uncompressed) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+            storeKeys();
             uploadedKeys = DccKeys::Uncompressed;
             for (const auto& [from, to] : keep) GuestMemory::MarkWritten(from, static_cast<std::size_t>(to - from));
             settle(true);
@@ -6289,7 +6313,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         // metadata is host-imported (no CPU wait for the title's key-writing kernels), else a CPU
         // store (APS5_CPU_DCC_KEYS=1 keeps the CPU store; see DccMetadata.hpp).
         traceKeyStore("layer write-back", descriptor, guestBytes);
-        if (!IsDccClear(filledKeys) && uploadedKeys != DccKeys::Uncompressed) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+        storeKeys();
         uploadedKeys = DccKeys::Uncompressed;
         for (const auto& [from, to] : keep) GuestMemory::MarkWritten(from, static_cast<std::size_t>(to - from));
         // The walk covers this surface's pages only: an adjacent image's later CPU write is stamped
@@ -6427,7 +6451,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // The texels now hold the whole image, so later reads must see them rather than a fast clear
     // (the keys may be host-imported although the texels were not: then a recorded fill, else a CPU store).
     traceKeyStore("cpu write-back", descriptor, guestBytes);
-    if (!IsDccClear(filledKeys) && uploadedKeys != DccKeys::Uncompressed) MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+    storeKeys();
     uploadedKeys = DccKeys::Uncompressed;
     // The store above is the only write to these pages, so `original` is current at a fresh
     // generation, unless blocks were kept for the CPU: then the image is stale there.

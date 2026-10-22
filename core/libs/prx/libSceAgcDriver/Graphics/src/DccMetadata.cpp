@@ -664,6 +664,22 @@ void MarkDccUncompressed(const Context& context, std::uint64_t metaAddress, std:
     StoreUncompressedOnCpu(metaAddress, count);
 }
 
+void RecordDccUncompressed(const Context& context, std::uint64_t metaAddress, std::uint64_t surfaceBytes, std::size_t keyCount) {
+    const auto count = RecordedUncompressedKeyCount(context, metaAddress, surfaceBytes, keyCount);
+    Require(count.has_value(), "DCC in-stream write-back requires aligned GPU key stores and a complete metadata import");
+    if (*count == 0) return;
+    Require(StoreUncompressedOnGpu(context, *Recorder::Active(), metaAddress, *count), "DCC in-stream write-back lost its metadata import");
+}
+
+std::optional<std::size_t> RecordedUncompressedKeyCount(const Context& context, std::uint64_t metaAddress, std::uint64_t surfaceBytes, std::size_t keyCount) {
+    const auto count = StoredKeyCount(metaAddress, surfaceBytes, keyCount);
+    if (count == 0) return count;
+    if (CpuKeysOnly() || !GuestMemory::GpuMutex().HeldByThisThread() || Recorder::Active() == nullptr) return std::nullopt;
+    const auto* import = HostImportFor(context, metaAddress, count);
+    if (import == nullptr || HostImportOffset(*import, metaAddress) % 4 != 0 || count % 4 != 0) return std::nullopt;
+    return count;
+}
+
 bool FillDccClear(VkFormat format, DccKeys keys, bool alphaOnMsb, std::span<std::byte> bytes) {
     if (keys == DccKeys::Clear0000) {
         std::fill(bytes.begin(), bytes.end(), std::byte{0});
