@@ -308,7 +308,7 @@ void IndirectDrawsQueueBehindTheCommitter() {
         blocker.Join();
         Require(outstanding == 1, "disabled pipelined indirect draws did not drain before reading records");
     } else {
-        SubmitBehind(blocker, commands, 3);
+        SubmitBehind(blocker, commands, 0);
         WaitForItems(3, blocker, "the indirect draws drained the pipeline instead of queuing behind it");
     }
     Flush(FirstMemory);
@@ -493,7 +493,7 @@ void TrailingZeroCountRecordIsNotQueued() {
         blocker.Join();
         Require(drained, "disabled multi-record indirect draw did not request a drain");
     } else {
-        SubmitBehind(blocker, commands, 1);
+        SubmitBehind(blocker, commands, 0);
         WaitForItems(2, blocker, "a draw whose last record has no vertices queued nothing");
     }
     Flush(InlineMemory);
@@ -519,7 +519,7 @@ void OutOfRangeIndexedRecordIsNotQueued() {
         blocker.Join();
         Require(drained, "disabled indexed indirect draw did not request a drain");
     } else {
-        SubmitBehind(blocker, commands, 1);
+        SubmitBehind(blocker, commands, 0);
         WaitForItems(2, blocker, "an indexed draw whose second record is out of range queued nothing");
     }
     Flush(IndexedMemory);
@@ -566,7 +566,7 @@ void GpuSideIndirectDrawQueuesBehindTheStoreOfItsArguments() {
     AppendGpuSideIndirect(commands);
     Blocker blocker;
     if (PipelinedIndirectDisabled()) {
-        SubmitBehind(blocker, commands, 0);
+        SubmitBehind(blocker, commands, 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         const auto outstanding = DrawPipeline::Queue0().Outstanding();
         blocker.Release();
