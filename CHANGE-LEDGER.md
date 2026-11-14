@@ -475,4 +475,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 01:2x | #15659 port (keep image table cache entries) | none | run836 869, run837 915 vs mean 865 | WIN (marginal on 869), KEPT | perf/sb6 f6cb439c3f pushed |
 | 2026-11-15 01:3x | #18102 port (memo reuse when results pending) | APS5_NO_MEMO_PENDING_COLLECT | run838 996, run839 952 vs mean 865 | WIN (+15%, +10%), KEPT | perf/sb6 50b8554aec |
 | 2026-11-15 01:3x | twalk per-texture collect proof (own, Sol) | APS5_NO_TARGET_PROOF_MEMO | run840 876, run841 907 vs mean 865 | WIN, KEPT | perf/sb6 542f385e1d pushed; check_conventions: only missing ENVIRONMENT.md rows (fork) |
-| 2026-11-15 01:5x | dlookup draw-key memo (own, Sol) | APS5_NO_DRAW_LOOKUP_MEMO | run842 968, run843 902 vs mean 865 | WIN, KEPT | perf/sb6 542f385e1d pushed; next: stack build + validation tests + run870/871 |
+| 2026-11-15 01:5x | dlookup draw-key memo (own, Sol) | APS5_NO_DRAW_LOOKUP_MEMO | run842 968, run843 902 vs mean 865 | WIN, KEPT | perf/sb6 54f3c994fc pushed (RuntimeSwitches conflict resolved, both switches); next: stack build + validation tests + run870/871 |
