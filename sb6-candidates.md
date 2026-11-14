@@ -32,3 +32,5 @@ Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 | #20130 data-only stage reuse | upstream #20130 | 066623107f | queued separately (cold cache, warm first) | - | - | upstream |
 
 Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for next batch = 927 (pooled stack runs 870/871/878 + dlookup-off 873/876).
+| #17943 result | | | run882 917, run883 921 | below 927 | DROPPED | |
+| #16753 result | | | run884 919, run885 931 | mixed | DROPPED | |
