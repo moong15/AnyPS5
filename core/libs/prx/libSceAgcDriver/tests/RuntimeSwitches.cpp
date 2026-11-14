@@ -38,8 +38,11 @@ void registry() {
     for (std::size_t index = 0; index < static_cast<std::size_t>(RuntimeSwitch::Count); ++index) {
         const auto id = static_cast<RuntimeSwitch>(index);
         Require(RuntimeSwitches::Find(RuntimeSwitches::Name(id)) == id, std::string("the name of a switch does not find it: ") + RuntimeSwitches::Name(id));
-        Require(RuntimeSwitches::Set(id) == (std::getenv(RuntimeSwitches::Name(id)) != nullptr), std::string("a switch does not start as the environment sets it: ") + RuntimeSwitches::Name(id));
+        const auto* environment = std::getenv(RuntimeSwitches::Name(id));
+        const bool expected = environment != nullptr && (id != RuntimeSwitch::DispatchRelocation || std::string_view(environment) == "1");
+        Require(RuntimeSwitches::Set(id) == expected, std::string("a switch does not start as the environment sets it: ") + RuntimeSwitches::Name(id));
     }
+    Require(RuntimeSwitches::Find("APS5_DISPATCH_RELOCATION") == RuntimeSwitch::DispatchRelocation, "APS5_DISPATCH_RELOCATION is not a runtime switch");
     Require(RuntimeSwitches::Find("APS5_NO_BARRIER_BATCH") == RuntimeSwitch::NoBarrierBatch, "APS5_NO_BARRIER_BATCH is not a runtime switch");
     Require(RuntimeSwitches::Set(RuntimeSwitch::NoBarrierBatch), "a switch set in the environment did not start set");
     Require(!RuntimeSwitches::Find("APS5_FULL_BARRIERS").has_value() && !RuntimeSwitches::Find("APS5_NO_BARRIER_BATCH ").has_value(), "a name that is not a runtime switch was found");

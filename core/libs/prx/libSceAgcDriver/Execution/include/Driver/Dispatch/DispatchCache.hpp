@@ -81,7 +81,15 @@ struct DispatchVariant {
     std::atomic<std::uint64_t> generation{0};
 };
 
+struct DispatchRelocationKey {
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    std::vector<std::uint64_t> state;
+    std::vector<std::uint32_t> userData;
+};
+
 struct DispatchEntry {
+    std::shared_ptr<const DispatchRelocationKey> relocation;
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<DispatchEntry>>> owners;
     std::vector<std::shared_ptr<DispatchVariant>> variants;
 
     std::uint64_t touched = 0;
@@ -100,6 +108,8 @@ struct EntryCounters {
 
     std::array<std::uint64_t, MaxDispatchVariants> variantHitsByRank{};
     std::uint64_t variantsCompared = 0, variantsInserted = 0, variantsEvicted = 0;
+
+    std::uint64_t relocationLookups = 0, relocationCandidates = 0, relocationRefused = 0, relocationHits = 0;
 
     std::uint64_t dataHits = 0, dataWordsRefreshed = 0, dataVerified = 0, dataInserts = 0, dataPositionsInserted = 0, dataLeavesUnmapped = 0, dataLeavesMismatched = 0, dataLeavesAliased = 0;
     std::array<std::uint64_t, MaxDispatchVariants> dataHitsByRank{};

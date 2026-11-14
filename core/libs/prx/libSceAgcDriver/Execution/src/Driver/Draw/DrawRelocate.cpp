@@ -135,9 +135,9 @@ void Driver::tagUserValueWords(DispatchVariant& variant, const DrawProgram& prog
     }
 }
 
-void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied) {
+void Driver::tagVariantRuns(DispatchVariant& variant, std::span<const ShaderRecompiler::MemoryRegion> regions, const ShaderRecompiler::SrtUserDataUse& use, bool eligible, std::uint32_t hiddenWords, std::span<const std::shared_ptr<const ShaderRecompiler::SrtGuestWords>> supplied, bool dispatchRelocation) {
     variant.userWordsWalked = use.asBase | use.asValue;
-    std::uint64_t relocatable = eligible && drawRelocationEnabled() ? use.asBase & ~use.asValue : 0;
+    std::uint64_t relocatable = eligible && (dispatchRelocation || drawRelocationEnabled()) ? use.asBase & ~use.asValue : 0;
     if (hiddenWords != 0) relocatable &= hiddenWords >= 64 ? 0 : ~((std::uint64_t {1} << hiddenWords) - 1);
     std::vector<std::pair<std::uint64_t, std::int32_t>> reads;
     const auto covered = [&](std::uint64_t address) {
