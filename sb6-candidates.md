@@ -17,7 +17,7 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 | #17786 | shared collect walks (16 conflicts) | later |
 | #17738, #16753, #17943 | large (target memo, per-draw fixed cost, record encoder thread) | later, high risk |
 | twalk: per-texture collect proof | own (Sol) | 542f385e1d | run840 876, run841 907 | +1.3%, +4.9% | yes | yes, own PR candidate (needs docs row + tests + main-vs-PR pairs) |
-| dlookup: draw key memo | own (Sol) | 1ec4940a5a | queued 850+ | - | - | maybe |
+| dlookup: draw key memo | own (Sol) | on perf/sb6 | run842 968, run843 902 | +11.9%, +4.3% | yes | yes, own PR candidate |
 
 Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 | drel: dispatch read-base relocation (opt-in) | own (Sol) | 78a8ca2dff | queued after chain | - | - | maybe |
