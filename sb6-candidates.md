@@ -38,3 +38,5 @@ Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for 
 | #17786 result | | | run886 957, run887 903 | mixed | DROPPED | |
 | #18287 result | | | run888 934, run889 928 | +0.8%, +0.1% | KEPT (marginal) | already merged on main |
 | twalk PR prep | | pr/target-proof-memo 17a1900f56 | | | | PR-ready pending main-vs-PR runs; needs user OK |
+| #18914 result | | | run890 897, run891 909 | below | DROPPED | |
+| drel PR prep | | pr/dispatch-relocation 098c36d763 | | | | PR-ready pending main-vs-PR runs; needs user OK |

@@ -486,3 +486,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 04:43 | #17786 shared collect walks port on stack | APS5_NO_SHARED_COLLECT_WALKS | run886 957, run887 903 vs bar 927 | DROPPED (903 below) | - |
 | 2026-11-15 05:02 | #18287 vertex-plan scratch (merged on main) on stack | - | run888 934, run889 928 vs bar 927 | WIN (marginal), KEPT | perf/sb6 b91a08c216 pushed |
 | 2026-11-15 05:1x | Sol: twalk upstream-ready branch pr/target-proof-memo 17a1900f56 on main 34a26d8343 (local only); check_conventions PASS; pr_overlap: docs conflict with #17738; PR body draft pr-traces/pr-target-proof-memo-body.md | - | main-vs-PR runs + validation ctest pending | - | needs user OK before any push/PR |
+| 2026-11-15 05:21 | #18914 PM4 CPU work port on stack | - | run890 897, run891 909 vs bar 927 | DROPPED | - |
+| 2026-11-15 05:3x | Sol: drel upstream-ready pr/dispatch-relocation 098c36d763 on main e4742e6522 (local); check_conventions PASS; overlap: line conflicts with #17738 #17943 #18101 #20130 | - | main-vs-PR runs pending | - | needs user OK |
