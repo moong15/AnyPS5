@@ -17,7 +17,7 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 | #17786 | shared collect walks (16 conflicts) | later |
 | #17738, #16753, #17943 | large (target memo, per-draw fixed cost, record encoder thread) | later, high risk |
 | twalk: per-texture collect proof | own (Sol) | 542f385e1d | run840 876, run841 907 | +1.3%, +4.9% | yes | yes, own PR candidate (needs docs row + tests + main-vs-PR pairs) |
-| dlookup: draw key memo | own (Sol) | on perf/sb6 | run842 968, run843 902 | +11.9%, +4.3% | yes | yes, own PR candidate |
+| dlookup: draw key memo | own (Sol) | port/sb6-dlookup | alone 968, 902; in stack off-runs 924, 943 beat stack mean 923 | no gain in stack | DROPPED from stack | no |
 
 Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 | drel: dispatch read-base relocation (opt-in) | own (Sol) | 78a8ca2dff | queued after chain | - | - | maybe |
@@ -30,3 +30,5 @@ Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 | #19978 shared read ranges | upstream #19978 | e09ee7637e | queued chain-b | - | - | upstream |
 | #17738 target memo | upstream #17738 | 71e0b3cf79 | queued chain-b | - | - | upstream |
 | #20130 data-only stage reuse | upstream #20130 | 066623107f | queued separately (cold cache, warm first) | - | - | upstream |
+
+Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for next batch = 927 (pooled stack runs 870/871/878 + dlookup-off 873/876).
