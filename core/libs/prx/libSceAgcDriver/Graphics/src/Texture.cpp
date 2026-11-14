@@ -2650,7 +2650,8 @@ bool StorageTexture::refresh(std::uint32_t firstLayer, std::uint32_t lastLayer) 
     // `original` holds the guest bytes the image was last uploaded from or written back as; while the
     // guest memory and the DCC keys still match, the image content is current. Pages nobody wrote
     // since `generation` need no comparison.
-    const auto current = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+    static const bool targetProofMemoEnabled = std::getenv("APS5_NO_TARGET_PROOF_MEMO") == nullptr;
+    const auto current = targetProofMemoEnabled ? GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), targetProofMemo) : GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
     const auto scopedCurrent = current != 0 || !scoped ? current : GuestMemory::CollectWrites(scopeBegin, scopeBytes);
     std::vector<std::uint64_t> collected;
     if (scopedCurrent == 0) {
@@ -3026,7 +3027,9 @@ bool StorageTexture::refreshProved() {
     const auto bytes = static_cast<std::size_t>(guestBytes);
     std::array<GuestMemory::UnchangedQuery, 2> queries{};
     std::size_t used = 0;
-    if (GuestMemory::CollectWrites(descriptor.baseAddress, bytes) == 0) return false;
+    static const bool targetProofMemoEnabled = std::getenv("APS5_NO_TARGET_PROOF_MEMO") == nullptr;
+    const auto collected = targetProofMemoEnabled ? GuestMemory::CollectWrites(descriptor.baseAddress, bytes, targetProofMemo) : GuestMemory::CollectWrites(descriptor.baseAddress, bytes);
+    if (collected == 0) return false;
     queries[used++] = {descriptor.baseAddress, bytes, generation};
     if (descriptor.dccAddress != 0) {
         const auto keyCount = static_cast<std::size_t>(guestBytes / 256);
