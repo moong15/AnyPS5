@@ -20,7 +20,7 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 | dlookup: draw key memo | own (Sol) | port/sb6-dlookup | alone 968, 902; in stack off-runs 924, 943 beat stack mean 923 | no gain in stack | DROPPED from stack | no |
 
 Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
-| drel: dispatch read-base relocation (opt-in) | own (Sol) | 78a8ca2dff | queued after chain | - | - | maybe |
+| drel: dispatch read-base relocation (opt-in) | own (Sol) | on perf/sb6 | run880 963, run881 940 | +3.9%, +1.4% vs 927 | yes | yes, own PR candidate (opt-in, partial; tests pending) |
 | #17943 encoder thread port | upstream #17943 | 83d680a251 port/sb6-enc | queued after chain | - | - | upstream |
 | #16753 per-draw fixed cost port | upstream #16753 | f31cd5955b | queued chain-b | - | - | upstream |
 | #17786 shared collect walks port | upstream #17786 | a6b343a12d | queued chain-b | - | - | upstream; conflicts with twalk |
