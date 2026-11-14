@@ -6,6 +6,15 @@ if(BUILD_TESTING)
     add_test(NAME agc_runtime_switches COMMAND agc_runtime_switches_tests)
     add_test(NAME agc_runtime_switches_refused COMMAND agc_runtime_switches_tests refused)
     set_tests_properties(agc_runtime_switches agc_runtime_switches_refused PROPERTIES TIMEOUT 20)
+    foreach(relocation IN ITEMS 0 1)
+        add_test(NAME agc_runtime_switches_dispatch_relocation_${relocation} COMMAND agc_runtime_switches_tests)
+        set_tests_properties(agc_runtime_switches_dispatch_relocation_${relocation} PROPERTIES
+                ENVIRONMENT "APS5_DISPATCH_RELOCATION=${relocation}" TIMEOUT 20)
+        if(WIN32)
+            set_tests_properties(agc_runtime_switches_dispatch_relocation_${relocation} PROPERTIES ENVIRONMENT_MODIFICATION
+                    "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
     if(WIN32)
         set_tests_properties(agc_runtime_switches agc_runtime_switches_refused PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
