@@ -5,14 +5,17 @@
 
 namespace AgcDriver::DriverDetail {
 
-void Driver::lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering) {
+void Driver::lookupDispatch(std::uint64_t address, const Submission& submission, std::uint64_t key, const std::shared_ptr<DispatchEntry>& candidate, bool noDispatchCache, bool traceCache, bool profile, std::span<const ShaderRecompiler::MemoryRegion> memory, DispatchPhaseTiming& phaseTiming, std::array<double, DriverPhaseCount>& phaseMs, std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, std::shared_ptr<DispatchVariant>& keepVariant, std::vector<ShaderRecompiler::MemoryRegion>& captured, std::vector<std::uint32_t>& liveWords, bool& dataHit, bool& cached, bool& validated, std::shared_ptr<DispatchEntry>& missedEntry, bool& missedDiffering) {
     if (!noDispatchCache) {
 
         static const bool validateUnlocked = std::getenv("APS5_NO_UNLOCKED_VALIDATE") == nullptr;
         std::unique_lock cacheLock(dispatchCacheMutex);
         ++entryCounters.lookups;
-        const auto found = dispatchCache.find(key);
-        std::shared_ptr<DispatchEntry> entry = found != dispatchCache.end() ? found->second : nullptr;
+        auto entry = candidate;
+        if (entry == nullptr) {
+            const auto found = dispatchCache.find(key);
+            if (found != dispatchCache.end()) entry = found->second;
+        }
         if (entry == nullptr) ++entryCounters.absent;
         if (validateUnlocked) cacheLock.unlock();
         phaseTiming.Phase(PhaseLookup);
@@ -99,8 +102,11 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
             }
             if (!cacheLock.owns_lock()) cacheLock.lock();
 
-            const auto again = dispatchCache.find(key);
-            const bool untouched = again != dispatchCache.end() && again->second == entry && variants.front()->generation.load(std::memory_order_acquire) == generation;
+            const bool relocated = !entry->owners.empty();
+            const auto ownerKey = relocated && current ? entry->owners[rank].first : key;
+            const auto& owner = relocated && current ? entry->owners[rank].second : entry;
+            const auto again = dispatchCache.find(ownerKey);
+            const bool untouched = again != dispatchCache.end() && again->second == owner && variants.front()->generation.load(std::memory_order_acquire) == generation;
             auto& counters = entryCounters;
             counters.validateUs += phaseMs[PhaseValidate] * 1000;
             counters.imagesFlushed += imagesFlushed;
@@ -123,6 +129,7 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
             }
             if (current) {
                 ++counters.variantHitsByRank[rank];
+                if (relocated) ++counters.relocationHits;
                 compiledResult = variant->compiled;
                 if (dataHit) {
 
@@ -150,13 +157,14 @@ void Driver::lookupDispatch(std::uint64_t address, const Submission& submission,
                 if (untouched) {
                     if (restamped != 0) variant->generation.store(restamped, std::memory_order_release);
 
-                    if (rank != 0) {
+                    if (rank != 0 && !relocated) {
                         auto rotated = std::make_shared<DispatchEntry>();
                         rotated->variants.reserve(variants.size());
                         rotated->variants.push_back(variant);
                         for (std::size_t i = 0; i < variants.size(); ++i) {
                             if (i != rank) rotated->variants.push_back(variants[i]);
                         }
+                        rotated->relocation = entry->relocation;
                         rotated->touched = entry->touched;
                         rotated->order = entry->order;
                         again->second = std::move(rotated);

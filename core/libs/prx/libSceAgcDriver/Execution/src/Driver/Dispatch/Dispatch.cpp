@@ -246,22 +246,34 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         ~ProbeScope() { if (active) ShaderRecompiler::SetDebugProbeActive(false); }
     } probeScope{probeThis};
     const bool noDispatchCache = noDispatchCacheEnv || probeThis;
+    static const bool keyHygiene = std::getenv("APS5_NO_DISPATCH_KEY_HYGIENE") == nullptr;
+    std::shared_ptr<DispatchRelocationKey> relocation;
+    if (!noDispatchCache && !stampValidate() && keyHygiene && Graphics::RuntimeSwitches::Set(Graphics::RuntimeSwitch::DispatchRelocation)) {
+        relocation = std::make_shared<DispatchRelocationKey>();
+        relocation->userData = userData;
+    }
     std::uint64_t key = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
         key ^= value;
         key *= 0x100000001b3ull;
     };
-    mix(address);
-    mix(packet[4] & 0x8000u);
-    for (const auto threads : compute.partialThreads) mix(threads);
+    const auto mixState = [&](std::uint64_t value) {
+        mix(value);
+        if (relocation != nullptr) {
+            relocation->state.push_back(value);
+            relocation->hash = (relocation->hash ^ value) * 0x100000001b3ull;
+        }
+    };
+    mixState(address);
+    mixState(packet[4] & 0x8000u);
+    for (const auto threads : compute.partialThreads) mixState(threads);
     for (const auto word : userData) mix(word);
 
-    static const bool keyHygiene = std::getenv("APS5_NO_DISPATCH_KEY_HYGIENE") == nullptr;
     if (keyHygiene) {
         for (const auto offset : {0x207u, 0x208u, 0x209u, 0x212u, 0x213u, 0x228u}) {
             const auto found = queue.shader.find(offset);
 
-            mix(found == queue.shader.end() ? (1ull << 32u) : found->second);
+            mixState(found == queue.shader.end() ? (1ull << 32u) : found->second);
         }
     } else {
         for (const auto& [offset, value] : queue.shader) {
@@ -320,7 +332,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         previous.key = key;
     }
 
-    mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
+    mixState(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
     if (fromAhead && key != ahead.key) {
         fromAhead = false;
         ++groupStats.keyMismatches;
@@ -341,15 +353,18 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     const bool queueMisses = pipelineCandidate && DispatchMissItemsEnabled() && !noDispatchCache && !stampValidate() && !verifyDataHits();
     bool lateItem = false;
     bool recipeLess = false;
+    std::shared_ptr<DispatchEntry> candidate;
+    if (!fromAhead && !noDispatchCache && (pipelineCandidate || relocation != nullptr)) {
+        std::lock_guard cacheLock(dispatchCacheMutex);
+        if (const auto found = dispatchCache.find(key); found != dispatchCache.end()) candidate = found->second;
+        else if (relocation != nullptr) candidate = dispatchRelocationEntry(*relocation);
+    }
     if (pipelineCandidate) {
         std::vector<ShaderRecompiler::MemoryRegion> reads;
         bool entryFound = false;
-        {
-            std::lock_guard cacheLock(dispatchCacheMutex);
-            if (const auto found = dispatchCache.find(key); found != dispatchCache.end()) {
-                entryFound = true;
-                for (const auto& variant : found->second->variants) appendEntryRegions(*variant, reads);
-            }
+        if (candidate != nullptr) {
+            entryFound = true;
+            for (const auto& variant : candidate->variants) appendEntryRegions(*variant, reads);
         }
         if (!entryFound && queueMisses) {
             lateItem = true;
@@ -382,7 +397,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         groupStats.ageMaxMs = std::max(groupStats.ageMaxMs, age);
         phaseTiming.Phase(PhaseLookup);
     } else {
-        lookupDispatch(address, submission, key, noDispatchCache, traceCache, profile, memory, phaseTiming, phaseMs, compiledResult, keepVariant, captured, liveWords, dataHit, cached, validated, missedEntry, missedDiffering);
+        lookupDispatch(address, submission, key, candidate, noDispatchCache, traceCache, profile, memory, phaseTiming, phaseMs, compiledResult, keepVariant, captured, liveWords, dataHit, cached, validated, missedEntry, missedDiffering);
     }
     timing.Mark("lookup_cache");
     std::vector<DrawPipeline::Range> itemWrites;
@@ -465,7 +480,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         }
         if (profile) recompileMs.fetch_add(phaseTiming.Elapsed(), std::memory_order_relaxed);
         phaseTiming.Phase(PhaseRecompile);
-        if (!resolving) insertDispatch(address, key, noDispatchCache || !CacheableResult(*compiledResult), profile, registeredShader, forgetAtCapture, memory, shaderMemory, captured, capture, compiledResult, missedEntry, missedDiffering, attachVariant, phaseTiming, linking);
+        if (!resolving) insertDispatch(address, key, relocation, noDispatchCache || !CacheableResult(*compiledResult), profile, registeredShader, forgetAtCapture, memory, shaderMemory, captured, capture, compiledResult, missedEntry, missedDiffering, attachVariant, phaseTiming, linking);
         if (linking != nullptr) linking->AppendRegions(captured);
     }
     const auto* registeredViews = capture != nullptr ? &capture->snapshot.registeredImages : keepVariant != nullptr && keepVariant->registeredViews != nullptr ? keepVariant->registeredViews.get() : nullptr;
@@ -475,6 +490,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         parked = ResolvedDispatch{};
         parked.address = address;
         parked.key = key;
+        parked.relocation = relocation;
         parked.indirectArguments = indirectArguments;
         parked.forgetAtCapture = forgetAtCapture;
         std::copy_n(packet.begin(), std::min(packet.size(), parked.packet.size()), parked.packet.begin());

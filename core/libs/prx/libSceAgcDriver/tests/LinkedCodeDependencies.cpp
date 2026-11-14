@@ -39,7 +39,7 @@ struct DriverTestAccess {
         auto phaseLap = lap;
         std::array<double, DriverPhaseCount> phases{};
         DispatchPhaseTiming timing{false, lap, phases, phaseLap};
-        driver.insertDispatch(shader->codeAddress, 14u, disabled, false, shader, forget, request.context.memory, memory, captured, capture, result, {}, false, attached, timing, linking);
+        driver.insertDispatch(shader->codeAddress, 14u, {}, disabled, false, shader, forget, request.context.memory, memory, captured, capture, result, {}, false, attached, timing, linking);
         return attached;
     }
 
@@ -62,7 +62,7 @@ struct DriverTestAccess {
         auto phaseLap = lap;
         std::array<double, DriverPhaseCount> phases{};
         DispatchPhaseTiming timing{false, lap, phases, phaseLap};
-        driver.lookupDispatch(shader.codeAddress, submission, 14u, false, false, false, request.context.memory, timing, phases, result, kept, captured, words, data, cached, validated, missed, differing);
+        driver.lookupDispatch(shader.codeAddress, submission, 14u, {}, false, false, false, request.context.memory, timing, phases, result, kept, captured, words, data, cached, validated, missed, differing);
         if (retained != nullptr) *retained = captured;
         if (liveWords != nullptr) {
             if (!data) throw std::runtime_error("the verifier test did not get a data hit");

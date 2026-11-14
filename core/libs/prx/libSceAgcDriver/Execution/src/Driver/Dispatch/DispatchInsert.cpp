@@ -45,7 +45,7 @@ std::vector<ShaderRecompiler::MemoryRegion> Driver::dispatchRegions(std::span<co
     return srtRegions;
 }
 
-void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDispatchCache, bool profile, const std::shared_ptr<const ShaderSnapshot>& registeredShader, std::uint64_t forgetAtCapture, std::span<const ShaderRecompiler::MemoryRegion> memory, const std::shared_ptr<ShaderMemory>& shaderMemory, const std::vector<ShaderRecompiler::MemoryRegion>& captured, const std::shared_ptr<const ShaderRecompiler::ResourceCapture>& capture, const std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, const std::shared_ptr<DispatchEntry>& missedEntry, bool missedDiffering, std::shared_ptr<DispatchVariant>& attachVariant, DispatchPhaseTiming& phaseTiming, const std::shared_ptr<const PreparedShaderState::UserDataLink>& linking) {
+void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, const std::shared_ptr<const DispatchRelocationKey>& relocation, bool noDispatchCache, bool profile, const std::shared_ptr<const ShaderSnapshot>& registeredShader, std::uint64_t forgetAtCapture, std::span<const ShaderRecompiler::MemoryRegion> memory, const std::shared_ptr<ShaderMemory>& shaderMemory, const std::vector<ShaderRecompiler::MemoryRegion>& captured, const std::shared_ptr<const ShaderRecompiler::ResourceCapture>& capture, const std::shared_ptr<const ShaderRecompiler::RecompileResult>& compiledResult, const std::shared_ptr<DispatchEntry>& missedEntry, bool missedDiffering, std::shared_ptr<DispatchVariant>& attachVariant, DispatchPhaseTiming& phaseTiming, const std::shared_ptr<const PreparedShaderState::UserDataLink>& linking) {
     if (!noDispatchCache) {
         auto fresh = std::make_shared<DispatchVariant>();
         fresh->compiled = compiledResult;
@@ -61,17 +61,13 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDis
         if (linking != nullptr) supplied.insert(supplied.end(), linking->dependencies.begin(), linking->dependencies.end());
         fresh->runs.reserve(srtRegions.size());
         fresh->words.reserve(capturedWords);
-        for (const auto& region : srtRegions) {
-            fresh->runs.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
-            const auto count = region.bytes.size() / sizeof(std::uint32_t);
-            const auto offset = fresh->words.size();
-            fresh->words.resize(offset + count);
-            std::memcpy(fresh->words.data() + offset, region.bytes.data(), count * sizeof(std::uint32_t));
-            AppendSharedWords(fresh->shared, fresh->runs.size() - 1u, offset, region.bytes, supplied);
-        }
+        const bool relocate = relocation != nullptr && linking == nullptr && capture != nullptr && capture->plan != nullptr && capture->plan->srtPlanComplete && capture->plan->resourceTrackingComplete && !capture->plan->requiresSpecializationMemory && capture->snapshot.tables.tables.empty() && capture->snapshot.tables.nested.empty() && capture->snapshot.registeredImages.empty();
+        const ShaderRecompiler::SrtUserDataUse unused;
+        tagVariantRuns(*fresh, srtRegions, capture != nullptr ? capture->userDataUse : unused, relocate, 0, supplied, true);
 
         DataWordPositionCounts dataCounts;
-        if (dataHits() && !stampValidate() && capture != nullptr && !capture->readTrace.leaves.empty()) {
+        const bool sameCaptureRuns = fresh->runs.size() == srtRegions.size() && std::equal(fresh->runs.begin(), fresh->runs.end(), srtRegions.begin(), [](const auto& run, const auto& region) { return run.first == region.guestAddress && run.second == region.guestAddress + region.bytes.size(); });
+        if (dataHits() && !stampValidate() && sameCaptureRuns && capture != nullptr && !capture->readTrace.leaves.empty()) {
             auto otherReads = capture->readTrace.otherReads;
             if (linking != nullptr) {
                 for (const auto& [slot, address] : capture->readTrace.leaves) {
@@ -130,6 +126,7 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDis
             const auto found = dispatchCache.find(key);
             if (found == dispatchCache.end()) {
                 auto created = std::make_shared<DispatchEntry>();
+                created->relocation = relocation;
                 created->touched = dispatchCacheHits;
                 accountVariant(*fresh, true);
                 created->variants.push_back(std::move(fresh));
@@ -143,6 +140,7 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDis
 
                 const auto& old = found->second;
                 auto replacement = std::make_shared<DispatchEntry>();
+                replacement->relocation = relocation != nullptr ? relocation : old->relocation;
                 replacement->variants.reserve(dispatchVariants());
                 accountVariant(*fresh, true);
                 replacement->variants.push_back(std::move(fresh));
@@ -161,6 +159,13 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDis
                 found->second = std::move(replacement);
             }
 
+            const auto& held = dispatchCache.at(key);
+            if (held->relocation != nullptr && std::any_of(held->variants.begin(), held->variants.end(), [](const auto& variant) { return variant->relocatableWords != 0; })) {
+                auto& aliases = dispatchAliases[held->relocation->hash];
+                std::erase(aliases, key);
+                aliases.insert(aliases.begin(), key);
+                if (aliases.size() > MaxDispatchVariants) aliases.resize(MaxDispatchVariants);
+            }
             static const bool lru = std::getenv("APS5_NO_DISPATCH_LRU") == nullptr;
             const auto over = [&] { return dispatchCache.size() > dispatchCacheEntries() || (dispatchCache.size() > 1 && dispatchCacheVariantBytes > DispatchCacheBytes()); };
             if (over()) {
@@ -171,6 +176,7 @@ void Driver::insertDispatch(std::uint64_t address, std::uint64_t key, bool noDis
                     }
                 } else {
                     dispatchCacheEvictions += dispatchCache.size();
+                    dispatchAliases.clear();
                     dispatchCache.clear();
                     dispatchOrder.clear();
                     dispatchCacheVariants = 0;

@@ -2,9 +2,79 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Dispatch/DispatchCache.hpp"
 #include "ControlFlow/GraphBuilder.hpp"
 #include "Optimization/SrtWalker.hpp"
+#include "UserDataUse.hpp"
 #include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
+
+std::shared_ptr<DispatchVariant> Driver::RelocateDispatch(const DispatchVariant& variant, std::span<const std::uint32_t> from, std::span<const std::uint32_t> to) {
+    if (variant.compiled == nullptr || variant.linking != nullptr || from.size() != to.size() || from.size() > ShaderRecompiler::SrtUserDataUse::TrackedWords || variant.runs.size() != variant.runBases.size()) return nullptr;
+    std::uint64_t moved = 0;
+    for (std::size_t index = 0; index < from.size(); ++index) {
+        if (from[index] == to[index]) continue;
+        const auto bit = std::uint64_t{1} << index;
+        if ((variant.relocatableWords & bit) == 0 || from[index] == 0 || to[index] == 0 || ((from[index] ^ to[index]) & 3u) != 0) return nullptr;
+        if (std::find(variant.runBases.begin(), variant.runBases.end(), static_cast<std::int8_t>(index)) == variant.runBases.end()) return nullptr;
+        moved |= bit;
+    }
+    if (moved == 0) return nullptr;
+    auto copy = std::make_shared<DispatchVariant>();
+    copy->runs = variant.runs;
+    copy->runBases = variant.runBases;
+    copy->relocatableWords = variant.relocatableWords;
+    copy->userWordsWalked = variant.userWordsWalked;
+    copy->words = variant.words;
+    copy->compiled = variant.compiled;
+    copy->registeredViews = variant.registeredViews;
+    copy->shader = variant.shader;
+    copy->forgetSerial = variant.forgetSerial;
+    for (std::size_t run = 0; run < copy->runs.size(); ++run) {
+        const auto index = copy->runBases[run];
+        if (index < 0) continue;
+        if (static_cast<std::size_t>(index) >= from.size()) return nullptr;
+        if ((moved >> index & 1u) == 0) continue;
+        if (copy->runs[run].first >= (std::uint64_t{1} << 48u) || copy->runs[run].second > (std::uint64_t{1} << 48u)) return nullptr;
+        const auto delta = static_cast<std::int64_t>(to[index] & ~3u) - static_cast<std::int64_t>(from[index] & ~3u);
+        const auto begin = static_cast<std::int64_t>(copy->runs[run].first) + delta;
+        const auto end = static_cast<std::int64_t>(copy->runs[run].second) + delta;
+        if (begin < 0 || end <= begin || end > (std::int64_t{1} << 48u)) return nullptr;
+        copy->runs[run] = {static_cast<std::uint64_t>(begin), static_cast<std::uint64_t>(end)};
+    }
+    std::shared_ptr<ShaderRecompiler::RecompileResult> patched;
+    const auto& forwarded = variant.compiled->shaderDataUserWords;
+    for (std::size_t slot = 0; slot < forwarded.size(); ++slot) {
+        const auto index = forwarded[slot];
+        if (index >= from.size() || (moved >> index & 1u) == 0) continue;
+        if (patched == nullptr) patched = std::make_shared<ShaderRecompiler::RecompileResult>(*variant.compiled);
+        patchForwardedWord(*patched, static_cast<std::uint32_t>(slot), to[index]);
+    }
+    if (patched != nullptr) copy->compiled = std::move(patched);
+    return copy;
+}
+
+std::shared_ptr<DispatchEntry> Driver::dispatchRelocationEntry(const DispatchRelocationKey& key) {
+    ++entryCounters.relocationLookups;
+    const auto aliases = dispatchAliases.find(key.hash);
+    if (aliases == dispatchAliases.end()) return nullptr;
+    auto relocated = std::make_shared<DispatchEntry>();
+    for (const auto ownerKey : aliases->second) {
+        const auto found = dispatchCache.find(ownerKey);
+        if (found == dispatchCache.end() || found->second->relocation == nullptr || found->second->relocation->state != key.state) continue;
+        const auto& owner = found->second;
+        for (const auto& variant : owner->variants) {
+            auto copy = RelocateDispatch(*variant, owner->relocation->userData, key.userData);
+            if (copy == nullptr) {
+                ++entryCounters.relocationRefused;
+                continue;
+            }
+            ++entryCounters.relocationCandidates;
+            relocated->variants.push_back(std::move(copy));
+            relocated->owners.emplace_back(ownerKey, owner);
+            if (relocated->variants.size() == MaxDispatchVariants) return relocated;
+        }
+    }
+    return relocated->variants.empty() ? nullptr : relocated;
+}
 
 bool Driver::stampValidate() {
     static const bool stamp = std::getenv("APS5_DISPATCH_STAMP_VALIDATE") != nullptr;
@@ -90,6 +160,13 @@ void Driver::accountVariant(const DispatchVariant& variant, bool added) {
 }
 
 void Driver::eraseDispatchEntry(std::unordered_map<std::uint64_t, std::shared_ptr<DispatchEntry>>::iterator it) {
+    if (it->second->relocation != nullptr) {
+        const auto alias = dispatchAliases.find(it->second->relocation->hash);
+        if (alias != dispatchAliases.end()) {
+            std::erase(alias->second, it->first);
+            if (alias->second.empty()) dispatchAliases.erase(alias);
+        }
+    }
     for (const auto& variant : it->second->variants) accountVariant(*variant, false);
     dispatchOrder.erase(it->second->order);
     dispatchCache.erase(it);
