@@ -13,10 +13,10 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 | #15674 | Refresh lookups from index+cache (target lookup) | KEPT: run832 910, run833 887 (+5.2%, +2.5%) on perf/sb6; upstream PR open |
 | #16115 | reuse open render pass attachments | DROPPED: run834 885, run835 852 |
 | #15659 | keep image table cache entries | KEPT: run836 869, run837 915 (+0.5%, +5.8%) on perf/sb6 |
-| #18102 | collect memo reuse when results pending | ported 07ff0cd23f, queued |
+| #18102 | collect memo reuse when results pending | KEPT: run838 996, run839 952 (+15%, +10%) on perf/sb6 |
 | #17786 | shared collect walks (16 conflicts) | later |
 | #17738, #16753, #17943 | large (target memo, per-draw fixed cost, record encoder thread) | later, high risk |
-| twalk: per-texture collect proof | own (Sol) | c6e062131b | queued 840+ | - | - | maybe |
+| twalk: per-texture collect proof | own (Sol) | 542f385e1d | run840 876, run841 907 | +1.3%, +4.9% | yes | yes, own PR candidate (needs docs row + tests + main-vs-PR pairs) |
 | dlookup: draw key memo | own (Sol) | 1ec4940a5a | queued 850+ | - | - | maybe |
 
 Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).

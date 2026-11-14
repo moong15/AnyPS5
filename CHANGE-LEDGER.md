@@ -473,3 +473,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 01:1x | Sol hit usage limit (back 04:08); ports4 (#17738 #20130) unfinished, handing to subagent | - | - | - | - |
 | 2026-11-15 01:2x | subagent finished ports: #17738 71e0b3cf79 (APS5_NO_TARGET_MEMO), #20130 066623107f (shader cache format change: needs warm run) | port/sb6-17738, port/sb6-20130 | queued | - | uncompiled |
 | 2026-11-15 01:2x | #15659 port (keep image table cache entries) | none | run836 869, run837 915 vs mean 865 | WIN (marginal on 869), KEPT | perf/sb6 f6cb439c3f pushed |
+| 2026-11-15 01:3x | #18102 port (memo reuse when results pending) | APS5_NO_MEMO_PENDING_COLLECT | run838 996, run839 952 vs mean 865 | WIN (+15%, +10%), KEPT | perf/sb6 50b8554aec |
+| 2026-11-15 01:3x | twalk per-texture collect proof (own, Sol) | APS5_NO_TARGET_PROOF_MEMO | run840 876, run841 907 vs mean 865 | WIN, KEPT | perf/sb6 542f385e1d pushed; check_conventions: only missing ENVIRONMENT.md rows (fork) |
