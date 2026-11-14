@@ -465,3 +465,11 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 00:1x | Sol port #16753 (per-draw fixed costs), one conflict in Draw.cpp | f31cd5955b port/sb6-16753 | queued chain-b | - | uncompiled |
 | 2026-11-15 00:2x | #15674 port (Refresh lookups from index+cache) | APS5_NO_REFRESH_LOOKUP_CACHE opt-out | run832 910, run833 887 vs mean 865 | WIN, KEPT | perf/sb6 9ca4088986 pushed |
 | 2026-11-15 00:2x | Sol port #17786 shared collect walks, on cbbced480d | a6b343a12d port/sb6-17786 | queued chain-b; overlaps twalk (do not combine without since-aware proof) | - | uncompiled |
+| 2026-11-15 00:3x | #18287 (merged upstream 02f091a37d after our base) cherry-picked | cc4a705c9c port/sb6-18287 | queued chain-b | - | on perf/sb6 9ca4088986 |
+| 2026-11-15 00:36 | #16115 port (reuse open render pass attachments) | APS5_NO_PASS_ATTACHMENT_MEMO | run834 885, run835 852 vs mean 865 | one below mean, DROPPED | - |
+| 2026-11-15 00:4x | Sol port #18914 (PM4 register write/submission CPU work), 3 conflicts resolved | 4f83f52da9 port/sb6-18914 | queued chain-b | - | uncompiled |
+| 2026-11-15 00:5x | Haiku search 2: tracker backfilled to 2026-11-14 19:09Z; new candidates #20041 #19978 #16879 sent to Sol; #18029 overlaps #17943; #7514 dup of #15674 | - | - | - | sol/haiku-sb6-prsearch2.md |
+| 2026-11-15 01:0x | Sol ports: #20041 472b94ddd9, #19978 e09ee7637e; #16879 skipped (edits libc GuestAllocations) | port/sb6-20041, port/sb6-19978 | queued chain-b | - | uncompiled |
+| 2026-11-15 01:1x | Sol hit usage limit (back 04:08); ports4 (#17738 #20130) unfinished, handing to subagent | - | - | - | - |
+| 2026-11-15 01:2x | subagent finished ports: #17738 71e0b3cf79 (APS5_NO_TARGET_MEMO), #20130 066623107f (shader cache format change: needs warm run) | port/sb6-17738, port/sb6-20130 | queued | - | uncompiled |
+| 2026-11-15 01:2x | #15659 port (keep image table cache entries) | none | run836 869, run837 915 vs mean 865 | WIN (marginal on 869), KEPT | perf/sb6 f6cb439c3f pushed |
