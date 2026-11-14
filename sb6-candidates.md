@@ -10,7 +10,7 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 | PR | What | Port state |
 |---|---|---|
 | #18757 | learn draw relocation at insert | KEPT: run830 887, run831 924 (+2.5%, +6.8% vs mean 865) on perf/sb6; PR candidate: upstream PR already open, add evidence comment? (needs user OK) |
-| #15674 | Refresh lookups from index+cache (target lookup) | ported port/sb6-15674 8c2624a02e, queued in chain-sb6c |
+| #15674 | Refresh lookups from index+cache (target lookup) | KEPT: run832 910, run833 887 (+5.2%, +2.5%) on perf/sb6; upstream PR open |
 | #16115 | reuse open render pass attachments | ported dd8301a39c, queued |
 | #15659 | keep image table cache entries | ported 8cbc3e24a8, queued |
 | #18102 | collect memo reuse when results pending | ported 07ff0cd23f, queued |
@@ -22,3 +22,5 @@ Keep rule: 2 runs, both beat previous sb6 run (presents per 90 s window).
 Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 | drel: dispatch read-base relocation (opt-in) | own (Sol) | 78a8ca2dff | queued after chain | - | - | maybe |
 | #17943 encoder thread port | upstream #17943 | 83d680a251 port/sb6-enc | queued after chain | - | - | upstream |
+| #16753 per-draw fixed cost port | upstream #16753 | f31cd5955b | queued chain-b | - | - | upstream |
+| #17786 shared collect walks port | upstream #17786 | a6b343a12d | queued chain-b | - | - | upstream; conflicts with twalk |

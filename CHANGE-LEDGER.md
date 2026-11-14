@@ -462,3 +462,6 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-14 23:50 | Sol drel: opt-in dispatch read-base relocation (partial; descriptor-base relocation not done) | 78a8ca2dff port/sb6-drel, APS5_DISPATCH_RELOCATION=1 | queued after chain (env run) | - | uncompiled |
 | 2026-11-15 00:0x | #18757 port (learn draw relocation at insert) on sb6 1455bee48 | none | run830 887, run831 924 vs base 828/903 (mean 865) | WIN both > mean, KEPT | perf/sb6 cbbced480d pushed moong15 (force, rebased) |
 | 2026-11-15 00:0x | Sol port #17943 encoder thread, clean apply, 19 files +3413 | 83d680a251 port/sb6-enc | queued | - | uncompiled |
+| 2026-11-15 00:1x | Sol port #16753 (per-draw fixed costs), one conflict in Draw.cpp | f31cd5955b port/sb6-16753 | queued chain-b | - | uncompiled |
+| 2026-11-15 00:2x | #15674 port (Refresh lookups from index+cache) | APS5_NO_REFRESH_LOOKUP_CACHE opt-out | run832 910, run833 887 vs mean 865 | WIN, KEPT | perf/sb6 9ca4088986 pushed |
+| 2026-11-15 00:2x | Sol port #17786 shared collect walks, on cbbced480d | a6b343a12d port/sb6-17786 | queued chain-b; overlaps twalk (do not combine without since-aware proof) | - | uncompiled |
