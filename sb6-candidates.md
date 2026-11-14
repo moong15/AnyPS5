@@ -34,3 +34,7 @@ Bar for candidates: both runs above baseline mean 865 (run821 828, run822 903).
 Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for next batch = 927 (pooled stack runs 870/871/878 + dlookup-off 873/876).
 | #17943 result | | | run882 917, run883 921 | below 927 | DROPPED | |
 | #16753 result | | | run884 919, run885 931 | mixed | DROPPED | |
+| drel2: descriptor table relocation | own (Sol) | 51711a9780 | queued | - | - | maybe |
+| #17786 result | | | run886 957, run887 903 | mixed | DROPPED | |
+| #18287 result | | | run888 934, run889 928 | +0.8%, +0.1% | KEPT (marginal) | already merged on main |
+| twalk PR prep | | pr/target-proof-memo 17a1900f56 | | | | PR-ready pending main-vs-PR runs; needs user OK |

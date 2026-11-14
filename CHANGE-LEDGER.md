@@ -482,3 +482,7 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 03:5x | drel dispatch read-base relocation (own, Sol), opt-in APS5_DISPATCH_RELOCATION=1 | on stack 542f385e1d | run880 963, run881 940 vs bar 927 | WIN, KEPT (fork runs now add APS5_DISPATCH_RELOCATION=1) | perf/sb6 233b7a03c8 pushed; tests agc_driver_dispatch_cache_relocation pending next stack test |
 | 2026-11-15 04:0x | #17943 encoder thread port on stack | default-on | run882 917, run883 921 vs bar 927 | DROPPED (both below) | - |
 | 2026-11-15 04:24 | #16753 per-draw fixed cost port on stack | - | run884 919, run885 931 vs bar 927 | DROPPED (919 below) | - |
+| 2026-11-15 04:3x | Sol drel2: descriptor-table V# base relocation, sub-switch APS5_DISPATCH_RELOCATION_TABLES=1 | 51711a9780 rb6/drel2 (on 233b7a03c8) | queued after chain-sb6d (bar = new stack runs) | - | uncompiled |
+| 2026-11-15 04:43 | #17786 shared collect walks port on stack | APS5_NO_SHARED_COLLECT_WALKS | run886 957, run887 903 vs bar 927 | DROPPED (903 below) | - |
+| 2026-11-15 05:02 | #18287 vertex-plan scratch (merged on main) on stack | - | run888 934, run889 928 vs bar 927 | WIN (marginal), KEPT | perf/sb6 b91a08c216 pushed |
+| 2026-11-15 05:1x | Sol: twalk upstream-ready branch pr/target-proof-memo 17a1900f56 on main 34a26d8343 (local only); check_conventions PASS; pr_overlap: docs conflict with #17738; PR body draft pr-traces/pr-target-proof-memo-body.md | - | main-vs-PR runs + validation ctest pending | - | needs user OK before any push/PR |
