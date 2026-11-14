@@ -158,11 +158,12 @@ void SetFailing(bool failing) {
 void CheckFailedWalkIsRetried() {
     BumpCollectEpoch();
     const auto address = Base + 11 * Page + 16;
+    CollectProof proof;
     SetFailing(true);
-    Require(CollectWrites(address, Page) == 0, "a failed walk returned a generation");
+    Require(CollectWrites(address, Page, proof) == 0, "a failed walk returned a generation");
     SetFailing(false);
     const auto before = Walks();
-    Require(CollectWrites(address, Page) != 0 && Walks() > before, "a failed walk was memoized");
+    Require(CollectWrites(address, Page, proof) != 0 && Walks() > before, "a failed walk was memoized");
 }
 
 void Store(std::uint64_t address) {
@@ -262,8 +263,13 @@ void CheckThreadWithoutEpochWalksEveryTime() {
     bool second = false;
     const auto address = Base + 35 * Block + 3 * Page + 100;
     std::thread worker([&] {
-        first = Walked(address, Page, address);
-        second = Walked(address, Page, address);
+        CollectProof proof;
+        auto generation = TrackerGeneration();
+        Store(address);
+        first = CollectWrites(address, Page, proof) != 0 && !UnchangedSince(address, Page, generation);
+        generation = TrackerGeneration();
+        Store(address);
+        second = CollectWrites(address, Page, proof) != 0 && !UnchangedSince(address, Page, generation);
     });
     worker.join();
     Require(first && second, "a thread that never bumped its epoch reused an entry");
@@ -439,13 +445,14 @@ void CheckEarlierWalkDoesNotAnswerLaterEpoch() {
 
 void CheckHitDuringWalkReturnsStable() {
     BumpCollectEpoch();
-    Require(CollectWrites(Base + 50 * Block, Block) != 0, "the block was not collected");
+    CollectProof proof;
+    Require(CollectWrites(Base + 50 * Block, Block, proof) != 0, "the block was not collected");
     const auto page = Base + 52 * Block + 3 * Page;
     Store(page);
     std::uint64_t hit = 0;
     {
         PausedWalk walker(1, [&] { CollectWritesUncached(Base + 52 * Block, Block); });
-        hit = CollectWrites(Base + 50 * Block, Block);
+        hit = CollectWrites(Base + 50 * Block, Block, proof);
         walker.Release();
     }
     Require(hit != 0, "a hit during a walk in progress failed");
@@ -530,6 +537,30 @@ void CheckInteriorCoverageAfterRingEviction() {
     for (std::uint64_t i = 0; i < 70; ++i) Require(CollectWrites(Base + (16 + i) * Block, Block) != 0, "a ring eviction collection failed");
     const auto address = Base + 3 * Block + 3 * Page + 100;
     Require(!Walked(address, 2 * Page, address + Page), "an interior range lost its completed observation after ring eviction");
+#ifndef _WIN32
+    Fake().maxCoverBytes = 4 * Page;
+    BumpCollectEpoch();
+    CollectProof proof;
+    Require(CollectWrites(address, 2 * Page, proof) != 0, "the owner collection failed");
+    for (std::uint64_t i = 0; i < 32; ++i) Require(CollectWrites(Base + (64 + i) * Block + Page, Page) != 0, "an exact observation eviction failed");
+    const auto before = OsWalks();
+    Require(CollectWrites(address, 2 * Page, proof) != 0 && OsWalks() == before, "an owner lost its proof after exact observation eviction");
+    Require(CollectWrites(address, 2 * Page) != 0 && OsWalks() > before, "the control retained an evicted exact observation");
+    const auto checkInvalidated = [&] {
+        const auto generation = TrackerGeneration();
+        Store(address);
+        const auto walks = OsWalks();
+        Require(CollectWrites(address, 2 * Page, proof) != 0 && OsWalks() > walks, "an invalidated owner proof skipped collection");
+        Require(!UnchangedSince(address, Page, generation), "an invalidated owner proof hid a CPU write");
+    };
+    BumpCollectEpoch();
+    checkInvalidated();
+    GuestAllocations::GuestAllocationsInvalidate_nid_postfix(static_cast<std::uintptr_t>(Base + 100 * Block), Page);
+    checkInvalidated();
+    Unwatch(Base + 101 * Block, Page);
+    checkInvalidated();
+    Fake().maxCoverBytes = 0;
+#endif
 }
 
 void CheckAdjacentCoverage() {
@@ -574,7 +605,8 @@ void CheckCoverageGapsAndInvalidations() {
 
 void CheckCoverageThreadAndDriverWrites() {
     BumpCollectEpoch();
-    Require(CollectWrites(Base, 4 * Block) != 0, "the covering collection failed");
+    CollectProof proof;
+    Require(CollectWrites(Base, 4 * Block, proof) != 0, "the covering collection failed");
     bool walked = false;
     std::thread other([&] {
         BumpCollectEpoch();
@@ -585,7 +617,7 @@ void CheckCoverageThreadAndDriverWrites() {
     const auto before = TrackerGeneration();
     const auto written = MarkWritten(Base + 2 * Block, Page);
     Require(written > before, "the driver write did not advance the tracker");
-    Require(CollectWrites(Base + Block, 2 * Block) >= written, "an observation hid a completed driver write generation");
+    Require(CollectWrites(Base, 4 * Block, proof) >= written, "an observation hid a completed driver write generation");
     Require(!UnchangedSince(Base + 2 * Block, Page, before), "an observation hid a driver write stamp");
     Require(Walked(Base + Block, 2 * Block, Base + Block + Page, false), "an uncached collection reused an observation");
 }

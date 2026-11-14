@@ -77,6 +77,14 @@ void SetFreshCollectHook(FreshCollectHook hook);
 #endif
 bool Watched(std::uint64_t address, std::size_t bytes);
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes);
+struct CollectProof {
+    std::uint64_t address = 0;
+    std::size_t bytes = 0;
+    std::uint64_t epoch = 0;
+    std::uint64_t unwatched = 0;
+    std::uint64_t mapping = 0;
+};
+std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes, CollectProof& proof);
 struct WriteSubscription;
 bool WriteIndexEnabled();
 std::shared_ptr<WriteSubscription> SubscribeWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);

@@ -2113,14 +2113,17 @@ Observation observe(std::uint64_t address, std::size_t bytes, bool memoized) {
         if (open) addRun(from, lastBlock);
     }
     if (runs.empty()) collectMemoHits.fetch_add(1, std::memory_order_relaxed);
-    std::optional<TimedAccess> timed;
-    if (!runs.empty()) timed.emplace(CounterCollect, bytes);
     std::size_t done = 0;
     auto status = Status::Complete;
     for (auto& run : runs) {
-        bool complete = walkWrites(tracker, run.first, run.stop, StampKind::Cpu);
+        bool complete;
+        {
+            const TimedAccess timed(CounterCollect, run.stop - run.first);
+            complete = walkWrites(tracker, run.first, run.stop, StampKind::Cpu);
+        }
         if (!complete && (run.first < first || run.stop > stop)) {
             run = {std::max(first, run.first), std::min(stop, run.stop), true};
+            const TimedAccess timed(CounterCollect, run.stop - run.first);
             complete = walkWrites(tracker, run.first, run.stop, StampKind::Cpu);
         }
         if (!complete) {
@@ -2156,6 +2159,20 @@ Observation Observe(std::uint64_t address, std::size_t bytes) {
 std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes) {
     const auto observation = observe(address, bytes, true);
     return observation.status == Observation::Status::Complete ? observation.generation : 0;
+}
+
+std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes, CollectProof& proof) {
+    const auto epoch = ThreadCollectEpoch();
+    const auto unwatched = unwatchSerial.load(std::memory_order_acquire);
+    const auto mapping = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    if (epoch != 0 && proof.epoch == epoch && proof.address == address && proof.bytes == bytes && proof.unwatched == unwatched && proof.mapping == mapping) {
+        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        return Tracker().stable.load(std::memory_order_acquire);
+    }
+    proof = {};
+    const auto generation = CollectWrites(address, bytes);
+    if (generation != 0 && epoch != 0) proof = {address, bytes, epoch, unwatched, mapping};
+    return generation;
 }
 
 std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
