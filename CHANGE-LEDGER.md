@@ -549,3 +549,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | perf/sb6r rebase on 80fa4d510e | d7eaae3aae | rebase | 14 commits clean, vertex-scratch now upstream | build + bar after chain-sb6b |
 | #10678 on sb6 run2 | 94562dda1 | chain-sb6b | run978 1176 (run977 1051) | wait base run979/980 |
 | #10678 on sb6 | 94562dda1 | chain-sb6b | runs 1051/1176 vs base run979 1219 | DROPPED (keep rule) |
+| sb6 base drift | 4a2ce51ac | chain-sb6b | run979 1219, run980 1056 (same build, ~15% spread) | noise note |
