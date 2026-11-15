@@ -547,3 +547,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 | pre-compact checkpoint: overnight-2026-11-15.md written (loop to reapply after compact) | - | - | - |
 | 2026-11-15 | #10678 on sb6: run977 1051 (bar 1110) | chain-sb6b | measuring | run978 + base run979 pending |
 | perf/sb6r rebase on 80fa4d510e | d7eaae3aae | rebase | 14 commits clean, vertex-scratch now upstream | build + bar after chain-sb6b |
+| #10678 on sb6 run2 | 94562dda1 | chain-sb6b | run978 1176 (run977 1051) | wait base run979/980 |
