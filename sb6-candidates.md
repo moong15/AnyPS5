@@ -41,3 +41,5 @@ Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for 
 | #18914 result | | | run890 897, run891 909 | below | DROPPED | |
 | drel PR prep | | pr/dispatch-relocation 098c36d763 | | | | PR-ready pending main-vs-PR runs; needs user OK |
 | #20041 result | | | run892 965, run893 977 | +4.1%, +5.4% | KEPT | upstream PR open (evidence comment needs user OK) |
+| #19978 result | | | run894 916, run895 881 | below | DROPPED | |
+| #17738 result | | | run896 944, run897 930 | +1.8%, +0.3% | KEPT (marginal) | upstream PR open |

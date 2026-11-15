@@ -489,3 +489,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 05:21 | #18914 PM4 CPU work port on stack | - | run890 897, run891 909 vs bar 927 | DROPPED | - |
 | 2026-11-15 05:3x | Sol: drel upstream-ready pr/dispatch-relocation 098c36d763 on main e4742e6522 (local); check_conventions PASS; overlap: line conflicts with #17738 #17943 #18101 #20130 | - | main-vs-PR runs pending | - | needs user OK |
 | 2026-11-15 05:40 | #20041 epoch proofs follow committer depth, on stack | APS5_NO_EPOCH_PROOFS opt-out | run892 965, run893 977 vs bar 927 | WIN (+4.1%, +5.4%), KEPT | perf/sb6 da950d5e55 pushed |
+| 2026-11-15 06:19 | #19978 shared read ranges on stack | - | run894 916, run895 881 vs 927 | DROPPED | - |
+| 2026-11-15 06:19 | #17738 target memo on stack | APS5_NO_TARGET_MEMO opt-out | run896 944, run897 930 vs 927 | WIN (marginal), KEPT | perf/sb6 9a20864e73 pushed (switch list union) |
