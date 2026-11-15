@@ -69,6 +69,7 @@ layout(push_constant) uniform Push {
     uint rowBegin;
     uint pipeBankXor;
     uint splitStride;
+    uint single;
 } params;
 
 uint equationBit(uint mask, uvec2 p) {
@@ -248,6 +249,7 @@ bool locate(uvec2 p, out uint src, out uint dst, out uint ranged) {
     if (tiledOffset < params.rangeBegin || tiledOffset >= params.rangeEnd) {
         return false;
     }
+    if (params.single != 0u) tiledOffset &= ~255u;
     tiledOffset -= params.tiledBase;
     linearOffset -= params.linearBase;
 

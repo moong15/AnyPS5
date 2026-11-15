@@ -3324,7 +3324,11 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     uploadedKeys = ProvedClearKeys(descriptor, guestBytes, keyProof);
     filledKeys = DccKeys::Uncompressed;
     VkClearColorValue clearValue{};
-    const bool fastClear = IsDccClear(uploadedKeys) || uploadedKeys == DccKeys::ClearSingle;
+    auto* const active = Recorder::Active();
+    const bool singleCandidate = uploadedKeys == DccKeys::ClearSingle && !RuntimeSwitches::Set(RuntimeSwitch::NoSingleGpuDecode) && layers == nullptr && blockUnits && descriptor.mipCount == 1 && geometry.layerBytes % 256u == 0;
+    const auto* singleImport = singleCandidate && GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) && !AnyShadowedOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) && active != nullptr && active->PendingWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) ? ExistingHostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) : nullptr;
+    const bool singleGpu = singleImport != nullptr;
+    const bool fastClear = IsDccClear(uploadedKeys) || (uploadedKeys == DccKeys::ClearSingle && !singleGpu);
     if (fastClear && (ClearColorFor(storageFormat, uploadedKeys, clearValue) || SingleKeyColorFor(descriptor, guestBytes, now, singleProof, storageFormat, uploadedKeys, clearValue))) {
         // A fast-cleared surface is cleared on the GPU; its texel memory is neither read nor filled.
         // The clear is recorded into the open batch like a direct upload (the image kept by it): a
@@ -3385,6 +3389,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         return;
     }
     std::vector<ImportSegment> segments;
+    if (singleGpu) segments.push_back({singleImport, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
     if (uploadedKeys == DccKeys::Uncompressed) {
         if (const auto* whole = HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) segments.push_back({whole, descriptor.baseAddress, descriptor.baseAddress + guestBytes});
         else if (blockUnits) segments = importSegments();
@@ -3469,7 +3474,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
                 for (std::uint32_t level = 0; level < mips.size(); ++level) {
                     if (!geometry.HasLayer(level, layer)) continue;
                     const auto& mip = mips[level];
-                    detiler.DispatchImage(commands, descriptor.tileMode, elementBytes, import->buffer, importOffset + geometry.GuestOffset(layer, mip), elementLayerView(level, layer), mip, false, layer, {.pipeBankXor = descriptor.pipeBankXor});
+                    detiler.DispatchImage(commands, descriptor.tileMode, elementBytes, import->buffer, importOffset + geometry.GuestOffset(layer, mip), elementLayerView(level, layer), mip, false, layer, {.pipeBankXor = descriptor.pipeBankXor, .single = singleGpu});
                 }
             }
             recordDirectUploadDone(commands);
@@ -3488,7 +3493,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
             for (std::uint32_t level = 0; level < mips.size(); ++level) {
                 if (!geometry.HasLayer(level, layer)) continue;
                 const auto& mip = mips[level];
-                detiler.Dispatch(commands, descriptor.tileMode, elementBytes, import->buffer, importOffset + geometry.GuestOffset(layer, mip), linear->Handle(), geometry.LinearLayerOffset(layer) + mip.linearOffset, mip, false, layer, geometry.thick, {.pipeBankXor = descriptor.pipeBankXor});
+                detiler.Dispatch(commands, descriptor.tileMode, elementBytes, import->buffer, importOffset + geometry.GuestOffset(layer, mip), linear->Handle(), geometry.LinearLayerOffset(layer) + mip.linearOffset, mip, false, layer, geometry.thick, {.pipeBankXor = descriptor.pipeBankXor, .single = singleGpu});
             }
         }
         const auto linearRead = WholeBufferBarrier(linear->Handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);

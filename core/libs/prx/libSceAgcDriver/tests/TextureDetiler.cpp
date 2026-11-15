@@ -31,6 +31,7 @@ struct Push {
     std::uint32_t rowBegin;
     std::uint32_t pipeBankXor;
     std::uint32_t splitStride;
+    std::uint32_t single;
 };
 
 Push decodePush(const std::vector<std::byte>& bytes) {
@@ -227,6 +228,17 @@ void RunTextureDetilerTests(const Context& context, const TextureDetilerTestAcce
         Require(lookups == 0, "a detile dispatch looked up " + std::to_string(lookups) + " Vulkan functions by name while the device's function table holds them");
         const auto tabledCapture = access.lastDispatch();
         Require(tabledCapture.groupsX == 3 && tabledCapture.groupsY == 2 && tabledCapture.groupsZ == 1, "a detile dispatch through the device's function table recorded the wrong group counts");
+    }
+
+    {
+        DetileWindow single;
+        single.single = true;
+        detiler.Dispatch(commands, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, false, 0, false, single);
+        Require(decodePush(access.lastDispatch().pushConstants).single == 1u, "comp-to-single decoding was not passed to the detiler");
+        reject([&] { detiler.Dispatch(commands, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, true, 0, false, single); }, "comp-to-single detiling requires");
+        reject([&] { detiler.Dispatch(commands, TextureTileMode::kLinear, 4, source, 0, destination, 0, layout, false, 0, false, single); }, "comp-to-single detiling requires");
+        single.tiledBase = single.rangeBegin = 16;
+        reject([&] { detiler.Dispatch(commands, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, false, 0, false, single); }, "block-aligned base");
     }
 
     reject([&] { detiler.Dispatch(VK_NULL_HANDLE, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, 0); }, "active command buffer");
