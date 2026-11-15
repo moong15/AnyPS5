@@ -555,3 +555,6 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | PR scan night | prtrack backfilled to 17:48Z | haiku | top: #16753 #20578 #20368 #18226 #10894 | Sol port job queued after #17255 |
 | #17255 port on sb6r + test helper | 33eac73b39/6208fdffac (port/sb6r-17255) | Sol | unbuilt | batch chain with #16753/#20578/#20368 ports |
 | perf/sb6r vs sb6 | d7eaae3aae | chain-sb6r | sb6r 1071/1105 (mean 1088) vs sb6 1121/1113 (1117), -2.6%, within run noise; 122/122 tests, 0 VUID | sb6r = working base for new candidates; perf/sb6 left at 4a2ce51ac2; perf/sb6r pushed fork |
+| #16753 | upstream PR | Sol screen | adds encoded shader blobs in tests | SKIPPED (spam rule) |
+| #20578 port | 6e8a0c0acc (port/sb6r-20578) | Sol | unbuilt | chain-sb6c |
+| #20368 port | 14652dde05 (port/sb6r-20368) | Sol | unbuilt; off on AMD by default, run with APS5_DRAW_INPUTS_IN_PLACE_BELOW=1024 | chain-sb6c |
