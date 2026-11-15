@@ -523,3 +523,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 | vsmain stopped: run933-pr OOM x2 (vkAllocateMemory -2, device heap 8663/8663 MiB full); zombie StellarBlade PID 24968 (10:34) likely holds VRAM; retry hung in run-one | chain-vsmain4.sh | stopped | needs reboot |
 | 2026-11-15 | after reboot 14:17: vsmain ABBA run934-main, run935-pr, run936-pr, run937-main | chain-vsmain5.sh | running | - |
 | 2026-11-15 | vsmain ABBA after reboot: main 879/1015 (mean 947), PR 1056/1004 (mean 1030) = +8.8%; pair1 +20%, pair2 -1% | chain-vsmain5.sh | done | mixed, needs more pairs |
+| 2026-11-15 | vsmain 4 more ABBA pairs run938-945 (main 80fa4d510 vs pr 5ea1648f6) | chain-vsmain6.sh | running | - |
