@@ -562,3 +562,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sub-phase draw profile (diag) | bda677f337 (diag/sb6-subprof) | chain-subprof | unbuilt | profile run1020 after readTarget chain |
 | Sol lookup (3 commits) | c9c28c8e56 (perf/sb6-lookup) | chain-lookup | lookup 1031/1059 vs sb6r 1045/1156; 142/142 tests, 0 VUID | NOT KEPT (keep rule); branch kept for retest with subprof data |
 | Sol record | 8356c8dd58 | chain-record | LIBS BUILD FAIL (DrawBindings::allocation in VulkanDevice.cpp) | Sol fixing, requeue |
+| #17255 port on sb6r | 6208fdffac | chain-sb6c | 1081/1088 vs sb6r run996 1108; 8/8 tests | NOT KEPT |

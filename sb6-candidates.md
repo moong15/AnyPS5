@@ -56,3 +56,4 @@ Batch sb6b (perf/sb6 4a2ce51ac2 = stack2 + slowlookup; bar = run948 post-reboot)
 | #6340 image table entries reuse | upstream #6340 | port/sb6b-6340 8024fe757 | tests fail 3/28 (image_table_reuse, _draw_pipeline, _plan_verify) | - | DROPPED | upstream |
 | #17255 sampled texture uploads across imports | upstream #17255 | port/sb6b-17255 bd715695e (+#16286 plumbing) | Recorder.cpp test does not compile (SampledFromStorageForTest missing), 3 tests not run | - | PARKED (fixable port) | upstream |
 | #10678 | upstream PR | run977 1051, run978 1176 vs base run979 1219 | negative | DROPPED |
+| #17255 | upstream PR (+test helper) | run994 1081, run995 1088 vs base run996 1108 | negative/noise | NOT KEPT |
