@@ -491,3 +491,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 05:40 | #20041 epoch proofs follow committer depth, on stack | APS5_NO_EPOCH_PROOFS opt-out | run892 965, run893 977 vs bar 927 | WIN (+4.1%, +5.4%), KEPT | perf/sb6 da950d5e55 pushed |
 | 2026-11-15 06:19 | #19978 shared read ranges on stack | - | run894 916, run895 881 vs 927 | DROPPED | - |
 | 2026-11-15 06:19 | #17738 target memo on stack | APS5_NO_TARGET_MEMO opt-out | run896 944, run897 930 vs 927 | WIN (marginal), KEPT | perf/sb6 9a20864e73 pushed (switch list union) |
+| 2026-11-15 06:3x | stack2 9a20864e73 validation ctest | - | 97/101 pass, layer inserted 119, VUID 0; FAIL: agc_driver_dispatch_cache_relocation{,_interpreter,_evicted,_draw_pipeline}: 'moving to identical contents did not follow the switch' (relocation never hits in test) | drel gain may be noise; Sol investigating (fix/sb6-drel-tests) | runs 900-902 continue |
+| 2026-11-15 06:3x | #20130 re-picked onto stack by Sol | 669ad849e2 rb7/20130 | queued | - | uncompiled |
