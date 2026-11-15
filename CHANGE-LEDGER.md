@@ -552,3 +552,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | sb6 base drift | 4a2ce51ac | chain-sb6b | run979 1219, run980 1056 (same build, ~15% spread) | noise note |
 | Sol lookup: registered-image proof, keep DrawPlan key, cache front probe | 2f2af3b6df/20dfa6f378/c9c28c8e56 (perf/sb6-lookup) | chain-lookup | unbuilt | queued after sb6r runs |
 | Sol record: draw set reuse, pass scratch, deferred binding allocs | 696e2fbfa3/baffb642f9/8356c8dd58 (perf/sb6-record) | chain-record | unbuilt | queued after lookup chain (runs 990-993) |
+| PR scan night | prtrack backfilled to 17:48Z | haiku | top: #16753 #20578 #20368 #18226 #10894 | Sol port job queued after #17255 |
