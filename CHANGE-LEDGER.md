@@ -558,3 +558,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | #16753 | upstream PR | Sol screen | adds encoded shader blobs in tests | SKIPPED (spam rule) |
 | #20578 port | 6e8a0c0acc (port/sb6r-20578) | Sol | unbuilt | chain-sb6c |
 | #20368 port | 14652dde05 (port/sb6r-20368) | Sol | unbuilt; off on AMD by default, run with APS5_DRAW_INPUTS_IN_PLACE_BELOW=1024 | chain-sb6c |
+| Sol readTarget: depth storage index, no callback alloc | c4db933896/183265dcf4 (perf/sb6-readtarget) | chain-readtarget | unbuilt; switch APS5_NO_DEPTH_STORAGE_INDEX | queued after chain-sb6c (runs 1010-1013) |
