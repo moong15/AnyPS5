@@ -622,12 +622,22 @@ int RunPendingSingleDecode(AgcDriver::VulkanDevice& device, std::uint8_t* block)
 #endif
     const auto surface = AddressOf(block);
     std::memset(block, 0x55, SurfaceBytes);
+    std::array<std::uint32_t, SurfaceBytes / 256> colors{};
+    for (std::size_t index = 0; index < colors.size(); ++index) {
+        colors[index] = 0x01000000u + static_cast<std::uint32_t>(index);
+        std::memcpy(block + index * 256, &colors[index], sizeof(colors[index]));
+    }
     std::memset(block + KeysOffset, 0x10, KeyBytes);
     AgcDriver::GuestMemory::BumpCollectEpoch();
     const std::array<std::uint32_t, 4> first{0x11223344u, 0x10203040u, 0x50607080u, 0x90abcdefu};
     const std::array<std::uint32_t, 4> second{0x99aabbccu, 0x01234567u, 0x89abcdefu, 0x76543210u};
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-    if (!device.FillBuffer(surface, SurfaceBytes / 2, first) || !device.FillBuffer(surface + SurfaceBytes / 2, SurfaceBytes / 2, second)) return VulkanTestSkipped;
+    constexpr std::size_t firstOffset = SurfaceBytes / 4;
+    constexpr std::size_t firstBytes = SurfaceBytes / 4;
+    constexpr std::size_t secondOffset = SurfaceBytes / 2;
+    if (!device.FillBuffer(surface + firstOffset, firstBytes, first) || !device.FillBuffer(surface + secondOffset, sizeof(second), second)) return VulkanTestSkipped;
+    std::fill(colors.begin() + firstOffset / 256, colors.begin() + (firstOffset + firstBytes) / 256, first[0]);
+    colors[secondOffset / 256] = second[0];
     auto* recorder = Recorder::Active();
     Require(recorder != nullptr && recorder->OpenWriteOverlaps(surface, SurfaceBytes), "comp-to-single decode: no open GPU producer");
     Require(AgcDriver::GuestMemory::Watched(surface, SurfaceBytes), "comp-to-single decode: imported memory lost its write watch");
@@ -652,7 +662,7 @@ int RunPendingSingleDecode(AgcDriver::VulkanDevice& device, std::uint8_t* block)
     for (std::uint32_t y = 0; y < Side; ++y) {
         for (std::uint32_t x = 0; x < Side; ++x) {
             const auto offset = layout.Offset(x, y);
-            const auto expected = y == 0 && x < Threads ? 0xffffffffu : offset < SurfaceBytes / 2 ? first[0] : second[0];
+            const auto expected = y == 0 && x < Threads ? 0xffffffffu : colors[offset / 256];
             std::uint32_t actual = 0;
             std::memcpy(&actual, block + offset, sizeof(actual));
             Require(actual == expected, "comp-to-single decode: a block color or the shader's store was lost");
@@ -1118,7 +1128,11 @@ int main(int argc, char** argv) {
         if (!device) return VulkanTestSkipped;
         if (argc == 2 && std::string_view(argv[1]) == "--pending-single-decode") {
             if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
+#ifdef _WIN32
+            watched.emplace(true, true);
+#else
             watched.emplace(true);
+#endif
             return RunPendingSingleDecode(*device, watched->Data());
         }
         if (argc == 3 && std::string_view(argv[1]) == "--epoch-proof-gate") {

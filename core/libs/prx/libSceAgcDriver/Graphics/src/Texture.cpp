@@ -3490,7 +3490,15 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     filledKeys = DccKeys::Uncompressed;
     VkClearColorValue clearValue{};
     auto* const active = Recorder::Active();
-    const bool singleCandidate = uploadedKeys == DccKeys::ClearSingle && !RuntimeSwitches::Set(RuntimeSwitch::NoSingleGpuDecode) && layers == nullptr && blockUnits && descriptor.mipCount == 1 && geometry.layerBytes % 256u == 0;
+    const auto singleBlocksAligned = [&] {
+        for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+            for (std::uint32_t level = 0; level < mips.size(); ++level) {
+                if (geometry.HasLayer(level, layer) && geometry.GuestOffset(layer, mips[level]) % 256u != 0) return false;
+            }
+        }
+        return true;
+    };
+    const bool singleCandidate = uploadedKeys == DccKeys::ClearSingle && !RuntimeSwitches::Set(RuntimeSwitch::NoSingleGpuDecode) && layers == nullptr && blockUnits && descriptor.mipCount == 1 && geometry.layerBytes % 256u == 0 && SingleKeysReadable(descriptor) && elementBytes != 0 && elementBytes <= 16u && singleBlocksAligned();
     const auto* singleImport = singleCandidate && GuestMemory::Watched(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) && !AnyShadowedOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) && active != nullptr && active->PendingWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) ? ExistingHostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) : nullptr;
     const bool singleGpu = singleImport != nullptr;
     const bool fastClear = IsDccClear(uploadedKeys) || (uploadedKeys == DccKeys::ClearSingle && !singleGpu);
