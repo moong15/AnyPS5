@@ -507,3 +507,6 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 09:11 | drel2 on stack2 (TABLES=1) | run915 1021, run916 1137 | session drift: same-time stack ~1063 (slow-off runs) -> NEUTRAL, not kept (tests also uncompilable) | - |
 | 2026-11-15 09:11 | #20130 retest | run917 1033, run918 1073 (with 1027/966 earlier) | ~ stack level under drift: NEUTRAL, DROPPED | - |
 | 2026-11-15 09:12 | chain-slow2: slowlookup 4a2ce51ac2 build+fixed tests, interleaved stack2 run923 / slow2 921,922 / stack2 run924 | - | pending | judge vs interleaved stack runs (drift) |
+| 2026-11-15 09:16 | slowlookup 4a2ce51ac2 (with subagent test/exactness fix) validation ctest | - | 17/17 pass incl agc_driver_dcc_single_decode_{gpu,disabled}, layer inserted 12, VUID 0 | tests OK | - |
+| 2026-11-15 09:2x | Sol drel2 test compile fix (Lanes to namespace scope) | b97b8671cd rb7/drel2 | not run (drel2 neutral) | - | - |
+| 2026-11-15 09:3x | user: stop stack interleave, do main-vs-PR for GPU-check fix | chain-slow2 stopped after run923 | porting d1d53b0b76+4a2ce51ac2 onto origin/main 80fa4d510e as pr/single-gpu-decode (E:\AnyPS5-prsg) | - | overnight loop ended (user up) |
