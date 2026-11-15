@@ -516,3 +516,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 09:4x | user OK: cleared E:\StellarBlade\shader_cache (disk) | - | warm runs 930/932 in series rebuild it | - | - |
 | 2026-11-15 09:5x | vsmain series aborted: main warm run930 no-trace x3; cause: staged libs-main-80fa4d510 copied at disk-full moment (19 empty files, AgcDriver.prx invalid). Main build/tests themselves fine. PR build 5ea1648f67 tests 14/14 pass | rebuild + restage main libs, empty-file check, rerun series | pending | - | - |
 | 2026-11-15 10:0x | vsmain abort #2: run-sb.py crashes when E:\StellarBlade\shader_cache is missing (I deleted it) | mkdir empty shader_cache, rerun chain-vsmain3 | pending | - | - |
+| 2026-11-15 10:3x | user: stop now. Killed series, run933-pr (run-one, run-sb.py, press-cross, game PID 24968), cleared lock | main run931 OK (main warm 930 OK first try: no load crash, #17787 works) | 1 main run only, no PR measured run | - | - |
