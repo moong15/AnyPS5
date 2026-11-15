@@ -45,3 +45,4 @@ Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for 
 | #17738 result | | | run896 944, run897 930 | +1.8%, +0.3% | KEPT (marginal) | upstream PR open |
 
 Stack2 (perf/sb6 86ef130af6): run900 978, run901 956, mean 967 = +11.8% vs original base 865. New bar 967.
+| slowlookup: GPU decode comp-to-single | own (Sol) | d1d53b0b76 | queued | - | - | maybe |

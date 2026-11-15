@@ -495,3 +495,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 06:3x | #20130 re-picked onto stack by Sol | 669ad849e2 rb7/20130 | queued | - | uncompiled |
 | 2026-11-15 06:5x | Sol drel test fix: fixture used allocation base with low word 0 (deliberately refused); relocation path not dead in game | 76ae0671d8 on perf/sb6 | tests to rerun after stack2 runs | - | - |
 | 2026-11-15 06:51 | stack2 perf/sb6 9a20864e73 (+ test fix 86ef130af6) | APS5_PIPELINE_DISPATCH=1,_MISSES=1,APS5_DISPATCH_RELOCATION=1 | run900 978, run901 956 (mean 967, +11.8% vs base 865); run902 PROFILE 933 | NEW BAR 967 | pushed 86ef130af6 |
+| 2026-11-15 07:10 | stack2 with drel switch unset | APS5_DISPATCH_RELOCATION unset | run903 893, run904 1011 vs bar 967 | not both above: drel STAYS; relocation tests now 9/9 pass, VUID 0 | - |
+| 2026-11-15 07:2x | Sol slowlookup: comp-to-single uploads decoded on GPU (CPU probe drained GPU producers; 1066 waits/2993 ms per 10 s on q0 texture-read) | d1d53b0b76 perf/sb6-slowlookup, opt-out APS5_NO_SINGLE_GPU_DECODE | queued after chain-next | - | uncompiled, shader change |
