@@ -565,3 +565,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | #17255 port on sb6r | 6208fdffac | chain-sb6c | 1081/1088 vs sb6r run996 1108; 8/8 tests | NOT KEPT |
 | #20578 port on sb6r | 6e8a0c0acc | chain-sb6c | 1157/1132 vs sb6r bases run996 1108 / run999 1196 (mean 1152); 13/13 tests | NOT KEPT (no clear win) |
 | #20368 port on sb6r (threshold 1024) | 14652dde05 | chain-sb6c | 1151/1136 vs sb6r bases run999 1196 / run1002 1149; 14/14 tests | NOT KEPT |
+| Sol readTarget | 183265dcf4 | chain-readtarget | 196 existing tests pass; own depth_storage_index_enabled/disabled crash (VUID cmdbuf not recording) | Sol fixing, requeue |
