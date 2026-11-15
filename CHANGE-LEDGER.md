@@ -576,3 +576,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol record | 76501faa65 | chain-record | 145/146: agc_draw_set_reuse now fails later (last draw set cache retained retired descriptor allocations) | Sol fix3 queued after reval fix |
 | Sol resident fast path | 7dca719f07 | chain-resident | 188/190: agc_driver_dcc_keys_rewrite_after_epoch_proof(+_committer) fail (pass on sb6r) | Sol fix queued after record fix3; chain-reval started |
 | Revalidate fast path profile | 6d0060138d | run1030 | lookup/revalidate 8.79 us/call vs 6.73 before (slower; fast path not hitting in game) | Sol adding miss-reason counters + narrowing; A/B runs continue |
+| Sol | - | - | usage limit hit 03:45, back 04:46; reval narrowing WIP uncommitted in E:\AnyPS5-reval | miss-counter build (052a455af5) + profile run1035 queued before record |
