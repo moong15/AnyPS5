@@ -574,3 +574,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol resident target fast path | 7dca719f07 (perf/sb6-resident on subprof) | chain-resident | unbuilt; switch APS5_NO_RESIDENT_TARGET_FAST | queued after record: prof 1040, A/B 1041-1044 vs subprof libs |
 | Sol Revalidate fast path | 58b991998e | chain-reval | 150/152: agc_driver_target_memo(+_draw_pipeline) fail (too few draws between insertions repeated targets); own suite passes | Sol fixing; record chain started |
 | Sol record | 76501faa65 | chain-record | 145/146: agc_draw_set_reuse now fails later (last draw set cache retained retired descriptor allocations) | Sol fix3 queued after reval fix |
+| Sol resident fast path | 7dca719f07 | chain-resident | 188/190: agc_driver_dcc_keys_rewrite_after_epoch_proof(+_committer) fail (pass on sb6r) | Sol fix queued after record fix3; chain-reval started |
