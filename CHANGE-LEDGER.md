@@ -550,3 +550,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | #10678 on sb6 run2 | 94562dda1 | chain-sb6b | run978 1176 (run977 1051) | wait base run979/980 |
 | #10678 on sb6 | 94562dda1 | chain-sb6b | runs 1051/1176 vs base run979 1219 | DROPPED (keep rule) |
 | sb6 base drift | 4a2ce51ac | chain-sb6b | run979 1219, run980 1056 (same build, ~15% spread) | noise note |
+| Sol lookup: registered-image proof, keep DrawPlan key, cache front probe | 2f2af3b6df/20dfa6f378/c9c28c8e56 (perf/sb6-lookup) | chain-lookup | unbuilt | queued after sb6r runs |
