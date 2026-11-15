@@ -80,7 +80,7 @@ struct LookupTiming {
     bool waited = false;
     double waitUs = 0;
 };
-void GuestAllocationsLookupEach_nid_postfix(const std::uintptr_t* addresses, std::size_t count, std::shared_ptr<const Range>* ranges, LookupTiming& timing);
+void GuestAllocationsLookupEachTimed_nid_postfix(const std::uintptr_t* addresses, std::size_t count, std::shared_ptr<const Range>* ranges, LookupTiming& timing);
 // Changes whenever a mutation ends, so callers can cache facts about guest mappings between changes.
 std::uint64_t GuestAllocationsGeneration_nid_postfix();
 // Precise invalidation for such caches: the callback runs, after the generation changed, for every

@@ -70,7 +70,7 @@ bool registeredImageViewsCurrent(std::span<const ShaderRecompiler::RegisteredIma
     std::vector<std::shared_ptr<const GuestAllocations::Range>> ranges(views.size());
     if (auto* scope = DrawSubprofileScope::Current()) {
         GuestAllocations::LookupTiming timing;
-        GuestAllocations::GuestAllocationsLookupEach_nid_postfix(addresses.data(), addresses.size(), ranges.data(), timing);
+        GuestAllocations::GuestAllocationsLookupEachTimed_nid_postfix(addresses.data(), addresses.size(), ranges.data(), timing);
         auto& sample = scope->Sample();
         ++sample.locks;
         sample.waits += timing.waited;
