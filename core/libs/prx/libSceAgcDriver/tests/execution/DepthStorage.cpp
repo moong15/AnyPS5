@@ -379,13 +379,13 @@ void RunLookupIndex(Context context, std::uint8_t* block) {
     Require(DepthSurfaceView(context, plain) != VK_NULL_HANDLE, "the replacement depth surface could not be created");
     Require(DepthSurfacesReleased() > released, "creating a replacement did not release the retired surfaces");
     Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr, "releasing retired depth surfaces invalidated the replacement lookup");
+    recorder.Sync();
     ClearDepthSurfaces(context.device);
     Require(DepthSurfaceStorage(context, {}, resource, 0) == nullptr && DepthSurfaceStorage(context, {}, stencil, 0) == nullptr, "clearing depth surfaces retained a stale storage candidate");
     const DepthTarget first{address, address + BlockBytes / 2, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 0.25f, 7};
     Require(DepthSurfaceView(context, first) != VK_NULL_HANDLE, "the depth surface could not be recreated after teardown");
     Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr && DepthSurfaceStorage(context, {}, stencil, 0) != nullptr, "recreating a depth surface lost its depth or stencil storage candidate");
-    recorder.Submit();
-    Check(context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue), "vkQueueWaitIdle");
+    recorder.Sync();
     ClearDepthSurfaces(context.device);
 }
 
