@@ -581,3 +581,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Reval miss reasons run1035 | 052a455af5 | chain-revalmiss | hit 11%; top misses: tracker-gen 102k, proof-serial 61k, recorder pub/write gen 61k, depth-plane 58k, no-snapshot 46k, batch id 40k | Sol narrowing at 04:47 |
 | Sol record run992 try1 | dd287359fd | chain-record | in-game abort: storage image results pending over memory outside write watch not implemented (never seen in any other run tonight) | crash flag; retry running |
 | Sol Revalidate v2 (scoped snapshots) | b4ca0bfbfb (+diag 052a455af5) | chain-reval2 | unbuilt | queued after resident: prof 1050, A/B 1051-1054 vs subprof libs |
+| Sol record (descriptor set reuse etc.) | dd287359fd | chain-record | 1154/1089 vs sb6r 1097/1207; 146/146 tests; 1 in-game abort (storage image pending outside write watch, only seen on this build) | NOT KEPT (keep rule + crash) |
