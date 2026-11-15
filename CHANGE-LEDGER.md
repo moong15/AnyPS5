@@ -572,3 +572,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol Revalidate fast path | 58b991998e (perf/sb6-reval on subprof) | chain-reval | unbuilt; switch APS5_NO_REVALIDATE_FAST | queued after readtarget: profile run1030 + 1031/1033 vs subprof base 1032/1034 |
 | Sol readTarget: depth storage index + no callback alloc | perf/sb6r = 9efb017563 | chain-readtarget | 1187/1152 vs sb6r 1141/1124 (+3.6%); 198/198 tests, 0 VUID | KEPT, perf/sb6r ff, pushed fork; PR-worthy candidate (needs main-vs-PR) |
 | Sol resident target fast path | 7dca719f07 (perf/sb6-resident on subprof) | chain-resident | unbuilt; switch APS5_NO_RESIDENT_TARGET_FAST | queued after record: prof 1040, A/B 1041-1044 vs subprof libs |
+| Sol Revalidate fast path | 58b991998e | chain-reval | 150/152: agc_driver_target_memo(+_draw_pipeline) fail (too few draws between insertions repeated targets); own suite passes | Sol fixing; record chain started |
