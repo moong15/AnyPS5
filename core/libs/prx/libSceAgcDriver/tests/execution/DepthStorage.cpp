@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
@@ -346,6 +347,48 @@ void RunPairings(Context context, std::uint8_t* block) {
     ExpectFailure([&] { static_cast<void>(DepthSurfaceStoreBack(context, *depth)); }, "through a view that another view of the plane", "a store back through a replaced view was taken by an older pairing that covers the plane");
 }
 
+void RunLookupIndex(Context context, std::uint8_t* block) {
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    const auto resource = PlaneResource(address, Format32Float);
+    const auto stencil = PlaneResource(address + BlockBytes / 2, Format8Uint);
+    ClearDepthSurfaces(context.device);
+    Require(DepthSurfaceStorage(context, {}, resource, 0) == nullptr && DepthSurfaceStorage(context, {}, stencil, 0) == nullptr, "an empty depth registry returned a storage image");
+    RunPairings(context, block);
+    Recorder recorder(context);
+    recorder.Activate();
+    const auto newest = DepthSurfaceStorage(context, {}, resource, 0);
+    Require(newest != nullptr, "a new depth surface was hidden by an earlier lookup miss");
+    for (int repeat = 0; repeat < 4; ++repeat) Require(DepthSurfaceStorage(context, {}, resource, 0) == newest, "a repeated depth lookup changed its storage image");
+    auto other = context;
+    other.device = VK_NULL_HANDLE;
+    Require(DepthSurfaceStorage(other, {}, resource, 0) == nullptr, "a depth storage lookup returned another device's surface");
+    const bool disabled = RuntimeSwitches::Set(RuntimeSwitch::NoDepthStorageIndex);
+    RuntimeSwitches::Assign(RuntimeSwitch::NoDepthStorageIndex, !disabled);
+    Require(DepthSurfaceStorage(context, {}, resource, 0) == newest, "changing the depth storage index switch changed the selected surface");
+    RuntimeSwitches::Assign(RuntimeSwitch::NoDepthStorageIndex, disabled);
+    const auto serial = DepthSurfacesSerial();
+    RetireDepthSurfaces(context.device, address, BlockBytes * 2);
+    Require(DepthSurfaceStorage(context, {}, resource, 0) == nullptr, "a retired depth surface remained eligible for storage access");
+    const DepthTarget second{address, address + BlockBytes / 2 + 8192, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 0.5f, 3};
+    Require(DepthSurfaceView(context, second) != VK_NULL_HANDLE, "the retired depth surface could not be rebound");
+    Require(DepthSurfacesSerial() == serial, "rebinding the retired depth surface unexpectedly created a surface");
+    Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr, "a rebound depth surface remained hidden by its retirement");
+    RetireDepthSurfaces(context.device, address, BlockBytes * 2);
+    const auto released = DepthSurfacesReleased();
+    const DepthTarget plain{address, 0, {Side, Side}, VK_FORMAT_D32_SFLOAT, 0.25f, 0};
+    Require(DepthSurfaceView(context, plain) != VK_NULL_HANDLE, "the replacement depth surface could not be created");
+    Require(DepthSurfacesReleased() > released, "creating a replacement did not release the retired surfaces");
+    Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr, "releasing retired depth surfaces invalidated the replacement lookup");
+    ClearDepthSurfaces(context.device);
+    Require(DepthSurfaceStorage(context, {}, resource, 0) == nullptr && DepthSurfaceStorage(context, {}, stencil, 0) == nullptr, "clearing depth surfaces retained a stale storage candidate");
+    const DepthTarget first{address, address + BlockBytes / 2, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 0.25f, 7};
+    Require(DepthSurfaceView(context, first) != VK_NULL_HANDLE, "the depth surface could not be recreated after teardown");
+    Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr && DepthSurfaceStorage(context, {}, stencil, 0) != nullptr, "recreating a depth surface lost its depth or stencil storage candidate");
+    recorder.Submit();
+    Check(context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue), "vkQueueWaitIdle");
+    ClearDepthSurfaces(context.device);
+}
+
 constexpr std::array<std::uint32_t, 16> RoundTripWords{0x3e800000u, 0x3f800000u, 0x00000000u, 0x80000000u, 0xbf000000u, 0x40000000u, 0x00000001u, 0x007fffffu, 0x807fffffu, 0x7f7fffffu, 0x7f800000u, 0xff800000u, 0x7fc00000u, 0x7fc12345u, 0x7f800001u, 0xffc00000u};
 
 std::vector<std::uint32_t> RoundTrip(Context context, std::uint8_t* block, VkFormat format) {
@@ -416,6 +459,7 @@ void RunRoundTrips(Context context, std::uint8_t* block) {
 int main(int argc, char** argv) {
     try {
         const bool restrictedDepth = argc > 1 && std::string(argv[1]) == "--restricted-depth";
+        const bool lookupIndex = argc > 1 && std::string(argv[1]) == "--lookup-index";
         std::unique_ptr<Device> device;
         try {
             device = std::make_unique<Device>(!restrictedDepth);
@@ -431,11 +475,15 @@ int main(int argc, char** argv) {
         GuestAllocations::Mutation().Add(block, BlockBytes, true, true, true);
         {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
-            Run(context, block);
-            ClearDepthSurfaces(context.device);
-            RunPairings(context, block);
-            ClearDepthSurfaces(context.device);
-            RunRoundTrips(context, block);
+            if (lookupIndex) {
+                RunLookupIndex(context, block);
+            } else {
+                Run(context, block);
+                ClearDepthSurfaces(context.device);
+                RunPairings(context, block);
+                ClearDepthSurfaces(context.device);
+                RunRoundTrips(context, block);
+            }
         }
         const bool passesOff = std::getenv("APS5_NO_DEPTH_TRANSFER_PASS") != nullptr;
         Require(passesOff ? DepthTransferPassCount() == 0 : !context.pushDescriptors || DepthTransferPassCount() > 0, passesOff ? "a depth plane transfer ran in shader passes with APS5_NO_DEPTH_TRANSFER_PASS set" : "the device enables VK_KHR_push_descriptor but no depth plane transfer ran in shader passes");

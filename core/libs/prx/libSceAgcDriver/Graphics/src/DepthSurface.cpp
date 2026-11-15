@@ -4448,17 +4448,54 @@ std::shared_ptr<StorageTexture> layeredDepthStorage(const Context& context, Dept
     return entry->storage;
 }
 
+struct DepthStorageCandidate {
+    std::uint64_t address = 0;
+    std::size_t order = 0;
+    DepthSurface* surface = nullptr;
+};
+
+std::span<const DepthStorageCandidate> depthStorageCandidates(std::uint64_t address) {
+    static std::vector<DepthStorageCandidate> candidates;
+    static std::tuple<std::uint64_t, std::uint64_t, std::size_t> generation{
+        std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::uint64_t>::max(), std::numeric_limits<std::size_t>::max()};
+    const auto& list = surfaces();
+    const auto current = std::tuple{surfacesSerial.load(std::memory_order_relaxed), surfacesReleased.load(std::memory_order_relaxed), list.size()};
+    if (generation != current) {
+        candidates.clear();
+        for (std::size_t order = 0; order < list.size(); ++order) {
+            auto* surface = list[order].get();
+            candidates.push_back({surface->target.address, order, surface});
+            if (surface->target.stencilAddress != 0 && surface->target.stencilAddress != surface->target.address) candidates.push_back({surface->target.stencilAddress, order, surface});
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const DepthStorageCandidate& a, const DepthStorageCandidate& b) {
+            return a.address != b.address ? a.address < b.address : a.order > b.order;
+        });
+        generation = current;
+    }
+    const auto found = std::ranges::equal_range(candidates, address, {}, &DepthStorageCandidate::address);
+    return {found.begin(), found.end()};
+}
+
 }
 
 std::shared_ptr<StorageTexture> DepthSurfaceStorage(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, std::uint32_t mip) {
     if (mip != 0 || resource.baseLevel != 0) return nullptr;
     std::lock_guard lock(surfacesMutex());
-    const auto& list = surfaces();
-    const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
+    const auto matches = [&](const auto* surface) {
         return surface->active->load(std::memory_order_acquire) && surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
-    });
-    if (found == list.rend()) return nullptr;
-    auto& surface = **found;
+    };
+    DepthSurface* found = nullptr;
+    if (RuntimeSwitches::Set(RuntimeSwitch::NoDepthStorageIndex)) {
+        const auto& list = surfaces();
+        const auto candidate = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) { return matches(surface.get()); });
+        if (candidate != list.rend()) found = candidate->get();
+    } else {
+        const auto candidates = depthStorageCandidates(resource.baseAddress);
+        const auto candidate = std::ranges::find_if(candidates, [&](const DepthStorageCandidate& entry) { return matches(entry.surface); });
+        if (candidate != candidates.end()) found = candidate->surface;
+    }
+    if (found == nullptr) return nullptr;
+    auto& surface = *found;
     const bool stencil = surface.target.stencilAddress != 0 && surface.target.stencilAddress == resource.baseAddress;
     if (stencil || resource.dimension != TextureDimension::k2DArray || (resource.baseArray == 0 && resource.depthOrLastArray == 0)) return surface.Storage(words, resource, mip);
     if (!surface.StorageViewMatches(words, resource)) return nullptr;
