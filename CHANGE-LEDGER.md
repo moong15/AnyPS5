@@ -546,3 +546,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 | main tip e74dd5b992 crashes Stellar Blade at start-up: 'guest sampler descriptor uses point preclamping which is not implemented' (main build). 80fa4d510e runs fine. Bisect + issue offered, needs user OK to file | - | open | - |
 | 2026-11-15 | pre-compact checkpoint: overnight-2026-11-15.md written (loop to reapply after compact) | - | - | - |
 | 2026-11-15 | #10678 on sb6: run977 1051 (bar 1110) | chain-sb6b | measuring | run978 + base run979 pending |
+| perf/sb6r rebase on 80fa4d510e | d7eaae3aae | rebase | 14 commits clean, vertex-scratch now upstream | build + bar after chain-sb6b |
