@@ -560,3 +560,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | #20368 port | 14652dde05 (port/sb6r-20368) | Sol | unbuilt; off on AMD by default, run with APS5_DRAW_INPUTS_IN_PLACE_BELOW=1024 | chain-sb6c |
 | Sol readTarget: depth storage index, no callback alloc | c4db933896/183265dcf4 (perf/sb6-readtarget) | chain-readtarget | unbuilt; switch APS5_NO_DEPTH_STORAGE_INDEX | queued after chain-sb6c (runs 1010-1013) |
 | Sub-phase draw profile (diag) | bda677f337 (diag/sb6-subprof) | chain-subprof | unbuilt | profile run1020 after readTarget chain |
+| Sol lookup (3 commits) | c9c28c8e56 (perf/sb6-lookup) | chain-lookup | lookup 1031/1059 vs sb6r 1045/1156; 142/142 tests, 0 VUID | NOT KEPT (keep rule); branch kept for retest with subprof data |
