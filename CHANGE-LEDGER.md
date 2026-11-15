@@ -578,3 +578,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Revalidate fast path profile | 6d0060138d | run1030 | lookup/revalidate 8.79 us/call vs 6.73 before (slower; fast path not hitting in game) | Sol adding miss-reason counters + narrowing; A/B runs continue |
 | Sol | - | - | usage limit hit 03:45, back 04:46; reval narrowing WIP uncommitted in E:\AnyPS5-reval | miss-counter build (052a455af5) + profile run1035 queued before record |
 | Sol Revalidate fast path v1 | 6d0060138d | chain-reval | 1119/1049 vs subprof base 1142/1185 (-7%); profile 8.8 us/call vs 6.7 | NOT KEPT; narrowing pending (Sol) |
+| Reval miss reasons run1035 | 052a455af5 | chain-revalmiss | hit 11%; top misses: tracker-gen 102k, proof-serial 61k, recorder pub/write gen 61k, depth-plane 58k, no-snapshot 46k, batch id 40k | Sol narrowing at 04:47 |
