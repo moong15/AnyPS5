@@ -62,12 +62,22 @@ bool overlap(std::uint64_t first, std::size_t firstSize, std::uint64_t second, s
 }
 
 bool registeredImageViewsCurrent(std::span<const ShaderRecompiler::RegisteredImageView> views) {
+    DrawSubprofileScope subphase(DrawProfileOp::RegisteredImages);
     if (views.empty()) return true;
     std::vector<std::uintptr_t> addresses;
     addresses.reserve(views.size());
     for (const auto& view : views) addresses.push_back(static_cast<std::uintptr_t>(view.address));
     std::vector<std::shared_ptr<const GuestAllocations::Range>> ranges(views.size());
-    GuestAllocations::GuestAllocationsLookupEach_nid_postfix(addresses.data(), addresses.size(), ranges.data());
+    if (auto* scope = DrawSubprofileScope::Current()) {
+        GuestAllocations::LookupTiming timing;
+        GuestAllocations::GuestAllocationsLookupEach_nid_postfix(addresses.data(), addresses.size(), ranges.data(), timing);
+        auto& sample = scope->Sample();
+        ++sample.locks;
+        sample.waits += timing.waited;
+        sample.waitUs += timing.waitUs;
+    } else {
+        GuestAllocations::GuestAllocationsLookupEach_nid_postfix(addresses.data(), addresses.size(), ranges.data());
+    }
     for (std::size_t index = 0; index < views.size(); ++index) {
         const auto& view = views[index];
         const auto& range = ranges[index];
@@ -4499,6 +4509,7 @@ ShaderResources::IndexOutcome ShaderResources::indexRevalidate(std::span<const C
 }
 
 bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report) {
+    DrawSubprofileScope subphase(DrawProfileOp::Revalidate);
     if (!registeredImageViewsCurrent(registeredImageViews)) {
         if (report != nullptr) *report = {ProofPath::Full, ProofFailure::Other};
         provedEpoch = 0;
@@ -4541,6 +4552,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     if (!reusable || shaders.empty()) return false;
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    DrawSubprofileScope pendingCpuPhase(DrawProfileOp::PendingWrites);
     const bool cpuWriters = !GuestMemory::WriteIndexEnabled() || AnyPendingCpuWrites(context);
     for (const auto& region : directRegions) {
         static_cast<void>(FlushDepthPlanes(region.begin, static_cast<std::size_t>(region.end - region.begin)));
@@ -4561,6 +4573,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
         if (image->Descriptor().dccAddress != 0) CompletePendingCpuWrites(context, image->Descriptor().dccAddress, DccKeyBytes(image->GuestBytes()));
     }
     // APS5_NO_FAST_REVALIDATE=1 always repeats the lookups.
+    pendingCpuPhase.Stop();
     static const bool noFast = std::getenv("APS5_NO_FAST_REVALIDATE") != nullptr;
     const auto finish = [&](bool fast, bool ok, ProofFailure failure = ProofFailure::Other) {
         if (profile) countRevalidate(fast, ok, start);
@@ -4775,6 +4788,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
         }
         return true;
     };
+    DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
     if (EpochRevalidate()) {
         if ((!directRegions.empty() || !guestMemory.Writes().empty()) && !(pendingSerialSeen != 0 && pendingSerialSeen == StorageTexture::PendingSerial())) {
             struct RegionsTag {};
@@ -4803,6 +4817,7 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
     // (3) Buffers staged in device memory (GuestBufferMemory::AllowDeviceStaging) are copied in
     // from their imports anew for this use, after the flushes above and before the work is
     // recorded; a failure to record leaves the object unusable for this dispatch, not the batch.
+    pendingPhase.Stop();
     if (!guestMemory.StagingDecisionsCurrent()) return finish(fast, false, ProofFailure::Changed);
     if (auto* recorder = Recorder::Active(); recorder != nullptr) {
         try {
@@ -5374,6 +5389,7 @@ constexpr std::array<VkDescriptorPoolSize, 4> ChainPoolCreateSizes{{{VK_DESCRIPT
 }
 
 DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind, std::optional<std::uint32_t> variableCount) {
+    DrawSubprofileScope subphase(DrawProfileOp::DescriptorAllocate);
     bool fits = true;
     for (const auto& size : sizes) {
         const auto limit = SetDescriptorLimit(context, size.type, updateAfterBind);
@@ -5452,6 +5468,7 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
 }
 
 DescriptorCache::SetAllocation DescriptorCache::AllocateRewritten(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind, std::optional<std::uint32_t> variableCount) {
+    DrawSubprofileScope subphase(DrawProfileOp::DescriptorAllocate);
     {
         std::lock_guard lock(mutex);
         if (const auto found = recycled.find({layout, variableCount.value_or(0u)}); found != recycled.end() && !found->second.empty()) {
@@ -6989,6 +7006,7 @@ ShaderResources::DrawBindings::~DrawBindings() {
 }
 
 std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedReadOnlyBuffers(std::span<const CompiledShader> shaders, Recorder& recorder, const ColorTarget* target, bool* patchedData) const {
+    DrawSubprofileScope subphase(DrawProfileOp::MovedBuffers);
     std::vector<MovedBuffer> moved;
     std::size_t movedBytes = 0;
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || (usesBda && !spaceReuse)) return moved;
@@ -7034,10 +7052,12 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
                 if (bytes > maxDrawSnapshotBytes - movedBytes) return std::nullopt;
                 if (!GuestMemory::Accessible(reinterpret_cast<const void*>(begin), bytes)) return std::nullopt;
+                DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
                 if (guestMemory.WritesOverlap(begin, bytes) || PendingStorageOverlaps(begin, bytes, nullptr) || AnyShadowedOverlaps(begin, bytes)) return std::nullopt;
                 MovedBuffer entry{index, address, static_cast<std::size_t>(size)};
                 const bool pending = recorder.PendingWriteOverlaps(begin, bytes);
                 if (pending && !movedInPlace(recorder, item, address, size, entry)) return std::nullopt;
+                pendingPhase.Stop();
                 if (moved.empty()) moved.reserve(allocations.size());
                 moved.push_back(entry);
                 if (!pending) movedBytes += bytes;
@@ -7282,6 +7302,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
 }
 
 void ShaderResources::writeDrawSets(DrawBindings& result, std::span<const std::size_t> selected, const BdaResources* faultRecord) const {
+    DrawSubprofileScope subphase(DrawProfileOp::DescriptorWrite);
     Require(context.descriptorCache != nullptr, "draw snapshots require a descriptor cache");
     std::array<bool, 2> described{};
     thread_local std::array<std::vector<VkDescriptorPoolSize>, 2>* countsSlot = nullptr;

@@ -857,6 +857,18 @@ void GuestAllocationsLookupEach_nid_postfix(const std::uintptr_t* addresses, std
     for (std::size_t index = 0; index < count; ++index) ranges[index] = lookupLocked(addresses[index], false);
 }
 
+void GuestAllocationsLookupEach_nid_postfix(const std::uintptr_t* addresses, std::size_t count, std::shared_ptr<const Range>* ranges, LookupTiming& timing) {
+    std::unique_lock lock(registry().mutex, std::defer_lock);
+    timing = {};
+    if (!lock.try_lock()) {
+        const auto start = std::chrono::steady_clock::now();
+        lock.lock();
+        timing.waitUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+        timing.waited = true;
+    }
+    for (std::size_t index = 0; index < count; ++index) ranges[index] = lookupLocked(addresses[index], false);
+}
+
 std::shared_ptr<const Range> GuestAllocationsLookup_nid_postfix(std::uintptr_t address, bool next) {
     std::lock_guard lock(registry().mutex);
     return lookupLocked(address, next);

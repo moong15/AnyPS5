@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_MUTEX_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_MUTEX_HPP
 
+#include "DrawSubprofile.hpp"
 #include <atomic>
 #include <cstdint>
 
@@ -25,7 +26,18 @@ public:
     Mutex& operator=(const Mutex&) = delete;
 
     void lock() noexcept {
-        if (!try_lock()) lockContended();
+        auto* scope = DrawSubprofileScope::Current();
+        if (scope == nullptr) {
+            if (!try_lock()) lockContended();
+            return;
+        }
+        auto& sample = scope->Sample();
+        ++sample.locks;
+        if (try_lock()) return;
+        const auto start = DrawSubprofileScope::Clock::now();
+        lockContended();
+        sample.waitUs += std::chrono::duration<double, std::micro>(DrawSubprofileScope::Clock::now() - start).count();
+        ++sample.waits;
     }
 
     bool try_lock() noexcept {

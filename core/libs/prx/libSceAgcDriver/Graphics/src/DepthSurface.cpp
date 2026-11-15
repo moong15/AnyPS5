@@ -200,7 +200,7 @@ std::vector<std::unique_ptr<DepthToStoragePass>>& depthToStoragePasses() {
 }
 
 DepthToStoragePass& depthToStoragePassFor(const Context& context) {
-    std::lock_guard lock(depthToStoragePassesMutex());
+    auto lock = LockDrawProfile(depthToStoragePassesMutex());
     auto& list = depthToStoragePasses();
     for (const auto& pass : list) {
         if (pass->Device() == context.device) return *pass;
@@ -249,7 +249,7 @@ bool mayOverlapDepthGuard(std::uint64_t address, std::uint64_t bytes) {
     struct SpansStorage {};
     auto& spans = HostThreadLocal<GuardSpans, SpansStorage>();
     if (spans.Generation() != depthGuardGeneration().load(std::memory_order_acquire)) {
-        std::shared_lock lock(depthGuardMutex());
+        auto lock = ShareDrawProfile(depthGuardMutex());
         spans.Fill(depthGuardGeneration().load(std::memory_order_relaxed), depthGuards());
         NoteGuardSpans(GuardSpanEvent::Refill);
     }
@@ -259,7 +259,7 @@ bool mayOverlapDepthGuard(std::uint64_t address, std::uint64_t bytes) {
     }
     NoteGuardSpans(GuardSpanEvent::Clear);
     if (!VerifyGuardSpans()) return false;
-    std::shared_lock lock(depthGuardMutex());
+    auto lock = ShareDrawProfile(depthGuardMutex());
     const bool overlapped = std::ranges::any_of(depthGuards(), [&](const auto& range) { return address < range.address + range.bytes && range.address < address + bytes; });
     const auto generation = depthGuardGeneration().load(std::memory_order_relaxed);
     if (overlapped && generation != spans.Generation()) spans.Fill(generation, depthGuards());
@@ -1421,7 +1421,7 @@ public:
         if (!GuestMemory::UnchangedSinceAll(sampling.initial)) return;
         sampling.refusal.clear();
         {
-            std::unique_lock guardLock(depthGuardMutex());
+            auto guardLock = LockDrawProfile(depthGuardMutex());
             for (const auto& range : sampling.initial) depthGuards().push_back({context.device, range.address, range.bytes, active, {{range.address, range.bytes, 0u}}, hostWritten, hostEverWritten});
             publishDepthGuards(true);
         }
@@ -3077,7 +3077,7 @@ void settlePendingHtileClear(const Context& context, std::uint64_t address) {
     if (recorder == nullptr) return;
     std::pair<std::uint64_t, std::size_t> metadata;
     {
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         const auto* surface = planeSurface(context.device, address);
         if (surface == nullptr || !surface->samplingActive || surface->clearGeneration == 0u || !surface->clearCompletionQueued || !surface->sampling.refusal.empty()) return;
         const auto& range = surface->sampling.initial[1];
@@ -3182,7 +3182,7 @@ void DepthSurface::PublishToGuest() {
     const auto lease = GuestAllocations::GuestAllocationsAcquireAll_nid_postfix();
     std::array<std::vector<GuestMemory::UnchangedQuery>, 3> live;
     {
-        std::shared_lock guardLock(depthGuardMutex());
+        auto guardLock = ShareDrawProfile(depthGuardMutex());
         for (std::size_t index = 0u; index < publication.size(); ++index) {
             const auto& plane = publication[index];
             const auto found = std::ranges::find_if(depthGuards(), [&](const auto& range) { return range.hostWritten == hostWritten && range.address == plane.range.address && range.bytes == plane.range.bytes; });
@@ -3296,7 +3296,7 @@ void DepthSurface::PublishToGuest() {
 
 void publishWrittenDepth(std::span<const std::shared_ptr<std::atomic<bool>>> written) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& flag : written) {
         if (!flag->load(std::memory_order_acquire)) continue;
         const auto found = std::ranges::find_if(surfaces(), [&](const auto& surface) { return surface->hostWritten == flag && surface->active->load(std::memory_order_acquire); });
@@ -3339,7 +3339,7 @@ std::optional<UntrackedHtileStamp> untrackedHtileStamp(const Recorder* recorder,
 }
 
 void forgetHtileReads(std::uint64_t address, std::size_t bytes) {
-    std::lock_guard lock(htileReadsMutex());
+    auto lock = LockDrawProfile(htileReadsMutex());
     auto& reads = htileReads();
     reads.erase(reads.lower_bound(address), reads.lower_bound(address + bytes));
     auto& scans = untrackedHtileScans();
@@ -3351,7 +3351,7 @@ bool RoutesToNativeDepthOwner(const DepthTarget& target) {
     if (target.htileAddress == 0 || !anyDepthGuard().load(std::memory_order_acquire)) return false;
     const auto bytes = static_cast<std::uint64_t>(HtileMetadataBytes(target.extent));
     if (!mayOverlapDepthGuard(target.htileAddress, bytes)) return false;
-    std::shared_lock lock(depthGuardMutex());
+    auto lock = ShareDrawProfile(depthGuardMutex());
     return std::ranges::any_of(depthGuards(), [&](const auto& range) { return range.active->load(std::memory_order_acquire) && target.htileAddress < range.address + range.bytes && range.address < target.htileAddress + bytes; });
 }
 
@@ -3411,7 +3411,7 @@ std::optional<std::pair<VkImageAspectFlags, std::uint32_t>> htileAfterMaskClear(
     if (newest == 0) return std::nullopt;
     std::optional<HtileMaskClear> clear;
     {
-        std::lock_guard lock(htileMasksMutex());
+        auto lock = LockDrawProfile(htileMasksMutex());
         for (const auto& write : htileMasks()) {
             if (write.recorderId == recorder.Id() && write.note == newest && write.clear.address <= target.htileAddress && write.clear.address + write.clear.bytes >= target.htileAddress + bytes) clear = write.clear;
         }
@@ -3457,12 +3457,12 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>>& copyDestinations() {
 }
 
 bool copiedOver(std::uint64_t address, std::size_t bytes) {
-    std::lock_guard lock(copyDestinationsMutex());
+    auto lock = LockDrawProfile(copyDestinationsMutex());
     return std::any_of(copyDestinations().begin(), copyDestinations().end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
 }
 
 void forgetCopiesInside(std::uint64_t address, std::size_t bytes) {
-    std::lock_guard lock(copyDestinationsMutex());
+    auto lock = LockDrawProfile(copyDestinationsMutex());
     std::erase_if(copyDestinations(), [&](const auto& range) { return address <= range.first && range.second <= address + bytes; });
 }
 
@@ -3476,7 +3476,7 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
     const bool pending = recorder != nullptr && recorder->PendingWriteOverlaps(target.htileAddress, bytes);
     const auto untracked = !pending && collected == 0 ? untrackedHtileStamp(recorder, target.htileAddress, bytes) : std::nullopt;
     if (!pending) {
-        std::lock_guard lock(htileReadsMutex());
+        auto lock = LockDrawProfile(htileReadsMutex());
         const auto found = htileReads().find(target.htileAddress);
         if (found != htileReads().end() && found->second != 0 && GuestMemory::UnchangedSince(target.htileAddress, bytes, found->second)) return 0;
         if (untracked) {
@@ -3490,19 +3490,19 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
         if (const auto landed = htileAfterPendingFills(*recorder, target.htileAddress, bytes)) {
             const VkImageAspectFlags cleared = (VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u)) & HtileFillClears(*landed, target.htileStencil);
             if (cleared == 0) {
-                std::lock_guard lock(htileReadsMutex());
+                auto lock = LockDrawProfile(htileReadsMutex());
                 htileReads()[target.htileAddress] = collected;
                 return 0;
             }
             if (storeHtileOnGpu(context, *recorder, target.htileAddress, bytes, expandedHtileWord(*landed, target.htileStencil, cleared))) {
                 const auto generation = GuestMemory::CollectWrites(target.htileAddress, bytes);
-                std::lock_guard lock(htileReadsMutex());
+                auto lock = LockDrawProfile(htileReadsMutex());
                 htileReads()[target.htileAddress] = generation;
                 return cleared;
             }
         } else if (const auto known = htileAfterMaskClear(*recorder, target, bytes); known.has_value() && storeHtileOnGpu(context, *recorder, target.htileAddress, bytes, known->second)) {
             const auto generation = GuestMemory::CollectWrites(target.htileAddress, bytes);
-            std::lock_guard lock(htileReadsMutex());
+            auto lock = LockDrawProfile(htileReadsMutex());
             htileReads()[target.htileAddress] = generation;
             return known->first;
         }
@@ -3517,7 +3517,7 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
         GuestMemory::Write(target.htileAddress, std::as_bytes(std::span(words)), 4);
         generation = GuestMemory::CollectWrites(target.htileAddress, bytes);
     }
-    std::lock_guard lock(htileReadsMutex());
+    auto lock = LockDrawProfile(htileReadsMutex());
     htileReads()[target.htileAddress] = generation;
     if (cleared == 0 && untracked) untrackedHtileScans()[target.htileAddress] = {bytes, target.htileStencil, *untracked};
     else untrackedHtileScans().erase(target.htileAddress);
@@ -3551,7 +3551,7 @@ void noteStalePlane(std::uint64_t begin, std::uint64_t end) {
     auto& planes = stalePlanes();
     bool first = false;
     {
-        std::lock_guard lock(planes.mutex);
+        auto lock = LockDrawProfile(planes.mutex);
         if (std::find(planes.ranges.begin(), planes.ranges.end(), std::pair{begin, end}) != planes.ranges.end()) return;
         first = planes.ranges.empty();
         planes.ranges.emplace_back(begin, end);
@@ -3563,7 +3563,7 @@ void noteStalePlane(std::uint64_t begin, std::uint64_t end) {
 bool overlapsStalePlane(std::uint64_t begin, std::uint64_t end) {
     auto& planes = stalePlanes();
     if (begin >= planes.end.load(std::memory_order_acquire) || planes.begin.load(std::memory_order_acquire) >= end) return false;
-    std::lock_guard lock(planes.mutex);
+    auto lock = LockDrawProfile(planes.mutex);
     return std::any_of(planes.ranges.begin(), planes.ranges.end(), [&](const auto& range) { return begin < range.second && range.first < end; });
 }
 
@@ -3595,13 +3595,13 @@ UnmappedPlanes& unmappedPlanes() {
 void noteUnmappedPlane(std::uint64_t begin, std::uint64_t end) {
     if (!overlapsStalePlane(begin, end)) return;
     auto& unmapped = unmappedPlanes();
-    std::lock_guard lock(unmapped.mutex);
+    auto lock = LockDrawProfile(unmapped.mutex);
     unmapped.ranges.push_back({begin, end, nextPlaneSerial()});
 }
 
 bool unmappedSince(std::uint64_t begin, std::uint64_t end, std::uint64_t mark) {
     auto& unmapped = unmappedPlanes();
-    std::lock_guard lock(unmapped.mutex);
+    auto lock = LockDrawProfile(unmapped.mutex);
     return std::any_of(unmapped.ranges.begin(), unmapped.ranges.end(), [&](const auto& range) { return range.serial > mark && range.begin < end && begin < range.end; });
 }
 
@@ -3609,7 +3609,7 @@ std::vector<bool> unmappedUnits(std::uint64_t plane, std::uint64_t planeBytes, s
     std::vector<bool> units(count, false);
     if (unitBytes == 0) return units;
     auto& unmapped = unmappedPlanes();
-    std::lock_guard lock(unmapped.mutex);
+    auto lock = LockDrawProfile(unmapped.mutex);
     for (const auto& range : unmapped.ranges) {
         if (range.serial <= mark || range.begin >= plane + planeBytes || plane >= range.end) continue;
         const auto first = (std::max(range.begin, plane) - plane) / unitBytes;
@@ -3621,7 +3621,7 @@ std::vector<bool> unmappedUnits(std::uint64_t plane, std::uint64_t planeBytes, s
 
 void pruneUnmappedPlanes(const std::vector<UnmappedPlane>& marked) {
     auto& unmapped = unmappedPlanes();
-    std::lock_guard lock(unmapped.mutex);
+    auto lock = LockDrawProfile(unmapped.mutex);
     std::erase_if(unmapped.ranges, [&](const auto& range) { return std::none_of(marked.begin(), marked.end(), [&](const auto& plane) { return plane.serial < range.serial && range.begin < plane.end && plane.begin < range.end; }); });
 }
 
@@ -3675,7 +3675,7 @@ void forgetStaleStencil(const DepthSurface& surface) {
     const auto plane = staleStencilRange(surface);
     if (std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& other) { return other->stencilStale && staleStencilRange(*other) == plane; })) return;
     auto& planes = stalePlanes();
-    std::lock_guard lock(planes.mutex);
+    auto lock = LockDrawProfile(planes.mutex);
     std::erase(planes.ranges, plane);
     publishStaleHull(planes);
 }
@@ -3721,7 +3721,7 @@ void retire(DepthSurface& surface) {
     const auto plane = stalePlaneRange(surface);
     if (std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& other) { return other->AnyStale() && stalePlaneRange(*other) == plane; })) return;
     auto& planes = stalePlanes();
-    std::lock_guard lock(planes.mutex);
+    auto lock = LockDrawProfile(planes.mutex);
     std::erase(planes.ranges, plane);
     publishStaleHull(planes);
 }
@@ -3782,7 +3782,7 @@ std::uint64_t MultisampledDepthBytes_nid_no_patch(VkExtent2D extent, std::uint32
 
 void proveOverwrittenPlanes(std::uint64_t address, std::size_t bytes) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->sampling.overwriteStencil && surface->active->load(std::memory_order_acquire) && surface->Overlaps(address, bytes)) surface->ProveOverwrite();
     }
@@ -3795,8 +3795,8 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
     if (!mayOverlapDepthGuard(address, bytes)) return;
     const auto overlaps = [&](const DepthGuard& range) { return address < range.address + range.bytes && range.address < address + bytes; };
     if (htileClear.has_value() && htileClear->second <= std::numeric_limits<std::uint64_t>::max() - htileClear->first && htileClear->first <= address && bytes <= htileClear->second && address - htileClear->first <= htileClear->second - bytes) {
-        std::lock_guard lock(surfacesMutex());
-        std::shared_lock guardLock(depthGuardMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
+        auto guardLock = ShareDrawProfile(depthGuardMutex());
         const bool accepted = std::ranges::all_of(depthGuards(), [&](const auto& range) {
             if (!overlaps(range)) return true;
             return std::ranges::any_of(surfaces(), [&](const auto& surface) {
@@ -3809,7 +3809,7 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
     }
     std::vector<std::shared_ptr<std::atomic<bool>>> written;
     {
-        std::shared_lock lock(depthGuardMutex());
+        auto lock = ShareDrawProfile(depthGuardMutex());
         if (std::ranges::none_of(depthGuards(), overlaps)) return;
         for (const auto& range : depthGuards()) {
             if (overlaps(range) && range.hostWritten->load(std::memory_order_acquire) && std::ranges::find(written, range.hostWritten) == written.end()) written.push_back(range.hostWritten);
@@ -3820,7 +3820,7 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
         if (const auto hook = depthPublicationHook.load(std::memory_order_acquire)) hook(DepthPublicationStage::ReadCaptured);
         publishWrittenDepth(written);
     }
-    std::unique_lock lock(depthGuardMutex());
+    auto lock = LockDrawProfile(depthGuardMutex());
     for (const auto& range : depthGuards()) {
         if (overlaps(range)) Require(!range.hostWritten->load(std::memory_order_acquire), "sample-preserving guest publication of native multisample depth is not implemented");
     }
@@ -3833,7 +3833,7 @@ void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t 
 
 void AppendHostWrittenDepthRanges(std::uint64_t address, std::size_t bytes, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) {
     if (bytes == 0u || !anyDepthGuard().load(std::memory_order_acquire)) return;
-    std::shared_lock lock(depthGuardMutex());
+    auto lock = ShareDrawProfile(depthGuardMutex());
     for (const auto& range : depthGuards()) {
         if (address < range.address + range.bytes && range.address < address + bytes && range.hostWritten->load(std::memory_order_acquire)) ranges.emplace_back(range.address, range.bytes);
     }
@@ -3845,7 +3845,7 @@ void SetDepthPublicationHookForTest(void (*hook)(DepthPublicationStage)) {
 
 void NoteDepthSurfaceWrite(const Context& context, const DepthTarget& target) {
     if (target.samples == 1u) return;
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     bool attached = false;
     for (const auto& surface : surfaces()) {
         if (surface->active->load(std::memory_order_acquire) && surface->context.device == context.device && holdsTarget(surface->target, target)) {
@@ -3863,7 +3863,7 @@ bool HasResidentDepthGuards_nid_no_patch() {
 bool ResidentDepthGuardOverlaps_nid_no_patch(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0u || !anyDepthGuard().load(std::memory_order_acquire)) return false;
     Require(address <= std::numeric_limits<std::uint64_t>::max() - bytes, "native depth overlap range overflows");
-    std::shared_lock lock(depthGuardMutex());
+    auto lock = ShareDrawProfile(depthGuardMutex());
     return std::ranges::any_of(depthGuards(), [&](const DepthGuard& range) {
         return range.active->load(std::memory_order_acquire) && address < range.address + range.bytes && range.address < address + bytes;
     });
@@ -3875,7 +3875,7 @@ void RetireUnmappedDepth_nid_no_patch(std::uintptr_t address, std::size_t bytes)
     const auto end = address + bytes;
     noteUnmappedPlane(address, end);
     if (!HasResidentDepthGuards_nid_no_patch()) return;
-    std::unique_lock lock(depthGuardMutex());
+    auto lock = LockDrawProfile(depthGuardMutex());
     for (auto& range : depthGuards()) {
         std::vector<GuestMemory::UnchangedQuery> remaining;
         remaining.reserve(range.live.size() + 1u);
@@ -3912,7 +3912,7 @@ VkFormat HostDepthFormat(const Context& context, VkFormat format) {
     if (format != VK_FORMAT_D16_UNORM_S8_UINT) return format;
     static AgcDriver::Mutex mutex;
     static std::map<VkPhysicalDevice, VkFormat> chosen;
-    std::lock_guard lock(mutex);
+    auto lock = LockDrawProfile(mutex);
     if (const auto found = chosen.find(context.physical); found != chosen.end()) return found->second;
     constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     auto host = format;
@@ -3937,7 +3937,7 @@ float HostDepthBiasConstant(const Context& context, VkFormat format, float const
 VkImageView RepeatDepthSurfaceView(const Context& context, const DepthTarget& target, bool depthWritten, bool stencilWritten) {
     if (target.depthPartiallyResident || target.stencilPartiallyResident) return VK_NULL_HANDLE;
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     auto* surface = drawnDepth;
     if (surface == nullptr || target.samples != 1u || surface->retired || surface->syncing || surface->pendingClear != 0u || surface->context.device != context.device || !surface->active->load(std::memory_order_acquire) || !sameSurface(surface->target, target)) return VK_NULL_HANDLE;
     surface->written = ++depthWrites;
@@ -3955,7 +3955,7 @@ VkImageView RepeatDepthSurfaceView(const Context& context, const DepthTarget& ta
 
 const char* DepthPlanesObligation(VkDevice device, std::uint64_t address, std::uint64_t bytes) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->context.device != device || !surface->Overlaps(address, bytes)) continue;
         if (surface->AnyStale()) return "a depth plane to store";
@@ -3967,7 +3967,7 @@ const char* DepthPlanesObligation(VkDevice device, std::uint64_t address, std::u
 const char* DepthTargetObligation(const Context& context, const DepthTarget& target, bool depthWritten) {
     const bool nativeOwner = RoutesToNativeDepthOwner(target);
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
         if (candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameSurface(candidate->target, target)) {
@@ -4041,7 +4041,7 @@ VkImageView DepthSurfaceViewWithStencilWriteIntent(const Context& context, const
     const auto htileCleared = RoutesToNativeDepthOwner(target) ? VkImageAspectFlags{0} : storeBackClearedHtile(context, target);
     std::lock_guard gpu(GuestMemory::GpuMutex());
     settlePendingHtileClear(context, target.address);
-    std::unique_lock lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     const bool cleared = takeClearedHtile(target);
     DepthSurface* surface = nullptr;
     for (const auto& candidate : surfaces()) {
@@ -4054,7 +4054,7 @@ VkImageView DepthSurfaceViewWithStencilWriteIntent(const Context& context, const
         if (surface == nullptr && candidate->active->load(std::memory_order_acquire) && candidate->context.device == context.device && sameLayoutWithin(candidate->target, target)) surface = candidate.get();
     }
     if (surface != nullptr && overwrittenStencil && surface->PublishedUnderStorage()) {
-        std::unique_lock guardLock(depthGuardMutex());
+        auto guardLock = LockDrawProfile(depthGuardMutex());
         surface->active->store(false, std::memory_order_release);
         std::erase_if(depthGuards(), [&](const auto& range) { return range.active == surface->active; });
         anyDepthGuard().store(!depthGuards().empty(), std::memory_order_release);
@@ -4074,7 +4074,7 @@ VkImageView DepthSurfaceViewWithStencilWriteIntent(const Context& context, const
         if (stencilBytes != 0u) RequireNoResidentDepthRead_nid_no_patch(target.stencilAddress, static_cast<std::size_t>(stencilBytes));
         if (metadataBytes != 0u) RequireNoResidentDepthRead_nid_no_patch(target.htileAddress, static_cast<std::size_t>(metadataBytes));
         {
-            std::shared_lock guardLock(depthGuardMutex());
+            auto guardLock = ShareDrawProfile(depthGuardMutex());
             for (const auto& range : depthGuards()) {
                 const bool overlapsRange = (target.address < range.address + range.bytes && range.address < target.address + depthBytes) || (stencilBytes != 0u && target.stencilAddress < range.address + range.bytes && range.address < target.stencilAddress + stencilBytes) || (metadataBytes != 0u && target.htileAddress < range.address + range.bytes && range.address < target.htileAddress + metadataBytes);
                 Require(!overlapsRange || !range.active->load(std::memory_order_acquire) || !range.hostEverWritten->load(std::memory_order_acquire), "a native multisample depth attachment over the planes of a host-written owner of another identity is not implemented");
@@ -4093,7 +4093,7 @@ VkImageView DepthSurfaceViewWithStencilWriteIntent(const Context& context, const
         ++mirrorEpoch;
         auto& fresh = *surfaces().back();
         if (target.samples != 1u && fresh.sampleable && fresh.sampling.refusal.empty()) {
-            std::unique_lock guardLock(depthGuardMutex());
+            auto guardLock = LockDrawProfile(depthGuardMutex());
             for (const auto& range : fresh.sampling.initial) depthGuards().push_back({context.device, range.address, range.bytes, fresh.active, {{range.address, range.bytes, 0u}}, fresh.hostWritten, fresh.hostEverWritten});
             publishDepthGuards(true);
             InstallResidentImageReadGuard_nid_no_patch();
@@ -4150,7 +4150,7 @@ VkImageView DepthSurfaceViewWithStencilWriteIntent(const Context& context, const
 
 SampleOrderTarget DepthSurfaceOrderTarget(const Context& context, const DepthTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::unique_lock lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& candidate : surfaces()) {
         if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !holdsTarget(candidate->target, target)) continue;
         Require(candidate->sampleable, "the multisampled depth surface whose samples are put in the guest's order cannot be sampled");
@@ -4161,7 +4161,7 @@ SampleOrderTarget DepthSurfaceOrderTarget(const Context& context, const DepthTar
 
 DepthSampleLocations DepthSurfaceSampleLocations(const Context& context, const DepthTarget& target) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::unique_lock lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& candidate : surfaces()) {
         if (!candidate->active->load(std::memory_order_acquire) || candidate->context.device != context.device || !holdsTarget(candidate->target, target)) continue;
         DepthSampleLocations depth;
@@ -4185,7 +4185,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> FlushDepthPlanes(std::uint6
     const auto end = bytes > std::numeric_limits<std::uint64_t>::max() - address ? std::numeric_limits<std::uint64_t>::max() : address + bytes;
     if (flushing || !overlapsStalePlane(address, end)) return {};
     if (scope == DepthPlaneScope::Overlapped) {
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         const auto staleInRange = [&](const auto& surface) {
             if (surface->syncing) return false;
             if (surface->stencilStale) {
@@ -4220,7 +4220,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> FlushDepthPlanes(std::uint6
     std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
     {
         std::lock_guard gpu(GuestMemory::GpuMutex());
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         std::vector<std::pair<std::uint64_t, std::uint64_t>> remaining;
         std::vector<UnmappedPlane> marked;
         for (const auto& surface : surfaces()) {
@@ -4283,7 +4283,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> FlushDepthPlanes(std::uint6
             }
         }
         auto& planes = stalePlanes();
-        std::lock_guard staleLock(planes.mutex);
+        auto staleLock = LockDrawProfile(planes.mutex);
         planes.ranges = std::move(remaining);
         publishStaleHull(planes);
         pruneUnmappedPlanes(marked);
@@ -4291,7 +4291,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> FlushDepthPlanes(std::uint6
     for (auto& entry : stored) entry.flushed = StorageTexture::FlushPending(entry.begin, static_cast<std::size_t>(entry.end - entry.begin), nullptr, "depth plane store");
     for (auto& entry : storedStencils) entry.flushed = StorageTexture::FlushPending(entry.begin, static_cast<std::size_t>(entry.end - entry.begin), nullptr, "stencil plane store");
     const auto generation = GuestMemory::TrackerGeneration();
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& entry : storedStencils) {
         if (!entry.flushed || std::none_of(surfaces().begin(), surfaces().end(), [&](const auto& candidate) { return candidate.get() == entry.surface; })) continue;
         GuestMemory::CollectWrites(entry.begin, static_cast<std::size_t>(entry.end - entry.begin));
@@ -4449,7 +4449,7 @@ void NoteHtileMaskOnGpu(const Context& context, const HtileMaskClear& clear) {
         note = write.note;
         covers = write.begin <= clear.address && write.end >= end;
     }
-    std::lock_guard lock(htileMasksMutex());
+    auto lock = LockDrawProfile(htileMasksMutex());
     auto& masks = htileMasks();
     std::erase_if(masks, [&](const HtileMaskWrite& write) { return clear.address < write.clear.address + write.clear.bytes && write.clear.address < end; });
     if (!covers) return;
@@ -4459,13 +4459,13 @@ void NoteHtileMaskOnGpu(const Context& context, const HtileMaskClear& clear) {
 }
 
 void ForgetHtileMasks_nid_no_patch(std::uint64_t recorderId) {
-    std::lock_guard lock(htileMasksMutex());
+    auto lock = LockDrawProfile(htileMasksMutex());
     std::erase_if(htileMasks(), [&](const HtileMaskWrite& write) { return write.recorderId == recorderId; });
 }
 
 void NoteCopyDestination(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0) return;
-    std::lock_guard lock(copyDestinationsMutex());
+    auto lock = LockDrawProfile(copyDestinationsMutex());
     auto& ranges = copyDestinations();
     std::erase_if(ranges, [&](const auto& range) { return address <= range.first && range.second <= address + bytes; });
     ranges.emplace_back(address, address + bytes);
@@ -4474,7 +4474,7 @@ void NoteCopyDestination(std::uint64_t address, std::size_t bytes) {
 
 bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::size_t nativeBytes) {
     forgetCopiesInside(htileAddress, bytes);
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     forgetHtileReads(htileAddress, bytes);
     bool existing = false;
     bool completionCandidate = false;
@@ -4509,7 +4509,7 @@ bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::siz
 }
 
 void ArmHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire) || !surface->samplingActive || surface->target.htileAddress != htileAddress || !surface->clearPending) continue;
         const auto& metadata = surface->sampling.initial[1];
@@ -4521,7 +4521,7 @@ void ArmHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
 }
 
 void QueueHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire) || !surface->samplingActive || surface->target.htileAddress != htileAddress) continue;
         if (bytes < surface->sampling.initial[1].bytes) continue;
@@ -4532,7 +4532,7 @@ void QueueHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
 }
 
 void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire) || !surface->samplingActive || surface->target.htileAddress != htileAddress) continue;
         const auto& metadata = surface->sampling.initial[1];
@@ -4547,10 +4547,10 @@ void CompleteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes) {
 void ClearDepthSurfaces(VkDevice device) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
     {
-        std::lock_guard lock(htileMasksMutex());
+        auto lock = LockDrawProfile(htileMasksMutex());
         std::erase_if(htileMasks(), [&](const HtileMaskWrite& write) { return write.device == device; });
     }
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     drawnDepth = nullptr;
     surfacesSerial.fetch_add(1, std::memory_order_release);
     std::erase_if(depthOwners(), [&](const auto& entry) { return entry.first.first == device; });
@@ -4561,17 +4561,17 @@ void ClearDepthSurfaces(VkDevice device) {
     std::erase_if(planeCopies(), [&](const auto& entry) { return std::get<0>(entry.first) == device; });
     std::erase_if(layeredStorages(), [&](const auto& entry) { return std::get<0>(entry.first) == device; });
     {
-        std::lock_guard passesLock(depthToStoragePassesMutex());
+        auto passesLock = LockDrawProfile(depthToStoragePassesMutex());
         std::erase_if(depthToStoragePasses(), [&](const auto& pass) { return pass->Device() == device; });
     }
-    std::unique_lock guardLock(depthGuardMutex());
+    auto guardLock = LockDrawProfile(depthGuardMutex());
     const auto removed = std::erase_if(depthGuards(), [&](const auto& range) { return range.device == device; });
     publishDepthGuards(removed != 0);
     UpdateResidentImageUnmapObserver_nid_no_patch();
 }
 
 std::optional<VkExtent2D> ActiveDepthExtent(VkDevice device, std::uint64_t address) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->active->load(std::memory_order_acquire) && surface->context.device == device && !surface->retired && surface->target.address == address && surface->target.samples == 1u) return surface->target.extent;
     }
@@ -4598,7 +4598,7 @@ std::shared_ptr<Texture> DepthSurfaceFirstSample(const Context& context, std::sp
     Require(resource.dimension == TextureDimension::k2DMsaa, "reading sample 0 of a depth surface needs a multisampled descriptor");
     const auto source = DepthSurfaceTexture(context, words, resource, VkComponentMapping{}, VK_IMAGE_VIEW_TYPE_2D);
     Require(source != nullptr, "reading sample 0 of a multisampled depth surface whose depth plane is not at the descriptor's address is not implemented");
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     auto* found = planeSurface(context.device, resource.baseAddress);
     Require(found != nullptr && found->target.address == resource.baseAddress, "reading sample 0 of a multisampled depth surface whose depth plane is not at the descriptor's address is not implemented");
     return found->FirstSample(*source, components);
@@ -4609,12 +4609,12 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
         return surface->active->load(std::memory_order_acquire) && surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
     };
     {
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         if (std::none_of(surfaces().begin(), surfaces().end(), held)) return nullptr;
     }
     std::lock_guard gpu(GuestMemory::GpuMutex());
     settlePendingHtileClear(context, resource.baseAddress);
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     auto* found = planeSurface(context.device, resource.baseAddress);
     if (found == nullptr) return nullptr;
     const auto& base = found->target;
@@ -4697,7 +4697,7 @@ bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resou
     std::lock_guard gpu(GuestMemory::GpuMutex());
     const auto address = resource.baseAddress;
     settlePendingHtileClear(context, address);
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     auto* found = planeSurface(context.device, address);
     if (found == nullptr || !found->Holds(texture)) return false;
     if (!depthCopySourceActive) found->CheckCurrent();
@@ -4708,7 +4708,7 @@ bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resou
 void RequireNoNativeDepthFeedback_nid_no_patch(const Context& context, const DepthTarget& target, std::span<const std::shared_ptr<Texture>> sampled) {
     if (target.samples == 1u || sampled.empty()) return;
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire)) continue;
         if (surface->context.device != context.device || !holdsTarget(surface->target, target)) continue;
@@ -4768,7 +4768,7 @@ std::optional<float> planeFillDepth(const DepthTarget& target, std::uint64_t add
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
     forgetCopiesInside(address, bytes);
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     forgetHtileReads(address, bytes);
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire)) continue;
@@ -4843,7 +4843,7 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
 
 std::size_t DiscardFilledDepthPlanes(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
     if (bytes == 0 || !overlapsStalePlane(address, address + bytes)) return 0;
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     std::size_t discarded = 0;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> remaining;
     for (const auto& surface : surfaces()) {
@@ -4861,7 +4861,7 @@ std::size_t DiscardFilledDepthPlanes(std::uint64_t address, std::size_t bytes, s
     }
     if (discarded == 0) return 0;
     auto& planes = stalePlanes();
-    std::lock_guard staleLock(planes.mutex);
+    auto staleLock = LockDrawProfile(planes.mutex);
     planes.ranges = std::move(remaining);
     publishStaleHull(planes);
     return discarded;
@@ -4869,7 +4869,7 @@ std::size_t DiscardFilledDepthPlanes(std::uint64_t address, std::size_t bytes, s
 
 void NoteDepthRenderControl(const DepthRenderControl& draw) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (!surface->active->load(std::memory_order_acquire) || surface->target.samples == 1u || surface->target.samples != draw.samples || surface->target.address != draw.address) continue;
         surface->renderControl = draw.control;
@@ -4883,12 +4883,12 @@ void NoteDepthRenderControl(const DepthRenderControl& draw) {
 bool DepthRenderControlDrains(const DepthRenderControl& draw) {
     if (draw.samples == 1u) return false;
     if ((draw.control & 0x60u) != 0u) return true;
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->active->load(std::memory_order_acquire) && surface->target.samples == draw.samples && surface->target.address == draw.address; });
 }
 
 bool DepthSurfaceAt(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     const auto* found = planeSurface(context.device, resource.baseAddress);
     if (found == nullptr) return false;
     const auto& target = found->target;
@@ -4961,8 +4961,9 @@ std::span<const DepthStorageCandidate> depthStorageCandidates(std::uint64_t addr
 }
 
 std::shared_ptr<StorageTexture> DepthSurfaceStorage(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, std::uint32_t mip) {
+    DrawSubprofileScope subphase(DrawProfileOp::DepthStorage);
     if (mip != 0 || resource.baseLevel != 0) return nullptr;
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     const auto matches = [&](const auto* surface) {
         return surface->active->load(std::memory_order_acquire) && surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
     };
@@ -5004,7 +5005,7 @@ std::array<std::uint32_t, 8> DepthCopySourceWords(const DepthTarget& target, boo
 }
 
 bool DepthSurfaceStoreBack(const Context& context, const StorageTexture& storage) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (auto& [key, entry] : layeredStorages()) {
         if (std::get<0>(key) != context.device || entry->storage.get() != &storage) continue;
         const auto slices = layeredSlices(context, *entry);
@@ -5025,18 +5026,18 @@ bool DepthSurfaceStoreBack(const Context& context, const StorageTexture& storage
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->active->load(std::memory_order_acquire) && !surface->retired && (surface->target.address == address || surface->target.stencilAddress == address); });
 }
 
 bool DepthSurfaceOverlaps(VkDevice device, std::uint64_t address, std::uint64_t bytes) {
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->active->load(std::memory_order_acquire) && !surface->retired && surface->context.device == device && surface->Overlaps(address, bytes); });
 }
 
 void RetireDepthSurfaces(VkDevice device, std::uint64_t address, std::uint64_t bytes) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->context.device != device || surface->retired || !surface->Overlaps(address, bytes)) continue;
         const auto [stencilBegin, stencilEnd] = staleStencilRange(*surface);
@@ -5111,7 +5112,7 @@ void RunDepthExpandPass(const Context& context, const DepthExpandPass& pass) {
         return std::runtime_error(text);
     };
     {
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         for (const auto address : {pass.destination, pass.stencilDestination}) {
             if (address != 0 && planeSurface(context.device, address) != nullptr) throw failure(address, "into a live depth surface");
         }
@@ -5129,7 +5130,7 @@ void RunDepthExpandPass(const Context& context, const DepthExpandPass& pass) {
         enum class Read { Surface, Clear, GuestBytes } read = Read::Surface;
         ExpandWrite wrote;
         {
-            std::lock_guard lock(surfacesMutex());
+            auto lock = LockDrawProfile(surfacesMutex());
             const auto owner = depthOwners().find({context.device, source.address});
             if (owner != depthOwners().end()) {
                 auto* surface = owner->second.surface;
@@ -5157,7 +5158,7 @@ void RunDepthExpandPass(const Context& context, const DepthExpandPass& pass) {
         wrote.destination = destination;
         wrote.version = destination->Version();
         {
-            std::lock_guard lock(surfacesMutex());
+            auto lock = LockDrawProfile(surfacesMutex());
             expandWrites()[key] = std::move(wrote);
             unstoredExpands()[key] = static_cast<std::size_t>(destination->GuestBytes());
         }
@@ -5176,7 +5177,7 @@ void RunDepthExpandPass(const Context& context, const DepthExpandPass& pass) {
 void StoreDepthExpandWrites(const Context& context) {
     std::vector<std::pair<std::uint64_t, std::size_t>> planes;
     {
-        std::lock_guard lock(surfacesMutex());
+        auto lock = LockDrawProfile(surfacesMutex());
         auto& unstored = unstoredExpands();
         for (auto entry = unstored.begin(); entry != unstored.end();) {
             if (entry->first.first != context.device) {
@@ -5197,7 +5198,7 @@ void StoreDepthExpandWrites(const Context& context) {
         if (StorageTexture::FlushPending(address, bytes, nullptr, "DB expand")) expandsStored.fetch_add(1, std::memory_order_relaxed);
     }
     if (kept.empty()) return;
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& [address, bytes] : kept) unstoredExpands().try_emplace({context.device, address}, bytes);
 }
 
@@ -5207,13 +5208,13 @@ DepthExpandStatistics DepthExpandCounts() {
 
 void RetireCoveredDepthSurfaces(VkDevice device, std::span<const std::pair<std::uint64_t, std::uint64_t>> written, std::span<const WrittenStorageExtent> extents) {
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    std::lock_guard lock(surfacesMutex());
+    auto lock = LockDrawProfile(surfacesMutex());
     for (const auto& surface : surfaces()) {
         if (surface->context.device != device || surface->retired || !surface->CoveredBy(written, extents)) continue;
         if (!surface->PlaneCoveredBy(true, written, extents)) storeStaleStencil(*surface);
         retire(*surface);
         if (surface->target.samples == 1u || !surface->samplingActive || surface->hostWritten->load(std::memory_order_acquire)) continue;
-        std::unique_lock guardLock(depthGuardMutex());
+        auto guardLock = LockDrawProfile(depthGuardMutex());
         surface->active->store(false, std::memory_order_release);
         std::erase_if(depthGuards(), [&](const auto& range) { return range.active == surface->active; });
         anyDepthGuard().store(!depthGuards().empty(), std::memory_order_release);

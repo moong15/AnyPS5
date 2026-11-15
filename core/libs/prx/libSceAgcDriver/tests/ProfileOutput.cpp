@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include <algorithm>
 #include <chrono>
 #include <future>
@@ -20,6 +21,27 @@ void FormatAndDrain() {
         output.Print("%s\n", longLine.c_str());
     }
     Check(written == "shader 1.25 42\n" + longLine + "\n", "formatting or shutdown drain changed the output");
+}
+
+void DrawSubphaseReport() {
+    AgcDriver::DrawSubprofile totals;
+    totals.samples[0][static_cast<std::size_t>(AgcDriver::DrawProfileOp::Find)] = {1250.0, 3, 2, 1, 250.0};
+    totals.samples[1][static_cast<std::size_t>(AgcDriver::DrawProfileOp::DrawCommand)] = {500.0, 4, 0, 0, 0};
+    totals.samples[2].back() = {2000.0, 1, 1, 0, 0};
+    std::string written;
+    AgcDriver::ProfileOutput output([&](std::string_view text) { written += text; });
+    const auto print = [&](const char* format, auto... args) { output.Print(format, args...); };
+    totals.Print(print);
+    output.Flush();
+    Check(written == "[draws] subphases (10 s): lookup/resource-cache-find=1.250ms calls=3 locks=2 waits=1 wait=0.250ms\n"
+                     "[draws] subphases (10 s): record/draw-command=0.500ms calls=4 locks=0 waits=0 wait=0.000ms\n"
+                     "[draws] subphases (10 s): readTarget/dcc-clear=2.000ms calls=1 locks=1 waits=0 wait=0.000ms\n",
+        "draw sub-phase names, units, counts or inactive entries changed");
+    const auto size = written.size();
+    totals = {};
+    totals.Print(print);
+    output.Flush();
+    Check(written.size() == size, "cleared draw sub-phases were printed again");
 }
 
 void SlowWriter() {
@@ -155,6 +177,7 @@ void StopWithProducers() {
 int main() {
     try {
         FormatAndDrain();
+        DrawSubphaseReport();
         SlowWriter();
         ConcurrentWriters();
         WriterFailure();
