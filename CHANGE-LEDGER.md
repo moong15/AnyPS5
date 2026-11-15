@@ -519,3 +519,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 10:3x | user: stop now. Killed series, run933-pr (run-one, run-sb.py, press-cross, game PID 24968), cleared lock | main run931 OK (main warm 930 OK first try: no load crash, #17787 works) | 1 main run only, no PR measured run | - | - |
 | 2026-11-15 | resume vsmain: run933-pr, run934-main, run935-pr (pr/single-gpu-decode 5ea1648f6 vs main 80fa4d510) | chain-vsmain4.sh | running | - |
 | 2026-11-15 | user: stop. vsmain resume killed during run933-pr deploy; deploy partial (libs busy: old game PID 24968 holds libkernel_sys/web, ulobjmgr) | chain-vsmain4.sh | stopped | no PR run |
+| 2026-11-15 | resume vsmain again: locked libs files renamed into StellarBlade/stuck (old PID 24968 zombie); run933-pr, run934-main, run935-pr | chain-vsmain4.sh | running | - |
