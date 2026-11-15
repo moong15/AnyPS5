@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -607,6 +608,60 @@ void RunUniformSingleClear(AgcDriver::VulkanDevice& device, std::uint8_t* block)
     Require(wrong == 0, message);
 }
 
+int RunPendingSingleDecode(AgcDriver::VulkanDevice& device, std::uint8_t* block) {
+    using namespace AgcDriver::Graphics;
+#ifndef _WIN32
+    const auto context = AgcDriver::VulkanDeviceTestAccess::ContextOf(device);
+    const auto decided = PrepareImportWatch(context);
+    SetImportWatch(context, ImportWatch::Watch);
+    struct Restore {
+        const Context& context;
+        ImportWatch decided;
+        ~Restore() { SetImportWatch(context, decided); }
+    } restore{context, decided};
+#endif
+    const auto surface = AddressOf(block);
+    std::memset(block, 0x55, SurfaceBytes);
+    std::memset(block + KeysOffset, 0x10, KeyBytes);
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    const std::array<std::uint32_t, 4> first{0x11223344u, 0x10203040u, 0x50607080u, 0x90abcdefu};
+    const std::array<std::uint32_t, 4> second{0x99aabbccu, 0x01234567u, 0x89abcdefu, 0x76543210u};
+    std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    if (!device.FillBuffer(surface, SurfaceBytes / 2, first) || !device.FillBuffer(surface + SurfaceBytes / 2, SurfaceBytes / 2, second)) return VulkanTestSkipped;
+    auto* recorder = Recorder::Active();
+    Require(recorder != nullptr && recorder->OpenWriteOverlaps(surface, SurfaceBytes), "comp-to-single decode: no open GPU producer");
+    Require(AgcDriver::GuestMemory::Watched(surface, SurfaceBytes), "comp-to-single decode: imported memory lost its write watch");
+    const auto submissions = recorder->Submissions();
+    const auto uploads = ThreadLookupOutcomes().counts;
+    const auto texture = TextureDescriptor(block, block + KeysOffset);
+    std::vector<std::uint32_t> writeData(16, 0u);
+    std::copy(texture.begin(), texture.end(), writeData.begin() + 4);
+    Dispatch(device, WriteCode, writeData, false);
+    const bool disabled = RuntimeSwitches::Set(RuntimeSwitch::NoSingleGpuDecode);
+    if (!disabled) {
+        Require(recorder->Submissions() == submissions, "comp-to-single decode: the upload submitted and waited for its producer");
+        Require(ThreadLookupOutcomes().counts[LookupOutcomes::UploadDirect] == uploads[LookupOutcomes::UploadDirect] + 1, "comp-to-single decode: no GPU upload was recorded");
+    } else {
+        Require(recorder->Submissions() > submissions, "comp-to-single decode: the opt-out did not restore the CPU read");
+    }
+    const auto image = StorageTexture::FindPending(surface, SurfaceBytes);
+    Require(image != nullptr, "comp-to-single decode: the shader left no pending image");
+    StorageTexture::FlushPending(surface, SurfaceBytes, nullptr, "test comp-to-single decode");
+    device.WaitIdle();
+    const ColorTargetLayout layout(Side, Side, ColorTileMode::RenderTarget, 4);
+    for (std::uint32_t y = 0; y < Side; ++y) {
+        for (std::uint32_t x = 0; x < Side; ++x) {
+            const auto offset = layout.Offset(x, y);
+            const auto expected = y == 0 && x < Threads ? 0xffffffffu : offset < SurfaceBytes / 2 ? first[0] : second[0];
+            std::uint32_t actual = 0;
+            std::memcpy(&actual, block + offset, sizeof(actual));
+            Require(actual == expected, "comp-to-single decode: a block color or the shader's store was lost");
+        }
+    }
+    RequireKeys(block + KeysOffset, 0xff, "comp-to-single decode after write-back");
+    return 0;
+}
+
 void RunSingleKeysSampled(AgcDriver::VulkanDevice& device, std::uint8_t* block, std::uint8_t* outputBlock, const char* memory) {
     auto* texels = block;
     auto* keys = block + KeysOffset;
@@ -1061,6 +1116,11 @@ int main(int argc, char** argv) {
         std::optional<GuestBlock> hinted;
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-single-decode") {
+            if (!AgcDriver::GuestMemory::WriteWatched()) return VulkanTestSkipped;
+            watched.emplace(true);
+            return RunPendingSingleDecode(*device, watched->Data());
+        }
         if (argc == 3 && std::string_view(argv[1]) == "--epoch-proof-gate") {
             if (!AgcDriver::GuestMemory::WriteWatched()) {
                 std::puts("epoch proof gate: no write watching: skipped");
