@@ -58,3 +58,4 @@ Batch sb6b (perf/sb6 4a2ce51ac2 = stack2 + slowlookup; bar = run948 post-reboot)
 | #10678 | upstream PR | run977 1051, run978 1176 vs base run979 1219 | negative | DROPPED |
 | #17255 | upstream PR (+test helper) | run994 1081, run995 1088 vs base run996 1108 | negative/noise | NOT KEPT |
 | #20578 | upstream PR | run997 1157, run998 1132 vs bases 1108/1196 | ~0 | NOT KEPT |
+| #20368 | upstream PR, APS5_DRAW_INPUTS_IN_PLACE_BELOW=1024 | run1000 1151, run1001 1136 vs bases 1196/1149 | ~-2% | NOT KEPT |
