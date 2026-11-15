@@ -521,3 +521,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 | user: stop. vsmain resume killed during run933-pr deploy; deploy partial (libs busy: old game PID 24968 holds libkernel_sys/web, ulobjmgr) | chain-vsmain4.sh | stopped | no PR run |
 | 2026-11-15 | resume vsmain again: locked libs files renamed into StellarBlade/stuck (old PID 24968 zombie); run933-pr, run934-main, run935-pr | chain-vsmain4.sh | running | - |
 | 2026-11-15 | vsmain stopped: run933-pr OOM x2 (vkAllocateMemory -2, device heap 8663/8663 MiB full); zombie StellarBlade PID 24968 (10:34) likely holds VRAM; retry hung in run-one | chain-vsmain4.sh | stopped | needs reboot |
+| 2026-11-15 | after reboot 14:17: vsmain ABBA run934-main, run935-pr, run936-pr, run937-main | chain-vsmain5.sh | running | - |
