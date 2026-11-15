@@ -47,3 +47,5 @@ Stack (perf/sb6 542f385e1d = base + #18757 #15674 #15659 #18102 twalk): bar for 
 Stack2 (perf/sb6 86ef130af6): run900 978, run901 956, mean 967 = +11.8% vs original base 865. New bar 967.
 | slowlookup: GPU decode comp-to-single | own (Sol) | d1d53b0b76 | queued | - | - | maybe |
 | #20130 result | | | run909 1027, run910 966 | +6.2%, -0.1% vs 967 | DROPPED (by 1 present; retest) | |
+| drel2 result | | | run915 1021, run916 1137 | ~stack under drift | NOT KEPT | |
+| #20130 retest | | | 1027, 966, 1033, 1073 | ~stack | DROPPED | |
