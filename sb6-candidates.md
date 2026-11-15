@@ -59,3 +59,4 @@ Batch sb6b (perf/sb6 4a2ce51ac2 = stack2 + slowlookup; bar = run948 post-reboot)
 | #17255 | upstream PR (+test helper) | run994 1081, run995 1088 vs base run996 1108 | negative/noise | NOT KEPT |
 | #20578 | upstream PR | run997 1157, run998 1132 vs bases 1108/1196 | ~0 | NOT KEPT |
 | #20368 | upstream PR, APS5_DRAW_INPUTS_IN_PLACE_BELOW=1024 | run1000 1151, run1001 1136 vs bases 1196/1149 | ~-2% | NOT KEPT |
+| readTarget depth index (own) | Sol, perf/sb6-readtarget | run1010 1187, run1012 1152 vs bases 1141/1124 | +3.6% | KEPT on sb6r |

@@ -570,3 +570,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol record (fixed build) | 89de15e730 | chain-record | 145/146; agc_draw_set_reuse fails (changed buffer offset rewrote wrong sets) | Sol fixing |
 | Sub-phase profile run1020 | 98ed6565b7 | chain-subprof | per 10 s: lookup/revalidate 1059 ms (6.7 us x157k), readTarget/resident-lookup-refresh 629 ms (11.6 us x54k), record/descriptors 578 ms (3.6 us) | Sol brief: Revalidate fast path |
 | Sol Revalidate fast path | 58b991998e (perf/sb6-reval on subprof) | chain-reval | unbuilt; switch APS5_NO_REVALIDATE_FAST | queued after readtarget: profile run1030 + 1031/1033 vs subprof base 1032/1034 |
+| Sol readTarget: depth storage index + no callback alloc | perf/sb6r = 9efb017563 | chain-readtarget | 1187/1152 vs sb6r 1141/1124 (+3.6%); 198/198 tests, 0 VUID | KEPT, perf/sb6r ff, pushed fork; PR-worthy candidate (needs main-vs-PR) |
