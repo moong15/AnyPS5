@@ -71,7 +71,8 @@ int main(int argc, char** argv) {
         check(Driver::RelocateDispatch(donor, from, refused) == nullptr, "an untracked high address word was masked");
         refused = to;
         refused[0] = 0u;
-        check(Driver::RelocateDispatch(donor, from, refused) == nullptr, "a null root was relocated");
+        check(Driver::RelocateDispatch(donor, from, refused) == nullptr, "a zero low address word was relocated");
+        check(Driver::RelocateDispatch(donor, refused, to) == nullptr, "a zero donor low address word was relocated");
         refused = to;
         refused[0] |= 1u;
         check(Driver::RelocateDispatch(donor, from, refused) == nullptr, "changed address flags were masked");
@@ -93,6 +94,7 @@ int main(int argc, char** argv) {
         check(block != nullptr, "could not allocate guest data");
         std::fill_n(block, BlockBytes / sizeof(std::uint32_t), 0u);
         GuestAllocations::Mutation().Add(block, BlockBytes, true, true, true);
+        auto* inputs = block + 1;
         auto* output = block + 2048;
         alignas(256) static constexpr std::array<std::uint32_t, 9> code{0xf4000200u, 0xfa000000u, 0xbf8cc07fu, 0x34020082u, 0x7e040208u, 0x4a040481u, 0xe0701000u, 0x80010201u, 0xbf810000u};
         Shader shader{};
@@ -105,10 +107,10 @@ int main(int argc, char** argv) {
         const auto enabled = RuntimeSwitches::Set(RuntimeSwitch::DispatchRelocation);
         const bool evicted = argc > 1 && std::string_view(argv[1]) == "--evicted";
         const auto round = [&](std::size_t offset, std::uint32_t value, std::uint32_t scalar = 0) {
-            block[offset] = value;
+            inputs[offset] = value;
             std::fill_n(output, Lanes, 0xcafebabeu);
             const auto address = reinterpret_cast<std::uintptr_t>(code.data());
-            const auto input = reinterpret_cast<std::uintptr_t>(block + offset);
+            const auto input = reinterpret_cast<std::uintptr_t>(inputs + offset);
             const auto out = reinterpret_cast<std::uintptr_t>(output);
             std::vector<std::uint32_t> words{
                 0xc0027600u, 0x20cu, static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>(address >> 40u),
