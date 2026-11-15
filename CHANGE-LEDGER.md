@@ -568,3 +568,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol readTarget | 183265dcf4 | chain-readtarget | 196 existing tests pass; own depth_storage_index_enabled/disabled crash (VUID cmdbuf not recording) | Sol fixing, requeue |
 | Sub-phase profile | bda677f337 | chain-subprof | LIBS BUILD FAIL: extern C overload of GuestAllocationsLookupEach | fixed 98ed6565b7 (renamed Timed), requeued after record |
 | Sol record (fixed build) | 89de15e730 | chain-record | 145/146; agc_draw_set_reuse fails (changed buffer offset rewrote wrong sets) | Sol fixing |
+| Sub-phase profile run1020 | 98ed6565b7 | chain-subprof | per 10 s: lookup/revalidate 1059 ms (6.7 us x157k), readTarget/resident-lookup-refresh 629 ms (11.6 us x54k), record/descriptors 578 ms (3.6 us) | Sol brief: Revalidate fast path |
