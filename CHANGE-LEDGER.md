@@ -526,3 +526,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | 2026-11-15 | vsmain 4 more ABBA pairs run938-945 (main 80fa4d510 vs pr 5ea1648f6) | chain-vsmain6.sh | running | - |
 | 2026-11-15 | vsmain 6 ABBA pairs total (run934-945): main mean 1000 (879-1085), PR mean 1030 (997-1061) = +3%; pairs +20/-1/+9/+4/-6/-4 (3 win, 3 lose) | chain-vsmain6.sh | done | no clear gain vs main; not PR-ready |
 | 2026-11-15 | perf/sb6 ff to slowlookup 4a2ce51ac2 (kept: same-build +20%), pushed fork; post-reboot warm run946, profile run947, baseline run948 | chain-prof.sh | running | new bar = run948 |
+| 2026-11-15 | batch sb6b: #19979 applied clean (port/sb6b-19979 0987b6159); #10678 #6340 #17255 conflict -> Sol | sol-sb6b-ports.md | queued | - |

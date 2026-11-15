@@ -49,3 +49,9 @@ Stack2 (perf/sb6 86ef130af6): run900 978, run901 956, mean 967 = +11.8% vs origi
 | #20130 result | | | run909 1027, run910 966 | +6.2%, -0.1% vs 967 | DROPPED (by 1 present; retest) | |
 | drel2 result | | | run915 1021, run916 1137 | ~stack under drift | NOT KEPT | |
 | #20130 retest | | | 1027, 966, 1033, 1073 | ~stack | DROPPED | |
+
+Batch sb6b (perf/sb6 4a2ce51ac2 = stack2 + slowlookup; bar = run948 post-reboot):
+| #19979 space stamps once (resources) | upstream #19979 | port/sb6b-19979 0987b6159 | queued | - | - | upstream |
+| #10678 early draw key (lookup) | upstream #10678 | Sol resolving conflicts | - | - | - | upstream |
+| #6340 image table entries reuse | upstream #6340 | Sol resolving conflicts | - | - | - | upstream |
+| #17255 sampled texture uploads across imports | upstream #17255 | Sol resolving conflicts | - | - | - | upstream |
