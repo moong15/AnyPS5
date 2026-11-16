@@ -2124,7 +2124,7 @@ Observation observe(std::uint64_t address, std::size_t bytes, bool memoized) {
     const bool shared = memoized && collectMemoEnabled() && HostThreadSlot<std::uint64_t, CollectEpochSlot>::Get() != 0;
     const auto since = shared && sharedCollectWalks.load(std::memory_order_relaxed) ? HostThreadSlot<std::uint64_t, CollectSinceSlot>::Get() : 0;
     if (shared && tracker.observedSince(first, stop, epoch, since, unwatchSerial.load(std::memory_order_acquire), GuestAllocations::GuestAllocationsGeneration_nid_postfix())) {
-        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        if (MemoryProfiled()) collectMemoHits.fetch_add(1, std::memory_order_relaxed);
         return {Status::Complete, tracker.stable.load(std::memory_order_acquire)};
     }
     auto lock = lockTracker(tracker);
@@ -2167,7 +2167,7 @@ Observation observe(std::uint64_t address, std::size_t bytes, bool memoized) {
         if (open) addRun(from, lastBlock);
     }
     if (runs.empty()) {
-        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        if (MemoryProfiled()) collectMemoHits.fetch_add(1, std::memory_order_relaxed);
         if (hitByTime) sharedWalkHits.fetch_add(1, std::memory_order_relaxed);
     }
     const auto walkStarted = !runs.empty() ? SteadyNanoseconds() : 0;
@@ -2224,7 +2224,7 @@ std::uint64_t CollectWrites(std::uint64_t address, std::size_t bytes, CollectPro
     const auto unwatched = unwatchSerial.load(std::memory_order_acquire);
     const auto mapping = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
     if (epoch != 0 && proof.epoch == epoch && proof.address == address && proof.bytes == bytes && proof.unwatched == unwatched && proof.mapping == mapping) {
-        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        if (MemoryProfiled()) collectMemoHits.fetch_add(1, std::memory_order_relaxed);
         return Tracker().stable.load(std::memory_order_acquire);
     }
     proof = {};
@@ -3050,7 +3050,7 @@ std::uint64_t UntrackedHint(std::uint64_t address, std::size_t bytes) {
         return entry.epoch == epoch && entry.unwatched == unwatched && entry.mapping == mapping && entry.begin <= first && stop <= entry.end;
     });
     if (memoized) {
-        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+        if (MemoryProfiled()) collectMemoHits.fetch_add(1, std::memory_order_relaxed);
     } else {
         const TimedAccess timed(CounterCollect, bytes);
         if (!walkHints(tracker, first, stop)) return 0;
