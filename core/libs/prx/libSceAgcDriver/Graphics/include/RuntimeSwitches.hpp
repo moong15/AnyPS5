@@ -30,6 +30,7 @@ enum class RuntimeSwitch : std::size_t {
     NoSingleGpuDecode,
     NoDepthStorageIndex,
     NoBatchedMovedProofs,
+    NoIndexedPendingScan,
     Count,
 };
 

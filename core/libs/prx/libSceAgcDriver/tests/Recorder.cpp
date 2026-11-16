@@ -11047,6 +11047,122 @@ private:
     static inline StorageUploadProbe* active = nullptr;
 };
 
+bool pendingScanIndexTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: indexed pending scans not tested\n";
+        return false;
+    }
+    constexpr std::uint32_t side = 256;
+    constexpr std::size_t surfaceBytes = side * side * 4;
+    constexpr std::size_t bytes = surfaceBytes * 3;
+    void* block = AllocateWatched(bytes, 65536);
+    if (block == nullptr) {
+        std::cout << "no write watching: indexed pending scans not tested\n";
+        return false;
+    }
+    struct Release {
+        void* block;
+        ~Release() { ReleaseWatched(block, bytes); }
+    } release{block};
+    std::memset(block, 0x55, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+        }
+    } unregister{base, block, address};
+    if (HostImportFor(base, address, bytes) == nullptr || !AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "no watched host import: indexed pending scans not tested\n";
+        return false;
+    }
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    GuestTextureResource resource{};
+    resource.width = side;
+    resource.height = side;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    const bool switchSet = RuntimeSwitches::Set(RuntimeSwitch::NoIndexedPendingScan);
+    {
+        resource.baseAddress = address;
+        auto first = StorageTexture::Create(context, detiler, resource, 0);
+        resource.baseAddress = address + 2 * surfaceBytes;
+        auto second = StorageTexture::Create(context, detiler, resource, 0);
+        recorder.Keep(first);
+        recorder.Keep(second);
+        first->MarkDirty();
+        second->MarkDirty();
+        const auto* one = first.get();
+        const auto* two = second.get();
+        using Query = StorageTexture::PendingQuery;
+        struct Expected {
+            bool overlaps;
+            const StorageTexture* found;
+        };
+        const std::array<Query, 8> asked{
+            Query{address, address + surfaceBytes, nullptr, one, false},
+            Query{address, address + surfaceBytes, one, one, false},
+            Query{address + 16, address + 32, nullptr, nullptr, false},
+            Query{address + surfaceBytes, address + 2 * surfaceBytes, nullptr, nullptr, false},
+            Query{address + 2 * surfaceBytes, address + 2 * surfaceBytes + 4096, nullptr, two, false},
+            Query{address + 2 * surfaceBytes, address + 3 * surfaceBytes + 4096, nullptr, nullptr, false},
+            Query{address, address, nullptr, nullptr, false},
+            Query{address + surfaceBytes - 4, address + 2 * surfaceBytes + 4, two, nullptr, false},
+        };
+        const std::array<Expected, 8> expected{
+            Expected{true, one},
+            Expected{false, one},
+            Expected{true, nullptr},
+            Expected{false, nullptr},
+            Expected{true, two},
+            Expected{true, nullptr},
+            Expected{false, nullptr},
+            Expected{true, nullptr},
+        };
+        for (const bool set : {false, true, false}) {
+            RuntimeSwitches::Assign(RuntimeSwitch::NoIndexedPendingScan, set);
+            for (int pass = 0; pass < 2; ++pass) {
+                auto queries = asked;
+                for (auto& query : queries) {
+                    query.overlaps = !query.overlaps;
+                    query.found = two;
+                }
+                Require(StorageTexture::ScanPending(queries), "a pending scan lost the identity of a pending image it was given");
+                for (std::size_t index = 0; index < queries.size(); ++index) {
+                    Require(queries[index].overlaps == expected[index].overlaps, "a pending scan disagreed with the pending images a range overlaps");
+                    Require(queries[index].found == expected[index].found, "a pending scan found another pending image than the one starting at the range");
+                }
+                std::array<Query, 1> moved{Query{address, address + surfaceBytes, nullptr, two, false}};
+                Require(!StorageTexture::ScanPending(moved), "a pending scan kept an identity the range no longer holds");
+                Require(moved[0].found == one && moved[0].overlaps, "a pending scan that lost an identity left the range unanswered");
+            }
+        }
+        RuntimeSwitches::Assign(RuntimeSwitch::NoIndexedPendingScan, switchSet);
+        recorder.Sync();
+    }
+    recorder.Sync();
+    return true;
+}
+
 void storageUploadLifetimeTests(const Device& device, Recorder& previous, bool failView) {
     auto context = device.GetContext();
     context.hostImportAlignment = 0;
@@ -17570,6 +17686,14 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--benchmark-pending-write-snapshot") {
             pendingWriteSnapshotBenchmark(recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-scan-index-only") {
+            if (!pendingScanIndexTests(device, recorder)) {
+                std::cout << "skipped, the device imports no watched host memory for pending storage images\n";
+                return 77;
+            }
+            std::cout << "Indexed pending scans passed\n";
             return 0;
         }
         if (argc == 2 && (std::string_view(argv[1]) == "--storage-upload-lifetime-only" || std::string_view(argv[1]) == "--storage-upload-failure-only")) {

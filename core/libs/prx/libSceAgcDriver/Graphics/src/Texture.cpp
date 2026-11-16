@@ -6453,13 +6453,29 @@ bool StorageTexture::ScanPending(std::span<PendingQuery> queries) {
         DrawProfileMeasurements::Count(DrawProfileCount::PendingFlushingSum, pending.flushing.size());
         DrawProfileMeasurements::Maximum(DrawProfileCount::PendingFlushingMax, pending.flushing.size());
     }
+    const bool indexed = RefreshLookupsEnabled() && !RuntimeSwitches::Set(RuntimeSwitch::NoIndexedPendingScan);
+    const auto scanIndexed = [&](PendingQuery& query, std::size_t bytes) {
+        bool exact = true;
+        pending.textures.Overlapping(query.begin, bytes, [&](StorageTexture* texture) {
+            if (texture->descriptor.baseAddress == query.begin && texture->guestBytes >= bytes) {
+                if (query.found == nullptr) query.found = texture;
+                else if (query.found != texture) exact = false;
+            }
+            if (texture != query.except && texture->overlaps(query.begin, bytes)) query.overlaps = true;
+            return !exact;
+        });
+        if (exact) return true;
+        query.overlaps = false;
+        query.found = nullptr;
+        return false;
+    };
     bool identities = true;
     for (auto& query : queries) {
         query.overlaps = false;
         query.found = nullptr;
         if (query.end <= query.begin) continue;
         const auto bytes = static_cast<std::size_t>(query.end - query.begin);
-        if (pending.textures.MayOverlap(query.begin, bytes)) {
+        if (pending.textures.MayOverlap(query.begin, bytes) && !(indexed && scanIndexed(query, bytes))) {
             for (const auto* texture : pending.textures) {
                 if (query.found == nullptr && texture->descriptor.baseAddress == query.begin && texture->guestBytes >= bytes) query.found = texture;
                 if (texture != query.except && texture->overlaps(query.begin, bytes)) query.overlaps = true;

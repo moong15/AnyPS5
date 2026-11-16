@@ -36,6 +36,7 @@ constexpr std::array<const char*, SwitchCount> SwitchNames{
     "APS5_NO_SINGLE_GPU_DECODE",
     "APS5_NO_DEPTH_STORAGE_INDEX",
     "APS5_NO_BATCHED_MOVED_PROOFS",
+    "APS5_NO_INDEXED_PENDING_SCAN",
 };
 
 struct SwitchValues {
@@ -61,6 +62,7 @@ struct SwitchValues {
             std::getenv("APS5_NO_SINGLE_GPU_DECODE") != nullptr,
             std::getenv("APS5_NO_DEPTH_STORAGE_INDEX") != nullptr,
             std::getenv("APS5_NO_BATCHED_MOVED_PROOFS") != nullptr,
+            std::getenv("APS5_NO_INDEXED_PENDING_SCAN") != nullptr,
         };
         for (std::size_t index = 0; index < SwitchCount; ++index) set[index].store(environment[index], std::memory_order_relaxed);
     }
