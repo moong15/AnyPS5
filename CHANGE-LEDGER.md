@@ -592,3 +592,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol Revalidate v3 run1060 try1 | b321cab2db | chain-reval3 | in-game abort: same "storage image results pending over memory outside the write watch" throw as record run992 (never on base builds) | crash flag; retry running |
 | Sol reval v3 test fix | 22ae9f89db | Sol | attribution failures were test-only (profile scope created in test EXE, separate TLS slot from driver DLL); driver logic unchanged | current v3 runs stay valid; rebuild+test later |
 | Sol Revalidate v3 profile run1060 | b321cab2db | chain-reval3 | 999 presents (prof on); keep back to 240 ms; but revalidate 11.15 us/call vs 6.7 base: hit 29%, 103k capture attempts/10s cost more than hits save | likely NOT KEPT; A/B running |
+| Sol Revalidate v3 | b321cab2db (+test fix 22ae9f89db) | chain-reval3 | 1072/1102 vs base 1139/1056; 1 in-game abort | NOT KEPT |
