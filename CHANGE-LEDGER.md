@@ -583,3 +583,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol Revalidate v2 (scoped snapshots) | b4ca0bfbfb (+diag 052a455af5) | chain-reval2 | unbuilt | queued after resident: prof 1050, A/B 1051-1054 vs subprof libs |
 | Sol record (descriptor set reuse etc.) | dd287359fd | chain-record | 1154/1089 vs sb6r 1097/1207; 146/146 tests; 1 in-game abort (storage image pending outside write watch, only seen on this build) | NOT KEPT (keep rule + crash) |
 | Resident fast path profile run1040 | 55f4bd9cbc | chain-resident | resident-lookup-refresh 11.43 us, 6.67 locks/call vs 11.6/5.7 (no saving) | Sol: counters + scope (sol-resident2) |
+| Sol resident follow-up | ac366a4fe4 (diag only) | Sol | scoping rejected: render targets are written by their own draws each cycle, so per-target proofs still miss and add a writer lock | resident fast path likely dead end; A/B decides v1 |
