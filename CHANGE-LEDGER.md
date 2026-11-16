@@ -587,3 +587,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol resident target fast path | 55f4bd9cbc | chain-resident | 1133/1137 vs subprof base 1170/1066; profile no saving (11.4 us, 6.7 locks) | NOT KEPT; dead end (targets rewritten by own draws) |
 | Sol Revalidate v2 profile run1050 | b4ca0bfbfb | chain-reval2 | hit 43% but 631 presents (vs ~1050): keep phase 2504 ms/10s (was ~220), draws/10s 92k vs 160k | big regression; Sol fixing writer side (sol-reval4); A/B runs continue |
 | Sol Revalidate v3 (lock-free writer stamps, capture retry) | eb7f95a158/b321cab2db | chain-reval3 | unbuilt | queued after reval2: prof 1060, A/B 1061-1064 |
+| Sol Revalidate v2 (scoped subscriptions) | b4ca0bfbfb | chain-reval2 | prof/1051/1052/1053/1054 = 631/689/1111/625/1134/ (reval2 vs subprof base) | NOT KEPT (-40%: writer-side subscription walks in keep) |
