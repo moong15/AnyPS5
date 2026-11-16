@@ -593,3 +593,6 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol reval v3 test fix | 22ae9f89db | Sol | attribution failures were test-only (profile scope created in test EXE, separate TLS slot from driver DLL); driver logic unchanged | current v3 runs stay valid; rebuild+test later |
 | Sol Revalidate v3 profile run1060 | b321cab2db | chain-reval3 | 999 presents (prof on); keep back to 240 ms; but revalidate 11.15 us/call vs 6.7 base: hit 29%, 103k capture attempts/10s cost more than hits save | likely NOT KEPT; A/B running |
 | Sol Revalidate v3 | b321cab2db (+test fix 22ae9f89db) | chain-reval3 | 1072/1102 vs base 1139/1056; 1 in-game abort | NOT KEPT |
+| New method: per-draw phase costs | tools/perdraw.py | - | per-draw costs from profile; untouched phases vary ~3-5% run to run (vs ~15% for presents) | every run profiled from now; keep = target phase drops beyond spread, no other phase rises |
+| readTarget keep re-check | 9efb017563 | run1020 profile | depth-storage lookup was only 7.9 ms/10 s before the change: +3.6% was noise | stays (exact, harmless) but not a real win |
+| Next round started | ideas/SUMMARY.md | - | Sol: diag/sb6-prof2 counters; agents: perf/sb6-proofs, perf/sb6-cmdbuf; env tests runs 1070-1075 | running |
