@@ -589,3 +589,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Sol Revalidate v3 (lock-free writer stamps, capture retry) | eb7f95a158/b321cab2db | chain-reval3 | unbuilt | queued after reval2: prof 1060, A/B 1061-1064 |
 | Sol Revalidate v2 (scoped subscriptions) | b4ca0bfbfb | chain-reval2 | prof/1051/1052/1053/1054 = 631/689/1111/625/1134/ (reval2 vs subprof base) | NOT KEPT (-40%: writer-side subscription walks in keep) |
 | Sol Revalidate v3 | b321cab2db | chain-reval3 | 236/239: revalidate_fast_on/index/keys-scan fail on first-vs-retry attribution assertion only | runs started anyway (diag only); Sol fixing |
+| Sol Revalidate v3 run1060 try1 | b321cab2db | chain-reval3 | in-game abort: same "storage image results pending over memory outside the write watch" throw as record run992 (never on base builds) | crash flag; retry running |
