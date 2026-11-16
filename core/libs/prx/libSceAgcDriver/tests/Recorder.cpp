@@ -11105,6 +11105,105 @@ void storageUploadLifetimeTests(const Device& device, Recorder& previous, bool f
     std::cout << "Storage upload lifetime" << (failView ? " after view failure" : " after caller release") << ": passed\n";
 }
 
+bool pendingStorageSpanTests(const Device& device, Recorder& recorder) {
+    const auto& base = device.GetContext();
+    if (base.hostImportAlignment == 0) {
+        std::cout << "host imports unavailable: batched pending storage proofs not tested\n";
+        return false;
+    }
+    constexpr std::uint32_t side = 256;
+    constexpr std::size_t surfaceBytes = side * side * 4;
+    constexpr std::size_t bytes = surfaceBytes * 3;
+    void* block = AllocateWatched(bytes, 65536);
+    if (block == nullptr) {
+        std::cout << "no write watching: batched pending storage proofs not tested\n";
+        return false;
+    }
+    struct Release {
+        void* block;
+        ~Release() { ReleaseWatched(block, bytes); }
+    } release{block};
+    std::memset(block, 0x55, bytes);
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        std::uint64_t address;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, address, bytes);
+        }
+    } unregister{base, block, address};
+    if (HostImportFor(base, address, bytes) == nullptr || !AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "no watched host import: batched pending storage proofs not tested\n";
+        return false;
+    }
+    TextureDetiler detiler(base);
+    auto context = base;
+    context.detiler = &detiler;
+    GuestTextureResource resource{};
+    resource.width = side;
+    resource.height = side;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kR64KBX;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    const bool switchSet = RuntimeSwitches::Set(RuntimeSwitch::NoBatchedMovedProofs);
+    {
+        resource.baseAddress = address;
+        auto first = StorageTexture::Create(context, detiler, resource, 0);
+        resource.baseAddress = address + 2 * surfaceBytes;
+        auto second = StorageTexture::Create(context, detiler, resource, 0);
+        recorder.Keep(first);
+        recorder.Keep(second);
+        first->MarkDirty();
+        second->MarkDirty();
+        using Range = std::pair<std::uint64_t, std::uint64_t>;
+        const std::array<Range, 7> ranges{
+            Range{address, address + 16},
+            Range{address + surfaceBytes - 4, address + surfaceBytes + 4},
+            Range{address + surfaceBytes, address + 2 * surfaceBytes},
+            Range{address + 2 * surfaceBytes + 100, address + 2 * surfaceBytes + 200},
+            Range{address + 3 * surfaceBytes, address + 3 * surfaceBytes + 4096},
+            Range{address, address},
+            Range{address + 2 * surfaceBytes - 8, address + 2 * surfaceBytes},
+        };
+        const std::array<bool, 7> expected{true, true, false, true, false, false, false};
+        for (const bool set : {false, true, false}) {
+            RuntimeSwitches::Assign(RuntimeSwitch::NoBatchedMovedProofs, set);
+            for (int pass = 0; pass < 2; ++pass) {
+                for (std::size_t index = 0; index < ranges.size(); ++index) {
+                    const auto& range = ranges[index];
+                    const bool single = PendingStorageOverlaps(range.first, static_cast<std::size_t>(range.second - range.first), nullptr);
+                    Require(single == expected[index], "a single range proof disagreed with the pending storage images it overlaps");
+                    Require(PendingStorageOverlaps(std::span<const Range>(&range, 1)) == single, "a one-range batched proof disagreed with the single range proof");
+                }
+                const std::array<Range, 4> clear{ranges[2], ranges[4], ranges[5], ranges[6]};
+                Require(!PendingStorageOverlaps(std::span<const Range>(clear)), "a batch of ranges clear of pending storage images was refused");
+                const std::array<Range, 3> mixed{ranges[2], ranges[4], ranges[3]};
+                Require(PendingStorageOverlaps(std::span<const Range>(mixed)), "a batch with one range under a pending storage image was accepted");
+                Require(!PendingStorageOverlaps(std::span<const Range>()), "an empty batch of ranges was refused");
+                Require(!PendingStorageOverlaps(address, surfaceBytes, first.get()), "the image itself was counted against its own range");
+            }
+        }
+        RuntimeSwitches::Assign(RuntimeSwitch::NoBatchedMovedProofs, switchSet);
+        recorder.Sync();
+    }
+    recorder.Sync();
+    return true;
+}
+
 void refreshProofTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -17518,6 +17617,14 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--repeated-neighbour-stores-only") return repeatedNeighbourStoreTests(device, recorder) ? 0 : 77;
         if (argc == 2 && std::string_view(argv[1]) == "--kept-unit-settle-only") {
             keptUnitSettleTests(device, recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-storage-span-only") {
+            if (!pendingStorageSpanTests(device, recorder)) {
+                std::cout << "skipped, the device imports no watched host memory for pending storage images\n";
+                return 77;
+            }
+            std::cout << "Batched pending storage proofs passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--pending-key-refresh-only") {

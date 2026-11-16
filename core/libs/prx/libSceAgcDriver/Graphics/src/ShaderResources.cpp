@@ -7027,6 +7027,16 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
     std::vector<MovedBuffer> moved;
     std::size_t movedBytes = 0;
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || (usesBda && !spaceReuse)) return moved;
+    const bool batched = !RuntimeSwitches::Set(RuntimeSwitch::NoBatchedMovedProofs);
+    struct DeferredTag {};
+    ExclusiveScratch<std::vector<std::pair<std::uint64_t, std::uint64_t>>, DeferredTag> deferred;
+    const auto settle = [&] {
+        if (deferred->empty()) return true;
+        DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
+        const bool clear = !PendingStorageOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>>(*deferred)) && !AnyShadowedOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>>(*deferred));
+        deferred->clear();
+        return clear;
+    };
     for (const auto& shader : shaders) {
         if (shader.program == nullptr) return std::nullopt;
         for (const auto& binding : shader.program->bindings) {
@@ -7040,6 +7050,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 const bool same = !item.dataWords.empty() ? item.dataWords == binding.guestDescriptor : !patched && std::memcmp(item.buffer->Bytes().data(), binding.guestDescriptor.data(), item.size) == 0;
                 if (same) continue;
                 if (item.dataWords.empty() && patched) {
+                    if (batched && !settle()) return std::nullopt;
                     if (patchedData != nullptr) *patchedData = true;
                     return std::nullopt;
                 }
@@ -7069,6 +7080,21 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
                 const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
                 if (bytes > maxDrawSnapshotBytes - movedBytes) return std::nullopt;
                 if (!GuestMemory::Accessible(reinterpret_cast<const void*>(begin), bytes)) return std::nullopt;
+                if (batched) {
+                    if (guestMemory.WritesOverlap(begin, bytes)) return std::nullopt;
+                    deferred->emplace_back(begin, begin + bytes);
+                    MovedBuffer entry{index, address, static_cast<std::size_t>(size)};
+                    const bool pending = recorder.PendingWriteOverlaps(begin, bytes);
+                    if (pending) {
+                        if (!settle()) return std::nullopt;
+                        DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
+                        if (!movedInPlace(recorder, item, address, size, entry)) return std::nullopt;
+                    }
+                    if (moved.empty()) moved.reserve(allocations.size());
+                    moved.push_back(entry);
+                    if (!pending) movedBytes += bytes;
+                    continue;
+                }
                 DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
                 if (guestMemory.WritesOverlap(begin, bytes) || PendingStorageOverlaps(begin, bytes, nullptr) || AnyShadowedOverlaps(begin, bytes)) return std::nullopt;
                 MovedBuffer entry{index, address, static_cast<std::size_t>(size)};
@@ -7081,6 +7107,7 @@ std::optional<std::vector<ShaderResources::MovedBuffer>> ShaderResources::MovedR
             }
         }
     }
+    if (batched && !settle()) return std::nullopt;
     return moved;
 }
 

@@ -98,6 +98,7 @@ std::shared_ptr<StorageTexture> RepeatStorageSurface(const Context& context, con
 // Defined in Texture.cpp beside the pending-results registry, for the fast Revalidate below: whether
 // a storage image other than `except` has results pending in [address, address + bytes).
 bool PendingStorageOverlaps(std::uint64_t address, std::size_t bytes, const StorageTexture* except);
+bool PendingStorageOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
 
 struct PipelineSetLayouts {
     VkDescriptorSetLayout main = VK_NULL_HANDLE;

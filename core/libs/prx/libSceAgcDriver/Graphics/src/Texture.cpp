@@ -6055,6 +6055,7 @@ std::shared_ptr<StorageTexture> StorageTexture::FindPendingSlice(std::uint64_t a
 
 bool PendingStorageOverlaps(std::uint64_t address, std::size_t bytes, const StorageTexture* except) {
     auto& pending = Pending();
+    if (!RuntimeSwitches::Set(RuntimeSwitch::NoBatchedMovedProofs) && pending.textures.SurelyClear(address, bytes)) return false;
     std::lock_guard lock(pending.mutex);
     if (!pending.textures.MayOverlap(address, bytes)) return false;
     for (const auto* texture : pending.textures) {
@@ -6062,6 +6063,23 @@ bool PendingStorageOverlaps(std::uint64_t address, std::size_t bytes, const Stor
         // surface description rather than the private helper.
         const auto begin = texture->Descriptor().baseAddress;
         if (texture != except && address < begin + texture->GuestBytes() && begin < address + bytes) return true;
+    }
+    return false;
+}
+
+bool PendingStorageOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+    auto& pending = Pending();
+    const auto clear = [&](const std::pair<std::uint64_t, std::uint64_t>& range) { return range.second <= range.first || pending.textures.SurelyClear(range.first, static_cast<std::size_t>(range.second - range.first)); };
+    if (std::all_of(ranges.begin(), ranges.end(), clear)) return false;
+    std::lock_guard lock(pending.mutex);
+    for (const auto& [address, end] : ranges) {
+        if (end <= address) continue;
+        const auto bytes = static_cast<std::size_t>(end - address);
+        if (!pending.textures.MayOverlap(address, bytes)) continue;
+        for (const auto* texture : pending.textures) {
+            const auto begin = texture->Descriptor().baseAddress;
+            if (address < begin + texture->GuestBytes() && begin < address + bytes) return true;
+        }
     }
     return false;
 }
