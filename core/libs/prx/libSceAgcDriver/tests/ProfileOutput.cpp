@@ -27,7 +27,7 @@ void DrawSubphaseReport() {
     AgcDriver::DrawSubprofile totals;
     totals.samples[0][static_cast<std::size_t>(AgcDriver::DrawProfileOp::Find)] = {1250.0, 3, 2, 1, 250.0};
     totals.samples[1][static_cast<std::size_t>(AgcDriver::DrawProfileOp::DrawCommand)] = {500.0, 4, 0, 0, 0};
-    totals.samples[2].back() = {2000.0, 1, 1, 0, 0};
+    totals.samples[2][static_cast<std::size_t>(AgcDriver::DrawProfileOp::DccClear)] = {2000.0, 1, 1, 0, 0};
     std::string written;
     AgcDriver::ProfileOutput output([&](std::string_view text) { written += text; });
     const auto print = [&](const char* format, auto... args) { output.Print(format, args...); };

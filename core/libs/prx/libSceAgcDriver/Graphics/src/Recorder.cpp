@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/AsyncLog.hpp"
 #include "prx/libc/include/HostThread.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileCounter.hpp"
@@ -2213,6 +2214,7 @@ void Recorder::ensureOpen() {
     GuestMemory::AssertGpuLockHeld("Recorder::Commands");
     if (open == nullptr) {
         ++passGeneration;
+        DrawDescriptorProfileScope subphase(DrawProfileOp::BatchOpen);
         auto batch = std::make_unique<Batch>();
         try {
             VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -4607,7 +4609,7 @@ void Recorder::AfterCompletions(std::uint64_t address, std::span<const std::byte
         completionLabels.fetch_add(1, std::memory_order_acq_rel);
         ++batch.completionStoreCount;
         completionStores.fetch_add(1, std::memory_order_acq_rel);
-        GuestMemory::BreakProofs();
+        GuestMemory::BreakProofs(ProofBreakSite::CompletionLabel);
     }
     // The table entry before the write note: the note bumps the generation a poller watches, and a
     // poller that sees the bump then finds the label without the GPU mutex.
@@ -4624,7 +4626,7 @@ bool Recorder::AfterRecordedWork(std::function<void()> action) {
     batch.completions.push_back(std::move(action));
     ++batch.completionLabelCount;
     completionLabels.fetch_add(1, std::memory_order_acq_rel);
-        GuestMemory::BreakProofs();
+    GuestMemory::BreakProofs(ProofBreakSite::RecordedWork);
     if (&batch == open.get() && activeRecorder == this && pendingLabelSince.load(std::memory_order_relaxed) == NoPendingLabel) {
         pendingLabelSince.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
     }
@@ -4652,7 +4654,7 @@ void Recorder::NoteWrittenBack(std::uint64_t address, std::size_t bytes) {
             label.counted = true;
             ++batch.completionLabelCount;
             completionLabels.fetch_add(1, std::memory_order_acq_rel);
-        GuestMemory::BreakProofs();
+            GuestMemory::BreakProofs(ProofBreakSite::CompletionLabelLate);
             completionLabelsCountedLate.fetch_add(1, std::memory_order_relaxed);
             ++batch.completionStoreCount;
             completionStores.fetch_add(1, std::memory_order_acq_rel);

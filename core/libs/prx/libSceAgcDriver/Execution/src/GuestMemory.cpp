@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
@@ -2380,7 +2381,8 @@ std::uint64_t OwnProofBreaks() {
     return HostThreadSlot<std::uint64_t, OwnProofBreaksSlot>::Get();
 }
 
-void BreakProofs() {
+void BreakProofs(ProofBreakSite site) {
+    DrawProfileMeasurements::Break(site);
     proofSerial.fetch_add(1, std::memory_order_acq_rel);
     HostThreadSlot<std::uint64_t, OwnProofBreaksSlot>::Set(OwnProofBreaks() + 1);
 }
@@ -2801,7 +2803,7 @@ static GuestAllocations::Lease::Ranges pinStoreRanges(std::uint64_t address, std
 }
 
 struct BreakWhenStored {
-    ~BreakWhenStored() { BreakProofs(); }
+    ~BreakWhenStored() { BreakProofs(ProofBreakSite::Stored); }
 };
 
 static std::atomic<bool> ownStoreCompare{false};
@@ -2813,7 +2815,7 @@ void SetOwnStoreCompare(bool compare) {
 std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, bool imaged, const std::function<std::pair<std::uint64_t, std::uint64_t>(std::span<std::byte>)>& store, bool complete = true) {
     if (bytes == 0) return 0;
     const auto pinned = pinStoreRanges(address, bytes);
-    BreakProofs();
+    BreakProofs(ProofBreakSite::StoreOwn);
     const BreakWhenStored breakStored;
     const auto stampStored = [complete](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
         if (stored.second <= stored.first) return 0;
@@ -2881,7 +2883,7 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> so
 }
 
 static std::uint64_t markWritten(std::uint64_t address, std::size_t bytes, bool complete, std::uint64_t* order = nullptr) {
-    BreakProofs();
+    BreakProofs(ProofBreakSite::MarkWritten);
     const BreakWhenStored breakStored;
     auto& tracker = Tracker();
     auto lock = lockTracker(tracker);
@@ -3283,7 +3285,7 @@ void GpuMutexType::acquired() {
     owner.store(CurrentThreadToken(), std::memory_order_relaxed);
     if (++depth == 1) {
         gpuHoldSerial.fetch_add(1, std::memory_order_relaxed);
-        if (!proofThread) BreakProofs();
+        if (!proofThread) BreakProofs(ProofBreakSite::GpuAcquire);
     }
 }
 
@@ -3472,6 +3474,11 @@ void NoteLockedGpuWait(double ms) {
 std::uint64_t ThreadCollectedBytes() {
     if (!MemoryProfiled()) return 0;
     return CounterFor(CounterCollect).bytes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ThreadCollectNanoseconds() {
+    if (!MemoryProfiled()) return 0;
+    return CounterFor(CounterCollect).nanoseconds.load(std::memory_order_relaxed);
 }
 
 std::uint32_t GpuLockThreadTag() {
@@ -3893,7 +3900,7 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
 
 static void writeChanged(std::uint64_t address, std::span<const std::byte> current, std::span<const std::byte> original, [[maybe_unused]] std::uint32_t byteStoreLimit, bool keepGuest) {
     require(current.size() == original.size(), "write-back snapshot sizes differ");
-    BreakProofs();
+    BreakProofs(ProofBreakSite::WriteChanged);
     if (current.empty()) return;
     // A store: the hook sync it makes orders this write after a pending GPU write, whatever a read
     // site above it was doing (the [hooksync] line counts stores apart).
@@ -3958,7 +3965,7 @@ static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free && std::atomic
 
 std::size_t WriteChangedIfHeld(std::uint64_t address, std::span<const std::byte> current, std::span<const std::byte> original, std::uint64_t unchangedSince) {
     require(current.size() == original.size(), "write-back snapshot sizes differ");
-    BreakProofs();
+    BreakProofs(ProofBreakSite::WriteChangedIfHeld);
     if (current.empty()) return 0;
     const ReadSiteScope site(ReadSite::Store);
     FlushGpuWrites(address, current.size());

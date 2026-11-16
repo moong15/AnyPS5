@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
@@ -4510,6 +4511,22 @@ ShaderResources::IndexOutcome ShaderResources::indexRevalidate(std::span<const C
 
 bool ShaderResources::Revalidate(std::span<const CompiledShader> shaders, ProofReport* report) {
     DrawSubprofileScope subphase(DrawProfileOp::Revalidate);
+    if (DrawProfileMeasurements::Enabled() && drawBuild) {
+        thread_local std::vector<const StorageTexture*>* sourcesSlot = nullptr;
+        auto& sources = ShaderRecompiler::ThreadOwned(sourcesSlot);
+        sources.clear();
+        for (const auto& surface : validatedTextures) {
+            if (!surface.valid || surface.source == nullptr) continue;
+            sources.push_back(surface.source);
+        }
+        const auto views = sources.size();
+        std::sort(sources.begin(), sources.end(), std::less<const StorageTexture*>{});
+        const auto unique = static_cast<std::size_t>(std::unique(sources.begin(), sources.end()) - sources.begin());
+        DrawProfileMeasurements::Count(DrawProfileCount::RevalidateDraws);
+        DrawProfileMeasurements::Count(DrawProfileCount::SourceViews, views);
+        DrawProfileMeasurements::Count(DrawProfileCount::UniqueSources, unique);
+        DrawProfileMeasurements::Count(DrawProfileCount::DuplicateSourceViews, views - unique);
+    }
     if (!registeredImageViewsCurrent(registeredImageViews)) {
         if (report != nullptr) *report = {ProofPath::Full, ProofFailure::Other};
         provedEpoch = 0;
@@ -7174,6 +7191,7 @@ std::size_t ShaderResources::DrawUploadLimit() {
 }
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly, const BdaResources* faultRecord) const {
+    DrawDescriptorProfileScope subphase(DrawProfileOp::ScanFilter, true);
     requireGuestBuffers(moved);
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || (usesBda && !spaceReuse)) return {};
     prepareFaultSlot();
@@ -7192,6 +7210,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     std::array<std::uint64_t, 3> stamp{};
     bool stamped = false;
     const auto keep = [&](DrawBindings::Snapshot snapshot) {
+        DrawDescriptorProfileScope retain(DrawProfileOp::Retain);
         if (result->snapshots.empty()) result->snapshots.reserve(allocations.size());
         result->snapshots.push_back(std::move(snapshot));
     };
@@ -7206,6 +7225,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         const bool words = override != moved.end() && !override->words.empty();
         const bool offsets = inPlaceData && !item.guest && item.buffer != nullptr && std::any_of(moved.begin(), moved.end(), [&](const MovedBuffer& entry) { return toldInData(entry, index); });
         if (words || (offsets && override == moved.end())) {
+            DrawDescriptorProfileScope upload(DrawProfileOp::DataUpload);
             const auto size = words ? override->size : item.size;
             auto slice = recorder.DrawUpload(size);
             if (words) std::memcpy(slice.bytes, override->words.data(), size);
@@ -7224,6 +7244,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
             continue;
         }
         if (override != moved.end() && override->inPlace != VK_NULL_HANDLE) {
+            DrawDescriptorProfileScope retain(DrawProfileOp::Retain);
             const auto begin = override->address - override->adjustment;
             const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(override->size, override->adjustment));
             recorder.NotePendingRead(begin, bytes, Recorder::ReadKind::DispatchElement);
@@ -7251,6 +7272,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         const auto begin = address - item.adjustment;
         const auto bytes = static_cast<std::size_t>(GuestBufferMemory::ViewBytes(size, item.adjustment));
         if (override == moved.end() && (bytes > maxSnapshotBytes || totalSnapshotBytes + bytes > maxSnapshotBytes)) continue;
+        DrawDescriptorProfileScope snapshotPhase(DrawProfileOp::Snapshot);
         const auto registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
         if (!stamped) {
             stamp = {GuestMemory::TrackerGeneration(), GuestMemory::CollectEpoch(), registryGeneration};
@@ -7293,7 +7315,11 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         CaptureTrace::Log("draw-snapshot batch=%llu address=%llx bytes=%zu", static_cast<unsigned long long>(recorder.Submissions() + 1), static_cast<unsigned long long>(begin), bytes);
     }
     if (selected.empty() && !rebound) return {};
-    writeDrawSets(*result, selected, faultRecord);
+    {
+        DrawDescriptorProfileScope write(DrawProfileOp::DescriptorWrite);
+        writeDrawSets(*result, selected, faultRecord);
+    }
+    subphase.Next(DrawProfileOp::Retain);
     recorder.Keep(result);
     for (const auto& snapshot : result->snapshots) {
         if (snapshot.buffer != nullptr) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
@@ -7453,7 +7479,7 @@ void ShaderResources::WriteBack() {
     } catch (const BdaUnalignedAccess&) {
         unaligned = std::current_exception();
     }
-    if (!guestMemory.Writes().empty() || std::find(storageWritten.begin(), storageWritten.end(), true) != storageWritten.end() || (usesBda && !bdaReadOnly)) GuestMemory::BreakProofs();
+    if (!guestMemory.Writes().empty() || std::find(storageWritten.begin(), storageWritten.end(), true) != storageWritten.end() || (usesBda && !bdaReadOnly)) GuestMemory::BreakProofs(ProofBreakSite::ShaderWrites);
     if (!SkipWriteBack()) {
         for (std::size_t index = 0; index < storageTextures.size(); ++index) {
             if (!storageWritten[index] || storageTextures[index] == nullptr) continue;

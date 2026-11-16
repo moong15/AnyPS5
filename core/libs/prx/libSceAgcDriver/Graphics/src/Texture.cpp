@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/EpochProofCounters.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AsyncLog.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RuntimeSwitches.hpp"
@@ -1882,6 +1883,7 @@ public:
     using Ranges = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
     iterator begin() { return textures.begin(); }
     iterator end() { return textures.end(); }
+    std::size_t Size() const { return textures.size(); }
     void push_back(StorageTexture* texture) {
         textures.push_back(texture);
         changed();
@@ -6426,6 +6428,13 @@ void StorageTexture::BumpPendingSerial() {
 bool StorageTexture::ScanPending(std::span<PendingQuery> queries) {
     auto& pending = Pending();
     std::lock_guard lock(pending.mutex);
+    if (DrawProfileMeasurements::Enabled()) {
+        DrawProfileMeasurements::Count(DrawProfileCount::PendingScans);
+        DrawProfileMeasurements::Count(DrawProfileCount::PendingSizeSum, pending.textures.Size());
+        DrawProfileMeasurements::Maximum(DrawProfileCount::PendingSizeMax, pending.textures.Size());
+        DrawProfileMeasurements::Count(DrawProfileCount::PendingFlushingSum, pending.flushing.size());
+        DrawProfileMeasurements::Maximum(DrawProfileCount::PendingFlushingMax, pending.flushing.size());
+    }
     bool identities = true;
     for (auto& query : queries) {
         query.overlaps = false;

@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/HandoffSpin.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileCounter.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WorkerSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
@@ -27,7 +28,8 @@ namespace {
 
 constexpr std::array<const char*, static_cast<std::size_t>(DrawPipeline::DrainReason::Count)> DrainNames{"packet", "flush", "labels", "capture", "indirect", "submission"};
 
-constexpr std::array<const char*, static_cast<std::size_t>(DrawPipeline::CommitKind::Count)> KindNames{"other", "draw", "indirect", "colormeta", "dispatch", "sampledump", "dmafill", "dmawrite", "dmacopy", "store", "endofpipe", "seal", "submitend", "completion", "bufferfill"};
+constexpr auto KindNames = DrawProfileCommitNames;
+static_assert(KindNames.size() == static_cast<std::size_t>(DrawPipeline::CommitKind::Count));
 
 std::atomic<unsigned> runningCommitters{0};
 ProfileCounter drawKeys;
@@ -470,9 +472,12 @@ void DrawPipeline::run() {
     PerformanceTrace::BindThread("draw committer");
     ReserveCommitterCore();
     StartCommitterSampler();
+    const bool profile = DrawProfileMeasurements::Enabled();
+    if (profile) DrawProfileMeasurements::MarkCommitter();
     for (;;) {
         Commit* commit = nullptr;
         bool isDraw = false;
+        std::size_t kindIndex = 0;
         SpinUntil(HandoffSpinWindow(), [&] { return outstanding.load(std::memory_order_acquire) != 0; });
         {
             std::unique_lock lock(mutex);
@@ -482,14 +487,18 @@ void DrawPipeline::run() {
             if (items.empty()) break;
             commit = stopped ? nullptr : &items.front().commit;
             isDraw = items.front().draw;
+            kindIndex = static_cast<std::size_t>(items.front().kind);
         }
         const auto start = std::chrono::steady_clock::now();
         std::exception_ptr fatal;
         bool failed = false;
         bool shutdown = false;
         try {
-            if (commit != nullptr) (*commit)();
-            if (!isDraw) GuestMemory::BreakProofs();
+            if (commit != nullptr) {
+                if (profile) DrawProfileMeasurements::Commit(kindIndex);
+                (*commit)();
+            }
+            if (!isDraw) GuestMemory::BreakProofs(ProofBreakSite::NonDrawCommit);
         } catch (const std::exception&) {
             failed = true;
             fatal = std::current_exception();
@@ -508,7 +517,6 @@ void DrawPipeline::run() {
         {
             std::lock_guard lock(mutex);
             countWrites(items.front().writes, false);
-            const auto kindIndex = static_cast<std::size_t>(items.front().kind);
             kindCommits[kindIndex].fetch_add(1, std::memory_order_relaxed);
             kindNs[kindIndex].fetch_add(spent, std::memory_order_relaxed);
             retired.push_back(std::move(items.front()));

@@ -14,6 +14,10 @@
 #include <utility>
 #include <vector>
 
+namespace AgcDriver {
+enum class ProofBreakSite : std::size_t;
+}
+
 namespace AgcDriver::GuestMemory {
 
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
@@ -173,7 +177,7 @@ std::uint64_t SteadyNanoseconds();
 void AdoptLatestCollectEpoch();
 std::uint64_t ProofSerial();
 std::uint64_t OwnProofBreaks();
-void BreakProofs();
+void BreakProofs(ProofBreakSite site = {});
 void MarkProofThread();
 std::uint64_t CollectEpoch();
 std::uint64_t CollectEpochBumps();
@@ -276,6 +280,7 @@ void NoteLockedGpuWait(double ms);
 // Bytes the calling thread's write-watch collects walked so far (0 without the memory profile):
 // a caller reads the difference across a span of its own work.
 std::uint64_t ThreadCollectedBytes();
+std::uint64_t ThreadCollectNanoseconds();
 // A code address (a return address) as an offset into its module, in the form of the [guestmem]
 // callers (symbolized with nm against the driver's image). Takes the loader lock: for reports only.
 unsigned long long CodeOffset(const void* address);

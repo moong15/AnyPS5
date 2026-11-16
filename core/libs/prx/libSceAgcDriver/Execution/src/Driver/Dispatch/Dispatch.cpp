@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawSubprofile.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/DrawWriteRanges.hpp"
@@ -612,27 +613,38 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         const auto queueId = submission.queue;
         itemCommits.fetch_add(1, std::memory_order_relaxed);
         DrawPipeline::Queue0().Enqueue(DrawPipeline::CommitKind::Dispatch, [this, localDevice = std::move(localDevice), result = compiledResult, capture, registeredViews, snapshots = std::move(snapshots), liveWords = std::move(liveWords), groups, address, queueId, recipe, keepVariant, attach, prepareThreads, dataHit, epoch, htileClearCompletion, htileMask] {
+            DrawDispatchProfile commitTiming;
             DrawPipeline::FollowEpoch(epoch);
             GuestMemory::SetCurrentPacket(0x15, queueId);
             const auto& compiledCommit = *result;
             const bool noteWrites = writeEvidenceEnabled() || traceCapSync();
+            commitTiming.Phase(PhasePrologue);
             try {
                 std::shared_ptr<RecipeHit> recipeHit = htileClearCompletion.has_value() ? nullptr : localDevice->PrepareRecipe(recipe, false);
+                commitTiming.Phase(PhaseRecipePrecheck);
                 std::shared_ptr<const Recipe> builtRecipe;
                 bool writersNoted = false;
                 for (;;) {
                     std::shared_ptr<PreparedDispatch> prepared;
-                    if (recipeHit == nullptr || VulkanDevice::VerifyRecipes() || htileClearCompletion.has_value()) prepared = localDevice->PrepareDispatch(compiledCommit, snapshots, prepareThreads, address, htileClearCompletion, registeredViews);
+                    if (recipeHit == nullptr || VulkanDevice::VerifyRecipes() || htileClearCompletion.has_value()) {
+                        prepared = localDevice->PrepareDispatch(compiledCommit, snapshots, prepareThreads, address, htileClearCompletion, registeredViews);
+                        if (profile && prepared != nullptr) commitTiming.Prepare(VulkanDevice::PreparePhaseMs(*prepared));
+                        else commitTiming.Phase(PhasePrepareOther);
+                    }
                     GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Dispatch);
                     std::lock_guard gpuLock(GuestMemory::GpuMutex());
+                    commitTiming.Phase(PhaseLockWait);
                     recordLabelsForPacket(localDevice.get(), queueId);
+                    commitTiming.Phase(PhaseLabels);
                     if (noteWrites && writerKeyedEvidence() && !writersNoted) {
                         noteWrittenBuffers(address, queueId, compiledCommit);
                         writersNoted = true;
                     }
+                    commitTiming.Phase(PhaseNoteWriters);
                     if (recipeHit != nullptr) {
                         VulkanDevice::IndirectOutcome outcome{0, 0};
                         const auto recipeResult = localDevice->DispatchRecipe(compiledCommit, groups[0], groups[1], groups[2], 0, address, recipeHit, outcome, VulkanDevice::VerifyRecipes() ? prepared : nullptr, dataHit);
+                        commitTiming.Phase(PhaseDevice);
                         if (recipeResult == RecipeOutcome::Rebuild) {
                             recipeHit = nullptr;
                             VulkanDevice::NoteRecipe(VulkanDevice::RecipeEvent::Restart, false);
@@ -641,10 +653,12 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
                         }
                     } else {
                         localDevice->Dispatch(compiledCommit, groups[0], groups[1], groups[2], snapshots, address, std::move(prepared), htileClearCompletion.has_value() || attach == nullptr ? nullptr : &builtRecipe, htileClearCompletion, registeredViews);
+                        commitTiming.Phase(PhaseDevice);
                     }
                     if (htileMask.bytes != 0u) localDevice->NoteHtileMask(htileMask);
                     break;
                 }
+                commitTiming.Phase(PhaseTail);
                 if (noteWrites && !writerKeyedEvidence()) noteWrittenBuffers(address, queueId, compiledCommit);
                 if (builtRecipe != nullptr) {
                     if (dataHit) {
@@ -655,6 +669,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
                     attach->recipe.store(std::move(builtRecipe), std::memory_order_release);
                     VulkanDevice::NoteRecipe(VulkanDevice::RecipeEvent::Attach, false);
                 }
+                commitTiming.Phase(PhaseInsert);
             } catch (const std::exception& error) {
                 char where[64];
                 std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));

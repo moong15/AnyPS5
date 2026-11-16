@@ -1016,6 +1016,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const DrawSubprofile& 
     AgcDriver::ProfilePrint_nid_no_patch("%s\n", line);
     profile.subprofile.Print([](const char* format, auto... args) { AgcDriver::ProfilePrint_nid_no_patch(format, args...); });
     profile.subprofile = {};
+    DrawProfileMeasurements::Print([](const char* format, auto... args) { AgcDriver::ProfilePrint_nid_no_patch(format, args...); });
     AgcDriver::ProfilePrint_nid_no_patch("[rescache] draws: %llu hits, %llu misses, %llu invalidated, %llu uncacheable; validation memo %llu hits / %llu misses (which key words the misses differ in: the miss churn line)\n", static_cast<unsigned long long>(profile.cacheHits), static_cast<unsigned long long>(profile.cacheMisses), static_cast<unsigned long long>(profile.cacheInvalidated), static_cast<unsigned long long>(profile.uncacheable), static_cast<unsigned long long>(profile.validateHits), static_cast<unsigned long long>(profile.validateMisses));
     const auto address = AddressDrawReuseCounters();
     if (address != profile.addressSeen) {
@@ -1488,11 +1489,13 @@ bool BindsIndexCopy(const State& state) {
 }
 
 DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uint64_t address, std::size_t bytes, std::size_t alignment, Recorder::SnapshotUse use, std::size_t from, bool hostOnly) {
+    DrawSubprofileScope subphase(DrawProfileOp::InputSnapshot, DrawProfilePhase::Vertex);
     Require(use != Recorder::SnapshotUse::Storage, "a draw input is a vertex or index buffer");
     Require(from == 0 || (use == Recorder::SnapshotUse::Vertex && from < bytes), "only a vertex input starts past its address");
     DrawInputCopy copy;
     copy.from = from;
     if (recorder != nullptr && bytes != 0) {
+        DrawSubprofileScope watch(DrawProfileOp::WatchChecks, DrawProfilePhase::Vertex);
         GuestMemory::FlushGpuWrites(address, bytes);
 #ifdef _WIN32
         const bool owned = !RuntimeSwitches::Set(RuntimeSwitch::NoOwnedDrawInputs);
@@ -1522,6 +1525,7 @@ DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uin
 }
 
 DrawInputCopy CopyZeroPaddedDrawInput(const Context& context, std::uint64_t address, std::size_t bytes, std::size_t validBytes, std::size_t stride) {
+    DrawSubprofileScope subphase(DrawProfileOp::InputSnapshot, DrawProfilePhase::Vertex);
     Require(validBytes <= bytes, "the valid bytes of a vertex fetch exceed the fetch");
     auto readable = validBytes;
     if (stride != 0 && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), validBytes)) {
@@ -1534,6 +1538,7 @@ DrawInputCopy CopyZeroPaddedDrawInput(const Context& context, std::uint64_t addr
     auto* recorder = context.recorder;
     const bool keep = recorder != nullptr && readable != 0 && readable <= std::numeric_limits<std::uint32_t>::max();
     if (keep) {
+        DrawSubprofileScope watch(DrawProfileOp::WatchChecks, DrawProfilePhase::Vertex);
         copy.registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
         copy.generation = GuestMemory::CollectWrites(address, readable);
         std::uint32_t keptReadable = 0;
@@ -1553,6 +1558,7 @@ DrawInputCopy CopyZeroPaddedDrawInput(const Context& context, std::uint64_t addr
 }
 
 void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCopy& copy, Recorder::SnapshotUse use, std::uint32_t derived, std::uint32_t lowest) {
+    DrawSubprofileScope subphase(DrawProfileOp::WatchChecks, DrawProfilePhase::Vertex);
     if (recorder == nullptr || copy.reused || copy.buffer == nullptr) return;
     if (copy.generation == 0) {
         if (!copy.owned.words.empty() && !RuntimeSwitches::Set(RuntimeSwitch::NoOwnedDrawInputs)) recorder->KeepOwnedDrawInput(address, copy.buffer->Bytes().size(), copy.owned, copy.buffer, use, derived, copy.from, lowest);
@@ -1562,6 +1568,7 @@ void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCop
 }
 
 const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address, std::size_t bytes, std::size_t alignment, bool* behindGpuWrite, std::size_t fetched, std::uint64_t reads) {
+    DrawSubprofileScope subphase(DrawProfileOp::InPlaceProof, DrawProfilePhase::Vertex);
     auto* recorder = context.recorder;
     static const bool copyBehindGpuWrite = std::getenv("APS5_NO_BEHIND_INPUTS_IN_PLACE") != nullptr || std::getenv("APS5_NO_DRAW_INPUTS_IN_PLACE") != nullptr;
     const bool small = std::min(fetched, bytes) <= context.drawInputsInPlaceBelow && reads <= InPlaceDrawInputMaxReads;
@@ -1588,6 +1595,7 @@ const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address
 }
 
 InPlaceIndices InPlaceIndexRange(Recorder& recorder, std::uint64_t address, std::size_t bytes, std::uint32_t indexSize, bool skipRestart) {
+    DrawSubprofileScope subphase(DrawProfileOp::IndexRange, DrawProfilePhase::Vertex);
     const std::span<const std::byte> range(reinterpret_cast<const std::byte*>(address), bytes);
     InPlaceIndices indices;
     const auto scan = [&] {
@@ -1601,14 +1609,21 @@ InPlaceIndices InPlaceIndexRange(Recorder& recorder, std::uint64_t address, std:
         return indices;
     }
     const auto use = indexSize == 2 ? (skipRestart ? Recorder::SnapshotUse::Index16Restart : Recorder::SnapshotUse::Index16) : (skipRestart ? Recorder::SnapshotUse::Index32Restart : Recorder::SnapshotUse::Index32);
-    const auto registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
-    const auto generation = GuestMemory::CollectWrites(address, bytes);
-    if (generation != 0 && recorder.KnownHighestIndex(address, bytes, use, indices.highest, &indices.lowest)) {
-        indices.reused = true;
-        return indices;
+    std::uint64_t registryGeneration = 0, generation = 0;
+    {
+        DrawSubprofileScope watch(DrawProfileOp::WatchChecks, DrawProfilePhase::Vertex);
+        registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+        generation = GuestMemory::CollectWrites(address, bytes);
+        if (generation != 0 && recorder.KnownHighestIndex(address, bytes, use, indices.highest, &indices.lowest)) {
+            indices.reused = true;
+            return indices;
+        }
     }
     scan();
-    recorder.KeepHighestIndex(address, bytes, use, generation, registryGeneration, indices.highest, indices.lowest);
+    {
+        DrawSubprofileScope watch(DrawProfileOp::WatchChecks, DrawProfilePhase::Vertex);
+        recorder.KeepHighestIndex(address, bytes, use, generation, registryGeneration, indices.highest, indices.lowest);
+    }
     return indices;
 }
 
@@ -1756,6 +1771,7 @@ DrawPlan planDraw(const Context& context, const State& state, const Pm4::DrawPar
     ValidateSampleMask(context, state, shaders);
     timer.phase(PhaseValidate);
     const auto layoutStart = timer.profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    DrawSubprofileScope layoutPhase(timer.Subprofile(), DrawProfilePhase::Vertex, DrawProfileOp::VertexPlan);
     const auto& attributes = shaders.front().program->vertexAttributes;
     if (recipe != nullptr) {
         plan.vertexInput = recipe->vertexInput;
@@ -1763,6 +1779,7 @@ DrawPlan planDraw(const Context& context, const State& state, const Pm4::DrawPar
         if (context.vertexInputs != nullptr) plan.retainedVertexInput = context.vertexInputs->TryGet(shaders.front().program->variantId, attributes);
         if (plan.retainedVertexInput == nullptr) plan.vertexInput = BuildVertexInputLayout(context, attributes);
     }
+    layoutPhase.Stop();
     timer.charge(PhaseVertex, layoutStart);
     static const bool noDrawResourceCache = std::getenv("APS5_NO_DRAW_RESOURCE_CACHE") != nullptr;
     static const bool noTextureCache = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
@@ -1823,9 +1840,11 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     }
     timer.phase(PhaseValidate);
     timing.Mark("validate");
+    DrawSubprofileScope subphase(timer.Subprofile(), DrawProfilePhase::Vertex, DrawProfileOp::Other);
     inputs.maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
     inputs.minIndex = draw.indexed ? 0u : draw.firstVertex;
     if (state.quadList || StripPatches(state, shaders)) {
+        DrawSubprofileScope indexPhase(DrawProfileOp::IndexRange);
         Require(!draw.indirect, state.quadList ? "indirect quad-list draw is unsupported" : "an indirect triangle strip through emulated barycentric patches is unsupported");
         Require(state.quadList || !draw.indexed || !state.primitiveRestart, "an indexed triangle strip with primitive restart through emulated barycentric patches is unsupported");
         const std::uint32_t primitives = state.quadList ? draw.indexCount / 4u : draw.indexCount >= 3u ? draw.indexCount - 2u : 0u;
@@ -1907,6 +1926,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         inputs.expandedIndexCount = outputIndexCount;
         inputs.indices = std::move(indexCopy);
     } else if (draw.indexed && state.primitiveRestart && !context.primitiveListRestart && !state.stages.mesh && (state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)) {
+        DrawSubprofileScope indexPhase(DrawProfileOp::IndexRange);
         if (indexBytes == 0) {
             inputs.nothing = true;
             return inputs;
@@ -1938,6 +1958,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         inputs.indexHandle = inputs.indices->Handle();
         inputs.indexOffset = 0;
     } else if (draw.indexed) {
+        DrawSubprofileScope indexPhase(DrawProfileOp::IndexRange);
         const bool listTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         const bool skipRestart = state.primitiveRestart && (!listTopology || context.primitiveListRestart || state.stages.mesh);
         const auto use = draw.indexSize == 2 ? (skipRestart ? Recorder::SnapshotUse::Index16Restart : Recorder::SnapshotUse::Index16) : (skipRestart ? Recorder::SnapshotUse::Index32Restart : Recorder::SnapshotUse::Index32);
@@ -2014,6 +2035,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         inputs.maxIndex += draw.firstVertex;
         inputs.minIndex += draw.firstVertex;
     }
+    subphase.Next(DrawProfileOp::VertexPlan);
     const VertexPlanLease planLease;
     auto& fetches = planLease->fetches;
     auto& fetchValid = planLease->fetchValid;
@@ -2065,6 +2087,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     auto& rangeOffsets = planLease->rangeOffsets;
     rangeHandles.reserve(plan.copies.size());
     rangeOffsets.reserve(plan.copies.size());
+    subphase.Next(DrawProfileOp::Other);
     for (std::size_t range = 0; range < plan.copies.size(); ++range) {
         const auto [begin, end] = plan.copies[range];
         const auto bytes = static_cast<std::size_t>(end - begin);
@@ -2107,6 +2130,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         inputs.vertexHandles.push_back(rangeHandles[plan.copyOf[j]]);
         inputs.vertexOffsets[i] = rangeOffsets[plan.copyOf[j]] + plan.offsets[j];
     }
+    subphase.Stop();
     timer.phase(PhaseVertex);
     timing.Mark("vertex_upload");
     return inputs;
@@ -2117,9 +2141,11 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
 // [draws] target-lookup accounting. `lookup` makes (or finds) the image; DrawWithRecipe refreshes
 // the stored object instead.
 template<typename TLookup>
-std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, const State& state, const ColorTarget& color, DrawOutcome& outcome, bool profile, TLookup&& lookup) {
+std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, const State& state, const ColorTarget& color, DrawOutcome& outcome, bool profile, DrawProfileCount caller, TLookup&& lookup) {
     const auto lookupStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto walkedBefore = profile ? GuestMemory::ThreadCollectedBytes() : 0;
+    const auto collectNsBefore = profile ? GuestMemory::ThreadCollectNanoseconds() : 0;
+    if (profile) DrawProfileMeasurements::Count(caller);
     std::shared_ptr<StorageTexture> resident;
     try {
         DrawSubprofileScope subphase(DrawProfileOp::Resident);
@@ -2147,7 +2173,10 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
             outcome.slowLookupUs += lookupUs;
         }
         outcome.lookupUs += lookupUs;
-        outcome.pagesWalked += (GuestMemory::ThreadCollectedBytes() - walkedBefore) / 4096;
+        const auto collectedBytes = GuestMemory::ThreadCollectedBytes() - walkedBefore;
+        outcome.pagesWalked += collectedBytes / 4096;
+        DrawProfileMeasurements::Count(DrawProfileCount::ReadTargetCollectedBytes, collectedBytes);
+        DrawProfileMeasurements::Count(DrawProfileCount::ReadTargetCollectNs, GuestMemory::ThreadCollectNanoseconds() - collectNsBefore);
         const bool fullScissor = state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 && state.scissor.extent.width >= color.extent.width && state.scissor.extent.height >= color.extent.height;
         ++(fullScissor ? outcome.fullScissorLookups : outcome.partialLookups);
     }
@@ -2659,7 +2688,7 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
             resources->WriteBackBuffers();
         });
         writers->push_back(resources);
-        GuestMemory::BreakProofs();
+        GuestMemory::BreakProofs(ProofBreakSite::CopiedDrawWriter);
     } else if (completion) {
         if (use != nullptr) recorder.OnComplete([resources, use] { resources->CompleteDrawUse(*use); });
         else if (resources->Reusable()) recorder.OnComplete([resources] { resources->CheckFaults(); });
@@ -3992,7 +4021,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
                 // (GuestMemory::BumpCollectEpoch: ordering points of the queue, or every packet under
                 // APS5_PACKET_EPOCH=1); the key scan runs on every lookup regardless. Lookups of a
                 // millisecond or more are counted apart; the [texture] line says how many uploaded.
-                binding.resident = refreshResidentTarget(context, state, color, outcome, profile, [&] {
+                binding.resident = refreshResidentTarget(context, state, color, outcome, profile, DrawProfileCount::TargetMemoMiss, [&] {
                     if (color.arrayLastSlice != 0) {
                         Require(color.dccAddress == 0 && color.cmaskAddress == 0 && AttachmentProxyFormat(context, color.format) == VK_FORMAT_UNDEFINED, "a slice of a 2D array color target with DCC, CMASK or an attachment proxy has no resident array image");
                         const auto array = ArraySurfaceForTarget(color);
@@ -4167,7 +4196,7 @@ bool prepareDraw(const Context& context, const State& state, const Pm4::DrawPara
         auto& binding = targets[index];
         if (binding.color.partialWriteMask == 0 || binding.multisampled || binding.resident == nullptr || binding.proxied || storesIntoResident(*resources, *binding.resident)) continue;
         const auto& color = binding.color;
-        binding.resident = refreshResidentTarget(context, state, color, outcome, profile, [&] { return color.arrayLastSlice != 0 ? CachedStorageLayers(context, ArraySurfaceForTarget(color), color.arraySlice, color.layers) : CachedStorageSurface(context, SurfaceForTarget(color)); });
+        binding.resident = refreshResidentTarget(context, state, color, outcome, profile, DrawProfileCount::TargetPartialMask, [&] { return color.arrayLastSlice != 0 ? CachedStorageLayers(context, ArraySurfaceForTarget(color), color.arraySlice, color.layers) : CachedStorageSurface(context, SurfaceForTarget(color)); });
         if (binding.resident != nullptr) targetViews[index] = binding.resident->AttachmentView(color.format, color.mip, color.depthSlice, color.layers, color.arraySlice);
     }
     if (!stencilReferences.empty() && resources->ChecksFaults()) recordable = false;
@@ -4999,7 +5028,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
         if (state.colors[index].fmaskAddress != 0) GuardOneFragmentFmask(context, state.colors[index]);
         auto stored = recipe.targets[index].lock();
         if (stored == nullptr || !StorageImageCached(context, stored.get()) || !StorageImageServesKeys(*stored, SurfaceForTarget(state.colors[index]).dccAddress)) return miss(DrawRecipeMiss::TargetGone);
-        auto resident = refreshResidentTarget(context, state, state.colors[index], outcome, profile, [&] {
+        auto resident = refreshResidentTarget(context, state, state.colors[index], outcome, profile, DrawProfileCount::TargetRecipe, [&] {
             if (state.colors[index].arrayLastSlice != 0) stored->RefreshLayers(state.colors[index].arraySlice, state.colors[index].layers);
             else stored->Refresh();
             return stored;
