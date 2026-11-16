@@ -596,3 +596,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | New method: per-draw phase costs | tools/perdraw.py | - | per-draw costs from profile; untouched phases vary ~3-5% run to run (vs ~15% for presents) | every run profiled from now; keep = target phase drops beyond spread, no other phase rises |
 | readTarget keep re-check | 9efb017563 | run1020 profile | depth-storage lookup was only 7.9 ms/10 s before the change: +3.6% was noise | stays (exact, harmless) but not a real win |
 | Next round started | ideas/SUMMARY.md | - | Sol: diag/sb6-prof2 counters; agents: perf/sb6-proofs, perf/sb6-cmdbuf; env tests runs 1070-1075 | running |
+| cmdbuf recycle + draw set pool sizes once | 8835592384/65c5e64392 (perf/sb6-cmdbuf) | chain-cmdbuf | unbuilt; switches APS5_NO_COMMAND_BUFFER_RECYCLE, APS5_NO_DRAW_SET_PLAN | queued after env runs: prof 1080-1083 |
