@@ -177,7 +177,7 @@ void CountDrawSkip(DrawSkip kind, double us);
 // cleaner still, State::copiedWriters can become this list (one registry for both producers), after
 // which the switch can turn into APS5_NO_RECORD_COPIED_DRAWS. Until then such draws are recorded and
 // waited for at once. Read and written under GuestMemory::GpuMutex, like the device's list.
-std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>> DrawCopiedWriters();
+const std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>>& DrawCopiedWriters();
 
 void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass);
 std::vector<std::pair<std::uint64_t, std::uint64_t>> PipelinedColorMetadataPassWrites(const ColorMetadataPass& pass);

@@ -4136,7 +4136,7 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
     if (bytes == 0 || Recorder::InCompletion()) return false;
     auto* recorder = Recorder::Active();
     if (recorder == nullptr) return false;
-    const auto drawWriters = DrawCopiedWriters();
+    const auto& drawWriters = DrawCopiedWriters();
     const bool labels = Recorder::PendingCompletionLabels() != 0;
     if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && !labels) return false;
     if (!recorder->PendingWriteOverlaps(address, bytes)) return false;
@@ -7136,7 +7136,7 @@ bool ShaderResources::movedInPlace(Recorder& recorder, const Allocation& item, s
     if (recorder.PendingLabelIn(begin, length) || recorder.QueuedStoreOverlaps(begin, length)) return refuse();
     const auto overlaps = [&](const auto& writer) { return writer->WritesOverlap(begin, length); };
     if (context.copiedWriters != nullptr && std::any_of(context.copiedWriters->begin(), context.copiedWriters->end(), overlaps)) return refuse();
-    const auto drawWriters = DrawCopiedWriters();
+    const auto& drawWriters = DrawCopiedWriters();
     if (std::any_of(drawWriters->begin(), drawWriters->end(), overlaps)) return refuse();
     entry.inPlace = import->buffer;
     entry.inPlaceOffset = offset - adjustment;

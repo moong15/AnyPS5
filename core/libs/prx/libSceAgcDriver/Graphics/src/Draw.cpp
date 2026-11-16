@@ -1362,7 +1362,7 @@ MeshArguments ResolveMeshArguments(const Pm4::DrawArguments& record, const MeshA
     return {groups, groups != 0 ? record.instances : 0u, groups != 0 ? 1u : 0u, effective, first};
 }
 
-std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>> DrawCopiedWriters() {
+const std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>>& DrawCopiedWriters() {
     // Never destroyed: a completion action of a batch still in flight at static teardown may erase from it.
     static auto* const writers = new std::shared_ptr<std::vector<std::shared_ptr<ShaderResources>>>(std::make_shared<std::vector<std::shared_ptr<ShaderResources>>>());
     return *writers;
@@ -1585,7 +1585,7 @@ const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address
     if (recorder->PendingLabelIn(address, bytes) || recorder->QueuedStoreOverlaps(address, bytes)) return nullptr;
     const auto overlaps = [&](const auto& writer) { return writer->WritesOverlap(address, bytes); };
     if (context.copiedWriters != nullptr && std::any_of(context.copiedWriters->begin(), context.copiedWriters->end(), overlaps)) return nullptr;
-    const auto drawWriters = DrawCopiedWriters();
+    const auto& drawWriters = DrawCopiedWriters();
     if (std::any_of(drawWriters->begin(), drawWriters->end(), overlaps)) return nullptr;
     const auto* import = HostImportFor(context, address, bytes);
     if (import == nullptr || HostImportOffset(*import, address) % alignment != 0) return nullptr;
