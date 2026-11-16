@@ -597,3 +597,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | readTarget keep re-check | 9efb017563 | run1020 profile | depth-storage lookup was only 7.9 ms/10 s before the change: +3.6% was noise | stays (exact, harmless) but not a real win |
 | Next round started | ideas/SUMMARY.md | - | Sol: diag/sb6-prof2 counters; agents: perf/sb6-proofs, perf/sb6-cmdbuf; env tests runs 1070-1075 | running |
 | cmdbuf recycle + draw set pool sizes once | 8835592384/65c5e64392 (perf/sb6-cmdbuf) | chain-cmdbuf | unbuilt; switches APS5_NO_COMMAND_BUFFER_RECYCLE, APS5_NO_DRAW_SET_PLAN | queued after env runs: prof 1080-1083 |
+| proofs: batched moved-buffer proofs, indexed ScanPending, copied-writers by ref, memo-hit counter profile-only | 825e8e387a/8d92be8f73/2d61be511c/be400e1a4b (perf/sb6-proofs) | chain-proofs | unbuilt; switches APS5_NO_BATCHED_MOVED_PROOFS, APS5_NO_INDEXED_PENDING_SCAN | queued after cmdbuf: prof 1090-1093 |
