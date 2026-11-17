@@ -605,3 +605,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | perf/sb6m rebase done | bf985adfd5 on main 894d3a84f0 | Sol | 15 kept, 2 skipped (pending collect memo + attachment reuse: main has newer); 2 test call sites fixed | chain-sb6m: build/test/relink/warm 1110, runs 1111 (prof) 1112 |
 | Move prof/cmdbuf/proofs onto sb6m | diag/sb6m-prof, perf/sb6m-cmdbuf, perf/sb6m-proofs | Sol | - | running |
 | Branches moved onto sb6m | diag/sb6m-prof 2cee680698, perf/sb6m-cmdbuf 35bcd6bf72, perf/sb6m-proofs 7c29b5e990 | Sol | all clean/resolved, none skipped | queue-1117b: after sb6m -> prof base 1113/1114 -> m-cmdbuf 1120-1123 -> m-proofs 1130-1133 |
+| perf/sb6m tests | bf985adfd5 | chain-sb6m | 235/238: agc_driver_target_memo + our depth_storage_index_enabled/disabled fail (main 894d3a84f0 passes target_memo, 66/66) | Sol fixing on sb6m |
