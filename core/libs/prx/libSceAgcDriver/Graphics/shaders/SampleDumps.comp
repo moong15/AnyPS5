@@ -2,7 +2,7 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-layout(local_size_x = 1) in;
+layout(local_size_x = 256) in;
 layout(buffer_reference, std430, buffer_reference_align = 8) buffer Words { uint words[]; };
 layout(push_constant) uniform Parameters {
     Words counter;
@@ -14,30 +14,96 @@ layout(push_constant) uniform Parameters {
     uint phase;
 } parameters;
 
+const uint Threads = 256u;
+const uint PerThread = 4u;
+const uint Capacity = Threads * PerThread;
+
+shared uvec2 base;
+shared uint chunkEnds[Threads];
+shared uvec2 chunkSums[Threads];
+shared uint ends[Capacity];
+shared uvec2 prefix[Capacity];
+
+uvec2 add64(uvec2 left, uvec2 right) {
+    uint carry;
+    uint low = uaddCarry(left.x, right.x, carry);
+    return uvec2(low, left.y + right.y + carry);
+}
+
+uvec2 totalAt(uint end) {
+    uint first = parameters.firstSegment;
+    return end > first ? add64(base, prefix[end - first - 1u]) : base;
+}
+
 void main() {
-    uint low = parameters.counter.words[0];
-    uint high = parameters.counter.words[1];
-    uint segment = parameters.firstSegment;
-    for (uint dump = parameters.firstDump; dump < parameters.firstDump + parameters.dumpCount; ++dump) {
-        uint end = parameters.dumps.words[dump * 4u + 2u];
-        for (; segment < end; ++segment) {
-            uint carry;
-            low = uaddCarry(low, parameters.counter.words[4u + 2u * segment], carry);
-            high = high + parameters.counter.words[5u + 2u * segment] + carry;
+    uint thread = gl_LocalInvocationID.x;
+    uint first = parameters.firstSegment;
+    uint dumpCount = parameters.dumpCount;
+    if (thread == 0u) base = uvec2(parameters.counter.words[0], parameters.counter.words[1]);
+
+    uint running = first;
+    for (uint i = 0u; i < PerThread; ++i) {
+        uint dump = thread * PerThread + i;
+        if (dump < dumpCount) {
+            running = max(running, parameters.dumps.words[(parameters.firstDump + dump) * 4u + 2u]);
+            ends[dump] = running;
         }
-        Words target = Words(uvec2(parameters.dumps.words[dump * 4u], parameters.dumps.words[dump * 4u + 1u]));
+    }
+    chunkEnds[thread] = running;
+    for (uint offset = 1u; offset < Threads; offset <<= 1u) {
+        barrier();
+        uint value = thread >= offset ? max(chunkEnds[thread], chunkEnds[thread - offset]) : chunkEnds[thread];
+        barrier();
+        chunkEnds[thread] = value;
+    }
+    barrier();
+    uint before = thread == 0u ? first : chunkEnds[thread - 1u];
+    for (uint i = 0u; i < PerThread; ++i) {
+        uint dump = thread * PerThread + i;
+        if (dump < dumpCount) ends[dump] = max(ends[dump], before);
+    }
+    barrier();
+
+    uint limit = dumpCount != 0u ? ends[dumpCount - 1u] : first;
+    bool storesCounter = parameters.phase == 2u || dumpCount == 0u;
+    if (storesCounter) limit = max(limit, parameters.lastSegment);
+    uint count = limit - first;
+
+    uvec2 local[PerThread];
+    uvec2 sum = uvec2(0u);
+    for (uint i = 0u; i < PerThread; ++i) {
+        uint index = thread * PerThread + i;
+        if (index < count) {
+            uint segment = first + index;
+            sum = add64(sum, uvec2(parameters.counter.words[4u + 2u * segment], parameters.counter.words[5u + 2u * segment]));
+        }
+        local[i] = sum;
+    }
+    chunkSums[thread] = sum;
+    for (uint offset = 1u; offset < Threads; offset <<= 1u) {
+        barrier();
+        uvec2 value = thread >= offset ? add64(chunkSums[thread - offset], chunkSums[thread]) : chunkSums[thread];
+        barrier();
+        chunkSums[thread] = value;
+    }
+    barrier();
+    uvec2 earlier = thread == 0u ? uvec2(0u) : chunkSums[thread - 1u];
+    for (uint i = 0u; i < PerThread; ++i) prefix[thread * PerThread + i] = add64(earlier, local[i]);
+    barrier();
+
+    if (thread != 0u) return;
+    for (uint dump = 0u; dump < dumpCount; ++dump) {
+        uint entry = (parameters.firstDump + dump) * 4u;
+        uvec2 total = totalAt(ends[dump]);
+        Words target = Words(uvec2(parameters.dumps.words[entry], parameters.dumps.words[entry + 1u]));
         for (uint db = 0u; db < 16u; ++db) {
-            if (parameters.phase == 0u) target.words[db * 4u + 1u] = db == 0u ? (high & 0x7fffffffu) : 0u;
-            else if (parameters.phase == 1u) target.words[db * 4u] = db == 0u ? low : 0u;
-            else target.words[db * 4u + 1u] = (db == 0u ? high : 0u) | 0x80000000u;
+            if (parameters.phase == 0u) target.words[db * 4u + 1u] = db == 0u ? (total.y & 0x7fffffffu) : 0u;
+            else if (parameters.phase == 1u) target.words[db * 4u] = db == 0u ? total.x : 0u;
+            else target.words[db * 4u + 1u] = (db == 0u ? total.y : 0u) | 0x80000000u;
         }
     }
-    if (parameters.phase != 2u && parameters.dumpCount != 0u) return;
-    for (; segment < parameters.lastSegment; ++segment) {
-        uint carry;
-        low = uaddCarry(low, parameters.counter.words[4u + 2u * segment], carry);
-        high = high + parameters.counter.words[5u + 2u * segment] + carry;
-    }
-    parameters.counter.words[0] = low;
-    parameters.counter.words[1] = high;
+    if (!storesCounter) return;
+    uvec2 total = totalAt(limit);
+    parameters.counter.words[0] = total.x;
+    parameters.counter.words[1] = total.y;
 }
