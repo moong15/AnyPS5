@@ -604,3 +604,4 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Rebase stack onto latest main | perf/sb6m in E:\AnyPS5-sb6m (base 894d3a84f0, +2548 commits since 80fa4d510e) | Sol | 6/17 applied (1 cmake conflict resolved), ShaderResources.cpp conflict | Sol finishing; then build/test, re-base subprof/prof2/cmdbuf/proofs on it |
 | perf/sb6m rebase done | bf985adfd5 on main 894d3a84f0 | Sol | 15 kept, 2 skipped (pending collect memo + attachment reuse: main has newer); 2 test call sites fixed | chain-sb6m: build/test/relink/warm 1110, runs 1111 (prof) 1112 |
 | Move prof/cmdbuf/proofs onto sb6m | diag/sb6m-prof, perf/sb6m-cmdbuf, perf/sb6m-proofs | Sol | - | running |
+| Branches moved onto sb6m | diag/sb6m-prof 2cee680698, perf/sb6m-cmdbuf 35bcd6bf72, perf/sb6m-proofs 7c29b5e990 | Sol | all clean/resolved, none skipped | queue-1117b: after sb6m -> prof base 1113/1114 -> m-cmdbuf 1120-1123 -> m-proofs 1130-1133 |
