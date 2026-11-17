@@ -627,3 +627,5 @@ Index ring trace (15e55f578, APS5_TRACE_INDEX_BASE=ring); long-wait logging (f9e
 | Design: GPU draws (agent xhigh) | read-only | ideas/gpu-draws.md | occlusion fold ~9.7 ms/frame GPU (SampleDumps.comp single thread); ~220 passes/frame, 15 of 21 ms in ~50 heavy passes; idle 22 ms/frame (4.5 CPU syncs, ~17 committer feed) | fold fix built |
 | Design: GPU compute (agent xhigh, Astra out of quota) | read-only | ideas/gpu-compute.md | compute 16.6 ms/frame; hot shader 3.87 ms is translation overhead (NaN checks, sin, ballots); atomic fences; typed-buffer helper switch; per-dispatch trailing barrier 1.2 ms | probes queued |
 | Parallel occlusion fold | perf/sb6m-dumpscan 72be3a8ff7 | chain-dumpscan 1160-1163 | agc_sample_dumps pass, 0 VUID; runs pending | - |
+| Parallel occlusion fold (verdict) | perf/sb6m-dumpscan 72be3a8ff7 | chain-dumpscan 1160-1163 | GPU busy 59.6/59.9 vs 60.4/61.6, idle 19.8/24.4 vs 23.2/24.7, frames 1108/1066 vs 1088/1064 | NOT KEPT (within spread; recheck label-run class with APS5_PROFILE_GPU) |
+| Exact region flush | perf/sb6m-regionflush 61acbe9a6c + tests a4fcaeed13 | chain-regionflush 1170-1173 | running at session pause | - |
