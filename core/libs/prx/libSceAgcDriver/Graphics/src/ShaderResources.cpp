@@ -4151,6 +4151,19 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
     return false;
 }
 
+bool PendingCpuWritesOverlap(const Context& context, std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || Recorder::InCompletion()) return false;
+    auto* recorder = Recorder::Active();
+    if (recorder == nullptr) return false;
+    const auto& drawWriters = DrawCopiedWriters();
+    const bool labels = Recorder::PendingCompletionLabels() != 0;
+    if ((context.copiedWriters == nullptr || context.copiedWriters->empty()) && drawWriters->empty() && !labels) return false;
+    const auto overlaps = [&](const auto& writers) {
+        return std::any_of(writers.begin(), writers.end(), [&](const auto& writer) { return writer->CopiedWritesOverlap(address, bytes); });
+    };
+    return (context.copiedWriters != nullptr && overlaps(*context.copiedWriters)) || overlaps(*drawWriters) || (labels && recorder->CompletionLabelIn(address, bytes));
+}
+
 const ShaderRecompiler::DescriptorBinding* ShaderResources::tableImages(std::span<const CompiledShader> shaders, ShaderRecompiler::ShaderStage stage) {
     for (const auto& shader : shaders) {
         if (shader.stage != stage || shader.program == nullptr) continue;
@@ -4806,6 +4819,9 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
         return true;
     };
     DrawSubprofileScope pendingPhase(DrawProfileOp::PendingWrites);
+    bool regionSkipped = false;
+    {
+    StorageTexture::RegionFlushScope regionFlush;
     if (EpochRevalidate()) {
         if ((!directRegions.empty() || !guestMemory.Writes().empty()) && !(pendingSerialSeen != 0 && pendingSerialSeen == StorageTexture::PendingSerial())) {
             struct RegionsTag {};
@@ -4830,6 +4846,11 @@ bool ShaderResources::revalidateFull(std::span<const CompiledShader> shaders, Pr
         for (const auto& region : directRegions) StorageTexture::FlushPending(region.begin, static_cast<std::size_t>(region.end - region.begin), nullptr, "imported buffer region");
         for (const auto& [begin, end] : guestMemory.Writes()) StorageTexture::FlushPending(begin, static_cast<std::size_t>(end - begin), nullptr, "written buffer range");
         if (!serialLoop()) return finish(fast, false, ProofFailure::Imports);
+    }
+    regionSkipped = regionFlush.Skipped();
+    }
+    if (regionSkipped && indexBaseline != 0 && !comparedTableSpans.empty()) {
+        if (auto* active = Recorder::Active(); active != nullptr && std::any_of(comparedTableSpans.begin(), comparedTableSpans.end(), [active](const auto& span) { return active->PendingWriteOverlaps(span.first, span.second.size()); })) return finish(fast, false, ProofFailure::Changed);
     }
     // (3) Buffers staged in device memory (GuestBufferMemory::AllowDeviceStaging) are copied in
     // from their imports anew for this use, after the flushes above and before the work is

@@ -220,6 +220,7 @@ void reportStorageTraffic(StorageTraffic& traffic) {
     const auto take = [](std::atomic<std::uint64_t>& counter) { return static_cast<unsigned long long>(counter.exchange(0, std::memory_order_relaxed)); };
     const auto partialUploadCount = take(partialUploads), partialWriteBackCount = take(partialWriteBacks);
     const auto uploadMiB = take(partialUploadBytes) / 1048576.0, writeBackMiB = take(partialWriteBackBytes) / 1048576.0;
+    AgcDriver::ProfilePrint_nid_no_patch("[flushwait] region flushes left to GPU order (10 s): %llu\n", static_cast<unsigned long long>(StorageTexture::TakeRegionFlushSkips()));
     AgcDriver::ProfilePrint_nid_no_patch( "[storage] uploads by path (count/MiB, 10 s):%s; %llu write-backs GPU-direct, %llu stored nothing; block units: partial uploads %llu/%.1f, partial write-backs %llu/%.1f, %llu widened to every pending unit, units dropped %llu, superseded %llu, handed over at %llu clear-key refreshes and %llu image creations (%llu units superseded), dropped unregistered %llu, kept over a key flip %llu%s, pretest skipped %llu, held for a queued draw read %llu, evicted stale %llu; refreshes proved %llu, %llu of them over pending driver key stores (cumulative); drawn linear targets: stores by reason (count/MiB):%s, pending %zu images / %.1f MiB, oldest %.1f ms\n", line.c_str(), static_cast<unsigned long long>(traffic.directWriteBacks), take(emptyWriteBacks), partialUploadCount, uploadMiB, partialWriteBackCount, writeBackMiB, take(coalescedWriteBacks), take(unitsDropped), take(unitsSuperseded), take(clearHandOvers), take(creationHandOvers), take(handedOverSuperseded), take(unregisteredDropped), take(keyFlipKept), ShadowReport().c_str(), take(pretestSkipped), take(queuedReadHeld), take(staleEvicted), static_cast<unsigned long long>(refreshesProved.load(std::memory_order_relaxed)), static_cast<unsigned long long>(refreshesProvedPendingKeys.load(std::memory_order_relaxed)), drawnLine.c_str(), drawn.images, drawn.bytes / 1048576.0, drawn.oldestMs);
     traffic.writeBacks.clear();
     traffic.uploadReasons.clear();
@@ -5313,6 +5314,18 @@ bool& GpuOrderedSkipped() {
     return flag;
 }
 
+bool& RegionFlushArmed() {
+    thread_local bool flag = false;
+    return flag;
+}
+
+bool& RegionFlushSkipped() {
+    thread_local bool flag = false;
+    return flag;
+}
+
+std::atomic<std::uint64_t> regionFlushSkips{0};
+
 }
 
 bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, const StorageTexture* except, const char* reason, PublishScope scope, bool* published, bool waited, VkDevice device) {
@@ -5435,7 +5448,31 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         const auto last = end > top - block ? end : (end + block - 1) / block * block;
         return active.PendingLeaseSerial(first, static_cast<std::size_t>(last - first)) == 0;
     };
-    const bool orderedSkip = GpuOrderedFlush() && orderedRecorder != nullptr && !Recorder::InCompletion() && !flush.empty() && std::all_of(flush.begin(), flush.end(), [orderedRecorder](const std::shared_ptr<StorageTexture>& texture) { return texture->context.device == orderedRecorder->Device() && HostImportFor(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) != nullptr; }) && publishesNothing(*orderedRecorder);
+    static const bool regionOrderedOff = std::getenv("APS5_NO_REGION_FLUSH_GPU_ORDERED") != nullptr;
+    const bool regionReason = reason != nullptr && (std::strcmp(reason, "imported buffer region") == 0 || std::strcmp(reason, "written buffer range") == 0);
+    const auto noCpuLandingWriter = [&](const Recorder& active) {
+        constexpr auto top = std::numeric_limits<std::uint64_t>::max();
+        auto first = address;
+        auto last = bytes > top - address ? top : address + bytes;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> covered;
+        for (const auto& texture : flush) texture->appendStoredLayers(address, bytes, covered);
+        for (const auto& range : LiveShadowedRanges(address, bytes, scope)) covered.push_back(range);
+        for (const auto& [begin, end] : covered) {
+            first = std::min(first, begin);
+            last = std::max(last, end);
+        }
+        constexpr std::uint64_t block = 65536;
+        const auto blockFirst = first / block * block;
+        const auto blockLast = last > top - block ? last : (last + block - 1) / block * block;
+        if (active.PendingLeaseSerial(blockFirst, static_cast<std::size_t>(blockLast - blockFirst)) != 0) return false;
+        return !PendingCpuWritesOverlap(flush.front()->context, first, static_cast<std::size_t>(last - first));
+    };
+    const bool regionSkip = !regionOrderedOff && regionReason && RegionFlushArmed() && orderedRecorder != nullptr && !Recorder::InCompletion() && !flush.empty() && std::all_of(flush.begin(), flush.end(), [orderedRecorder](const std::shared_ptr<StorageTexture>& texture) { return texture->context.device == orderedRecorder->Device() && HostImportFor(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) != nullptr; }) && noCpuLandingWriter(*orderedRecorder);
+    if (regionSkip) {
+        RegionFlushSkipped() = true;
+        regionFlushSkips.fetch_add(1, std::memory_order_relaxed);
+    }
+    const bool orderedSkip = !regionSkip && GpuOrderedFlush() && orderedRecorder != nullptr && !Recorder::InCompletion() && !flush.empty() && std::all_of(flush.begin(), flush.end(), [orderedRecorder](const std::shared_ptr<StorageTexture>& texture) { return texture->context.device == orderedRecorder->Device() && HostImportFor(texture->context, texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes)) != nullptr; }) && publishesNothing(*orderedRecorder);
     if (orderedSkip) {
         GpuOrderedSkipped() = true;
         orderedFlushSkips.fetch_add(1, std::memory_order_relaxed);
@@ -5445,7 +5482,7 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         flushFailureFiredForTest.store(GpuOrderedFlush() ? 2 : 1, std::memory_order_release);
         throw std::runtime_error("StorageTexture::FlushPending: injected failure for a test");
     }
-    if (auto* recorder = Recorder::Active(); !orderedSkip && recorder != nullptr && !Recorder::InCompletion()) {
+    if (auto* recorder = Recorder::Active(); !orderedSkip && !regionSkip && recorder != nullptr && !Recorder::InCompletion()) {
         try {
             static const bool wholeRange = std::getenv("APS5_FLUSH_WAIT_WHOLE_RANGE") != nullptr;
             const bool publishes = !wholeRange && scope != PublishScope::None;
@@ -6432,6 +6469,25 @@ void StorageTexture::SetFlushFailureForTest(bool fail) {
 
 int StorageTexture::TakeFlushFailureForTest() {
     return flushFailureFiredForTest.exchange(0, std::memory_order_acq_rel);
+}
+
+StorageTexture::RegionFlushScope::RegionFlushScope() : previousArmed(RegionFlushArmed()), previousSkipped(RegionFlushSkipped()) {
+    RegionFlushArmed() = true;
+    RegionFlushSkipped() = false;
+}
+
+StorageTexture::RegionFlushScope::~RegionFlushScope() {
+    const bool skipped = RegionFlushSkipped();
+    RegionFlushArmed() = previousArmed;
+    RegionFlushSkipped() = previousSkipped || skipped;
+}
+
+bool StorageTexture::RegionFlushScope::Skipped() const {
+    return RegionFlushSkipped();
+}
+
+std::uint64_t StorageTexture::TakeRegionFlushSkips() {
+    return regionFlushSkips.exchange(0, std::memory_order_relaxed);
 }
 
 bool StorageTexture::OrderedFlushArmedForTest() {

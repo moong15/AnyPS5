@@ -431,6 +431,19 @@ public:
         std::uint64_t refreshes;
     };
     static OrderedSkipCounts TakeOrderedSkipCounts();
+    class RegionFlushScope {
+    public:
+        RegionFlushScope();
+        ~RegionFlushScope();
+        RegionFlushScope(const RegionFlushScope&) = delete;
+        RegionFlushScope& operator=(const RegionFlushScope&) = delete;
+        bool Skipped() const;
+
+    private:
+        bool previousArmed;
+        bool previousSkipped;
+    };
+    static std::uint64_t TakeRegionFlushSkips();
     static void SetFlushFailureForTest(bool fail);
     static int TakeFlushFailureForTest();
     static bool OrderedFlushArmedForTest();
