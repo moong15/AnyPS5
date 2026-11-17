@@ -356,6 +356,9 @@ void RunLookupIndex(Context context, std::uint8_t* block) {
     RunPairings(context, block);
     Recorder recorder(context);
     recorder.Activate();
+    const DepthTarget second{address, address + BlockBytes / 2 + 8192, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 0.5f, 3};
+    const auto view = DepthSurfaceView(context, second);
+    Require(view != VK_NULL_HANDLE, "the newest depth surface has no attachment view");
     const auto newest = DepthSurfaceStorage(context, {}, resource, 0);
     Require(newest != nullptr, "a new depth surface was hidden by an earlier lookup miss");
     for (int repeat = 0; repeat < 4; ++repeat) Require(DepthSurfaceStorage(context, {}, resource, 0) == newest, "a repeated depth lookup changed its storage image");
@@ -367,11 +370,12 @@ void RunLookupIndex(Context context, std::uint8_t* block) {
     Require(DepthSurfaceStorage(context, {}, resource, 0) == newest, "changing the depth storage index switch changed the selected surface");
     RuntimeSwitches::Assign(RuntimeSwitch::NoDepthStorageIndex, disabled);
     const auto serial = DepthSurfacesSerial();
+    const auto releasedBeforeRebind = DepthSurfacesReleased();
     RetireDepthSurfaces(context.device, address, BlockBytes * 2);
     Require(DepthSurfaceStorage(context, {}, resource, 0) == nullptr, "a retired depth surface remained eligible for storage access");
-    const DepthTarget second{address, address + BlockBytes / 2 + 8192, {Side, Side}, VK_FORMAT_D32_SFLOAT_S8_UINT, 0.5f, 3};
-    Require(DepthSurfaceView(context, second) != VK_NULL_HANDLE, "the retired depth surface could not be rebound");
-    Require(DepthSurfacesSerial() == serial, "rebinding the retired depth surface unexpectedly created a surface");
+    Require(DepthSurfaceView(context, second) == view, "rebinding the retired depth surface changed its attachment view");
+    Require(DepthSurfacesSerial() == serial + 1, "rebinding the retired depth surface did not advance its eligibility serial");
+    Require(DepthSurfacesReleased() == releasedBeforeRebind, "rebinding the retired depth surface unexpectedly released a surface");
     Require(DepthSurfaceStorage(context, {}, resource, 0) != nullptr, "a rebound depth surface remained hidden by its retirement");
     RetireDepthSurfaces(context.device, address, BlockBytes * 2);
     const auto released = DepthSurfacesReleased();
