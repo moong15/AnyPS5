@@ -148,7 +148,7 @@ void zero(const Registers& registers, std::uint32_t offset, std::uint32_t mask, 
 
 std::string vteMessage(std::uint32_t viewportControl) {
     std::ostringstream message;
-    message << "AGC graphics: PA_CL_VTE_CNTL=0x" << std::hex << viewportControl << ": expected 0x43f for homogeneous positions and all viewport transforms, or 0 for positions without a viewport transform; other combinations are unsupported";
+    message << "AGC graphics: PA_CL_VTE_CNTL=0x" << std::hex << viewportControl << ": expected 0x43f for homogeneous positions and all viewport transforms; pre-divided coordinates, reciprocal W or disabled transforms are unsupported";
     return message.str();
 }
 
@@ -1798,7 +1798,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     Require(read(cx, 0x2f9) == 0x2du, "nonstandard pixel center or vertex quantization is unsupported");
     if (auto reason = sampleMaskRejection(queue, read(cx, 0x2f8), read(cx, 0x30e), read(cx, 0x30f)); !reason.empty()) throw std::runtime_error(reason);
     const auto viewportControl = read(cx, 0x206);
-    if (viewportControl != 0x43fu && viewportControl != 0u) throw std::runtime_error(vteMessage(viewportControl));
+    if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
     zero(cx, 0x204, ClipControlMask, "a PA_CL_CLIP_CNTL flag");
     result.depthClamp = (read(cx, 0x204) & 0x0c000000u) != 0;
     result.negativeOneToOne = (read(cx, 0x204) & 0x80000u) == 0;
@@ -2691,7 +2691,7 @@ namespace {
 
 bool drawCovers(const Registers& cx, VkExtent2D extent, const ColorTarget* gcnTarget = nullptr) {
     const auto viewportControl = read(cx, 0x206);
-    if (viewportControl != 0x43fu && viewportControl != 0u) throw std::runtime_error(vteMessage(viewportControl));
+    if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
     const auto xs = std::fabs(readFloat(cx, 0x10f));
     const auto xo = readFloat(cx, 0x110);
     const auto ys = std::fabs(readFloat(cx, 0x111));
@@ -2707,7 +2707,7 @@ bool drawCovers(const Registers& cx, VkExtent2D extent, const ColorTarget* gcnTa
     }
     const auto width = static_cast<float>(extent.width);
     const auto height = static_cast<float>(extent.height);
-    const bool viewportCovers = viewportControl == 0u || (xo - xs <= 0.0f && xo + xs >= width && yo - ys <= 0.0f && yo + ys >= height);
+    const bool viewportCovers = xo - xs <= 0.0f && xo + xs >= width && yo - ys <= 0.0f && yo + ys >= height;
     const bool scissorCovers = covered.offset.x == 0 && covered.offset.y == 0 && covered.extent.width >= extent.width && covered.extent.height >= extent.height;
     return viewportCovers && scissorCovers;
 }
@@ -2930,7 +2930,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x2f8, config) && value(cx, 0x30e, word) && value(cx, 0x30f, other)) {
         if (auto reason = sampleMaskRejection(queue, config, word, other); !reason.empty()) return reason;
     }
-    if (value(cx, 0x206, word) && word != 0x43fu && word != 0u) return vteMessage(word);
+    if (value(cx, 0x206, word) && word != 0x43fu) return vteMessage(word);
     if (auto reason = nonzero(cx, 0x204, ClipControlMask, "a PA_CL_CLIP_CNTL flag"); !reason.empty()) return reason;
     std::uint32_t targetMask = 0, shaderMask = 0;
     if (value(cx, 0x8e, targetMask) && value(cx, 0x8f, shaderMask) && value(cx, 0x202, word)) {
