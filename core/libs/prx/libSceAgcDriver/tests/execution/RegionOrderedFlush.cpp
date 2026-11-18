@@ -238,10 +238,11 @@ int main(int argc, char** argv) {
         const Blocks blocks{surface, output, scratch};
         std::uint32_t value = FirstStored;
         static_cast<void>(StorageTexture::TakeRegionFlushSkips());
-        Round(blocks, value++, true, "the first build");
+        const bool leases = mode != Mode::Unimported;
+        Round(blocks, value++, leases, "the first build");
         Require(StorageTexture::TakeRegionFlushSkips() == 0, "region ordered flush: a first build, which reuses no template, skipped a writer wait");
         const auto before = PlainSkips(blocks, value, "plain round");
-        Round(blocks, value++, true, "the round with an address-based store");
+        Round(blocks, value++, leases, "the round with an address-based store");
         const auto leased = StorageTexture::TakeRegionFlushSkips();
         const auto after = PlainSkips(blocks, value, "plain round after the address-based store");
         Require(leased == 0, "region ordered flush: the reused read skipped its writer wait while an address-based dispatch holding a lease over the surface was pending");
